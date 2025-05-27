@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  detector_inference:
+    build:
+      context: ..
+      dockerfile: docker/dockerfile
+    container_name: detector_inference
+    ports:
+      - "6050:6050"
+    volumes:
+      - ../app:/app/app
+      - ../requirements.txt:/app/requirements.txt
+      - ../model_config.json:/app/model_config.json
+      - /root/.config/Ultralytics:/root/.config/Ultralytics
+    environment:
+      - PYTHONPATH=/app
+    command: python -m app.main --host 0.0.0.0 --port 6050 --reload --workers 4 --device cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
+          memory: '32G'
+    shm_size: '16G'
+    restart: unless-stopped
+    networks:
+      - shared_net
+
+networks:
+  shared_net:
+    external: true
