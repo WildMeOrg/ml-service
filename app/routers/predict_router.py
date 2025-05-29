@@ -55,23 +55,6 @@ async def predict(
     
     # Only apply semaphore to the actual prediction
     async with predict_semaphore:
-        results = yolo_handler.predict(model_id, image_bytes)
+        model_response = yolo_handler.predict(model_id, image_bytes)
     
-    results = results[0]
-
-    names = yolo_handler.models[model_id]["model"].names
-
-    bboxes = results.boxes.xywh.tolist()
-    scores = results.boxes.conf.tolist()
-    class_ids = results.boxes.cls.tolist()
-    class_names = [names[class_id] for class_id in class_ids]
-
-    thetas = [0]*len(bboxes)
-
-    return ModelResponse(
-        bboxes=bboxes,
-        scores=scores,
-        thetas=thetas,
-        class_ids=class_ids,
-        class_names=class_names
-    )
+    return model_response
