@@ -34,6 +34,15 @@ if __name__ == "__main__":
 
 @app.on_event("startup")
 async def startup_event():
+    """Initialize the application on startup.
+    
+    This function is called when the FastAPI application starts up. It performs the following actions:
+    1. Creates a YOLO handler instance
+    2. Loads the model configuration from model_config.json
+    3. Initializes and loads all configured models with the specified device
+    
+    The models are stored in the application state and can be accessed via request.app.state.yolo_handler.
+    """
     yolo_handler = YOLOHandler()
     
     import os
