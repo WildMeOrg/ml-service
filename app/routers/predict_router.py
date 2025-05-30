@@ -15,10 +15,12 @@ predict_semaphore = asyncio.Semaphore(N)
 
 from pydantic import BaseModel
 
+def is_url(string):
+    return string.startswith(('http://', 'https://'))
+
 class PredictionRequest(BaseModel):
     model_id: str
-    image_url: Optional[str] = None
-    image_path: Optional[str] = None
+    image_uri: str
 
 @router.post("/")
 async def predict(
@@ -27,25 +29,27 @@ async def predict(
 ):
     logger.info("Received prediction request for model_id: %s", prediction.model_id)
     
-    if not any([prediction.image_url, prediction.image_path]):
-        raise HTTPException(status_code=400, detail="At least one image source (URL or path) must be provided")
-    
+    image_uri = prediction.image_uri.strip()
     image_bytes = None
     
-    if prediction.image_url:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(prediction.image_url)
-        if response.status_code != 200:
-            raise HTTPException(status_code=400, detail="Failed to download image from URL.")
-        image_bytes = response.content
-    
-    elif prediction.image_path:
-        try:
-            image_path = str(Path(prediction.image_path).resolve())
+    try:
+        if is_url(image_uri):
+            async with httpx.AsyncClient() as client:
+                response = await client.get(image_uri)
+            if response.status_code != 200:
+                raise HTTPException(status_code=400, detail=f"Failed to download image from URL: {response.status_code}")
+            image_bytes = response.content
+            logger.info(f"Successfully downloaded image from URL: {image_uri}")
+        else:
+            # Handle as file path
+            image_path = str(Path(image_uri).expanduser().resolve())
             with open(image_path, 'rb') as f:
                 image_bytes = f.read()
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Failed to load image from path: {str(e)}")
+            logger.info(f"Successfully loaded image from path: {image_path}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to load image from URI '{image_uri}': {str(e)}")
     
     if not image_bytes:
         raise HTTPException(status_code=400, detail="No image data could be loaded.")
