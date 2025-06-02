@@ -1,12 +1,6 @@
 {
     "models": [
         {
-            "model_id": "model1",
-            "model_path": "yolo11n.pt",
-            "imgsz": 512,
-            "conf": 0.5
-        },
-        {
             "model_id": "msv3",
             "model_path": "https://cthulhu.dyn.wildme.io/public/models/detect.yolov11.msv3.pt",
             "imgsz": 640,
