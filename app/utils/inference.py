@@ -36,7 +36,7 @@ def run_inference(image_bytes: bytes, model, device: str, imgsz: int, conf: floa
     results = results[0]
     names = model.names
 
-    dilation_factor = 0.15
+    dilation_factor = 0.15  # 15% dilation
 
     if hasattr(results, 'obb') and results.obb is not None:
         xywhr = results.obb.xywhr.cpu().numpy()
@@ -51,4 +51,24 @@ def run_inference(image_bytes: bytes, model, device: str, imgsz: int, conf: floa
         class_names = [names[class_id] for class_id in class_ids]
 
     elif hasattr(results, 'boxes') and results.boxes is not None:
-        xywh = results.boxes.xywh
+        xywh = results.boxes.xywh.cpu().numpy()
+        bboxes = []
+        for x, y, w, h in xywh:
+            w *= (1 + dilation_factor)
+            h *= (1 + dilation_factor)
+            bboxes.append([x - w / 2, y - h / 2, w, h])
+        thetas = [0.0] * len(bboxes)
+        scores = results.boxes.conf.tolist()
+        class_ids = [int(cls) for cls in results.boxes.cls.tolist()]
+        class_names = [names[class_id] for class_id in class_ids]
+
+    else:
+        return ModelResponse([], [], [], [], [])
+
+    return ModelResponse(
+        bboxes=bboxes,
+        scores=scores,
+        thetas=thetas,
+        class_ids=class_ids,
+        class_names=class_names
+    )
