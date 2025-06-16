@@ -1,6 +1,13 @@
 from ultralytics import YOLO
-from .inference import run_inference
+from .inference import run_inference, draw_one
 import logging
+
+from torch.utils.data import DataLoader
+import numpy as np
+from PIL import Image
+import torch
+import torchvision.transforms as transforms
+from transformers import AutoModel
 
 logger = logging.getLogger(__name__)
 
@@ -73,3 +80,14 @@ class YOLOHandler:
         conf = model_info["conf"]
         
         return run_inference(image_bytes, model, model.device, imgsz, conf)
+
+    
+    def explain(self, test_loader: DataLoader, model_id: str, crop_bbox: bool, visualization_type: str, k_lines: int, k_colors: int):
+        if model_id not in self.models:
+            raise ValueError(f"Model with ID {model_id} not loaded.")
+        #currently just using miewid3
+        model_tag = f"conservationxlabs/miewid-msv3"
+        model = AutoModel.from_pretrained(model_tag, trust_remote_code=True)
+
+        return draw_one("cpu", test_loader, model, crop_bbox, visualization_type, "backbone.blocks.3", k_lines, k_colors) 
+            
