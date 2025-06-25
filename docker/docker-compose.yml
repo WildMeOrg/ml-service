@@ -11,7 +11,7 @@ services:
     volumes:
       - ../app:/app/app
       - ../requirements.txt:/app/requirements.txt
-      - ../model_config.json:/app/model_config.json:ro
+      - ../app/model_config.json:/app/model_config.json:ro
       - ultralytics_config:/root/.config/Ultralytics
     environment:
       - PYTHONPATH=/app
