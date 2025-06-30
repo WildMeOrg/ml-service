@@ -82,9 +82,9 @@ class YOLOHandler:
         return run_inference(image_bytes, model, model.device, imgsz, conf)
 
     
-    def explain(self, test_loader: DataLoader, model_id: str, crop_bbox: bool, visualization_type: str, k_lines: int, k_colors: int):
-        if model_id not in self.models:
-            raise ValueError(f"Model with ID {model_id} not loaded.")
+    def explain(self, test_loader: DataLoader, model_id: str, device: str, crop_bbox: bool, visualization_type: str, layer_key: str, k_lines: int, k_colors: int):
+        #if model_id not in self.models:
+        #    raise ValueError(f"Model with ID {model_id} not loaded.")
         #currently just using miewid3
         model_tag = f"conservationxlabs/miewid-msv3"
         model = AutoModel.from_pretrained(model_tag, trust_remote_code=True)

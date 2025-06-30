@@ -122,8 +122,11 @@ def draw_one(
     pretransform_images = []
 
     # get transformed and untransformed images out of test_loader
+
     for batch in test_loader:
-        (transformed_image,), _, (path,), (bbox,), (theta,) = batch[:5]
+        (transformed_image,), _, (path,) = batch[:3]
+        bbox = batch[3]
+        (theta,) = batch[4]
 
         if len(transformed_image.shape) == 3:
             transformed_image = transformed_image.unsqueeze(0)
@@ -148,7 +151,7 @@ def draw_one(
 
     # generate explanation image and return
     model.eval()
-    model.device = device
+    #model.device = device
     pairx_img = explain(
         img_0,
         img_1,
@@ -160,6 +163,7 @@ def draw_one(
         k_colors=k_colors,
     )
 
+    pairx_img = pairx_img[0] #pairx returns a list of images, what are the others??
     pairx_height = pairx_img.shape[0] // 2
 
     if visualization_type == "only_lines":

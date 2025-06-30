@@ -9,6 +9,8 @@ import torch
 from torch.utils.data import DataLoader
 import cv2
 from pydantic import BaseModel
+import torchvision.transforms as transforms
+from PIL import Image
 
 
 logger = logging.getLogger(__name__)
@@ -22,20 +24,21 @@ def is_url(string):
     return string.startswith(('http://', 'https://'))
 
 class body(BaseModel):
-    path1: str
+    image1_uri: str
     name1: str
-    bb1: list[int]
-    theta1: float
-    path1: str
-    name1: str
-    bb2: list[int]
-    theta2: float
+    bb1: list[float]
+    theta1: float = 0.0
+    image2_uri: str
+    name2: str
+    bb2: list[float]
+    theta2: float = 0.0
     model_id: str
     crop_bbox: bool = False
     visualization_type: str = "lines_and_colors"
     layer_key: str = "backbone.blocks.3"
     k_lines: int = 20
     k_colors: int = 10
+    device: str = "cpu"
 
 @router.post("/")
 async def read_items(
@@ -57,15 +60,15 @@ async def read_items(
         else:
             # Handle as file path
             image1_path = str(Path(image1_uri).expanduser().resolve())
-            with open(image1_path, 'rb') as f:
-                image1_bytes = f.read()
+            image1_bytes = cv2.imread(image1_path)
+            image1_bytes = cv2.cvtColor(image1_bytes, cv2.COLOR_BGR2RGB)
             logger.info(f"Successfully loaded image from path: {image1_path}")
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to load image from URI '{image1_uri}': {str(e)}")
     
-    image2_uri = body.image1_uri.strip()
+    image2_uri = body.image2_uri.strip()
     image2_bytes = None
     
     
@@ -80,8 +83,8 @@ async def read_items(
         else:
             # Handle as file path
             image2_path = str(Path(image2_uri).expanduser().resolve())
-            with open(image2_path, 'rb') as f:
-                image2_bytes = f.read()
+            image2_bytes = cv2.imread(image2_path)
+            image2_bytes = cv2.cvtColor(image2_bytes, cv2.COLOR_BGR2RGB)
             logger.info(f"Successfully loaded image from path: {image2_path}")
     except HTTPException:
         raise
@@ -93,12 +96,12 @@ async def read_items(
         raise HTTPException(status_code=400, detail=f"Bad bounding box 1")
     if len(body.bb2) != 4:
         raise HTTPException(status_code=400, detail=f"Bad bounding box 2")
-    for x in body.bb1:
-        if x < 0:
-            raise HTTPException(status_code=400, detail=f"Bad bounding box 1")
-    for x in body.bb2:
-        if x < 0:
-            raise HTTPException(status_code=400, detail=f"Bad bounding box 2")
+    #for x in body.bb1:
+    #    if x < 0:
+    #        raise HTTPException(status_code=400, detail=f"Bad bounding box 1")
+    #for x in body.bb2:
+    #    if x < 0:
+    #        raise HTTPException(status_code=400, detail=f"Bad bounding box 2")
     if body.k_lines < 0:
         raise HTTPException(status_code=400, detail=f"K Lines must be positive")
     if body.k_lines > 99:
@@ -108,16 +111,23 @@ async def read_items(
     if body.k_colors > 99:
         raise HTTPException(status_code=400, detail=f"K Colors must be less than 100")
 
+    preprocess = transforms.Compose([
+        transforms.Resize((440, 440)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
 
+    image1 = preprocess(Image.fromarray(image1_bytes))
+    image2 = preprocess(Image.fromarray(image2_bytes))
 
     yolo_handler = request.app.state.yolo_handler
 
-    data = [[image1_bytes, "a", image1_path, body.bb1, body.theta1], [image2_bytes, "a", image2_path, body.bb2, body.theta2]]
+    data = [[image1, "a", image1_path, body.bb1, body.theta1], [image2, "a", image2_path, body.bb2, body.theta2]]
     test_loader = DataLoader(data, batch_size=1, shuffle=False)
     
     # Only apply semaphore to the actual prediction
     async with explain_semaphore:
-        model_response = yolo_handler.explain(test_loader, body.model_id, body.crop_bbox, body.visualization_type, body.layer_key, body.k_lines, body.k_colors)
+        model_response = yolo_handler.explain(test_loader, body.model_id, body.device, body.crop_bbox, body.visualization_type, body.layer_key, body.k_lines, body.k_colors)
 
     cv2.imwrite("response.png", model_response)
-    return model_response
+    return {'path': 'response.png'}
