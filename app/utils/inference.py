@@ -80,8 +80,8 @@ import torchvision.transforms as transforms
 from PIL import Image
 import numpy as np
 
-from .pairx.core import explain
-from .pairx.xai_dataset import XAIDataset
+from .pairx_modified.core import explain
+from .pairx_modified.xai_dataset import XAIDataset
 from .helpers import get_chip_from_img, load_image
 
 
