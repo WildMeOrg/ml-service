@@ -60,7 +60,8 @@ async def startup_event():
             model_path=model_cfg["model_path"],
             imgsz=model_cfg["imgsz"],
             conf=model_cfg["conf"],
-            device=device
+            device=device,
+            dilation_factors=model_cfg.get("dilation_factors")
         )
     
     app.state.yolo_handler = yolo_handler

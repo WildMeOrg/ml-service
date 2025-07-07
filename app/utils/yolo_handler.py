@@ -20,7 +20,7 @@ class YOLOHandler:
         """Initialize the YOLOHandler with an empty models dictionary."""
         self.models = {}
 
-    def load_model(self, model_id: str, model_path: str, device: str, imgsz: int = 640, conf: float = 0.25) -> None:
+    def load_model(self, model_id: str, model_path: str, device: str, imgsz: int = 640, conf: float = 0.25, dilation_factors: list = None) -> None:
         """Load a YOLO model with specified parameters.
 
         This method loads a YOLO model from the given path, moves it to the specified
@@ -32,18 +32,25 @@ class YOLOHandler:
             device (str): Device to load the model on. Can be 'cpu', 'cuda', 'mps', etc.
             imgsz (int, optional): Default image size for inference. Defaults to 640.
             conf (float, optional): Default confidence threshold for detections (0-1). Defaults to 0.25.
+            dilation_factors (list, optional): Dilation factors for long and short edges [long_edge_dil, short_edge_dil].
+                                            Defaults to [0, 0] if not specified.
             
         Raises:
             FileNotFoundError: If the model file does not exist at the specified path.
             RuntimeError: If there is an error loading the model.
         """
-        logger.info("Loading model with ID: %s, path: %s, device: %s, image size: %d, confidence: %.2f", model_id, model_path, device, imgsz, conf)
+        if dilation_factors is None:
+            dilation_factors = [0, 0]
+            
+        logger.info("Loading model with ID: %s, path: %s, device: %s, image size: %d, confidence: %.2f, dilation_factors: %s", 
+                  model_id, model_path, device, imgsz, conf, dilation_factors)
         model = YOLO(model_path)
         model.to(device)
         self.models[model_id] = {
             "model": model,
             "imgsz": imgsz,
-            "conf": conf
+            "conf": conf,
+            "dilation_factors": dilation_factors
         }
 
     def predict(self, model_id: str, image_bytes: bytes) -> 'ModelResponse':
@@ -71,5 +78,6 @@ class YOLOHandler:
         model = model_info["model"]
         imgsz = model_info["imgsz"]
         conf = model_info["conf"]
+        dilation_factors = model_info["dilation_factors"]
         
-        return run_inference(image_bytes, model, model.device, imgsz, conf)
+        return run_inference(image_bytes, model, model.device, imgsz, conf, dilation_factors)
