@@ -20,7 +20,7 @@
         },
         {  
             "model_id": "obb-whale-v3",
-            "model_path": "https://cthulhu.dyn.wildme.io/public/models/detector.yolo11m_obb.whale_v3.pt",
+            "model_path": "https://cthulhu.dyn.wildme.io/public/models/detector.yolo11m_obb.bowhead_whale_v3.pt",
             "imgsz": 640,
             "conf": 0.5,
             "dilation_factors": [0.3, 0.2]
