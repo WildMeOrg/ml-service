@@ -34,7 +34,7 @@
             "model_type": "megadetector",
             "model_path": "https://cthulhu.dyn.wildme.io/public/models/mdv6-yolov9-c.pt",
             "version": "MDV6-yolov9-c",
-            "conf": 0.5
+            "conf": 0.3
         }
     ]
 }
