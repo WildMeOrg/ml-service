@@ -89,5 +89,5 @@ class YOLOHandler:
         model_tag = f"conservationxlabs/miewid-msv3"
         model = AutoModel.from_pretrained(model_tag, trust_remote_code=True)
 
-        return draw_one("cpu", test_loader, model, crop_bbox, visualization_type, "backbone.blocks.3", k_lines, k_colors) 
+        return draw_one("cuda", test_loader, model, crop_bbox, visualization_type, "backbone.blocks.3", k_lines, k_colors) 
             

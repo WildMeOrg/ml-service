@@ -80,8 +80,8 @@ import torchvision.transforms as transforms
 from PIL import Image
 import numpy as np
 
-from .pairx_modified.core import explain
-from .pairx_modified.xai_dataset import XAIDataset
+from .pairx.core import explain
+from .pairx.xai_dataset import XAIDataset
 from .helpers import get_chip_from_img, load_image
 
 
@@ -111,7 +111,7 @@ def draw_one(
         numpy.ndarray: PAIR-X visualization of type visualization_type.
     """
     assert test_loader.batch_size == 1, "test_loader should have a batch size of 1"
-    assert len(test_loader) == 2, "test_loader should only contain two images"
+    #assert len(test_loader) == 2, "test_loader should only contain two images"
     assert visualization_type in (
         "lines_and_colors",
         "only_lines",
@@ -122,7 +122,12 @@ def draw_one(
     pretransform_images = []
 
     # get transformed and untransformed images out of test_loader
-
+    
+    imgs_0 = []
+    imgs_1 = []
+    imgs_np_0 = []
+    imgs_np_1 = []
+    i = 0
     for batch in test_loader:
         (transformed_image,), _, (path,) = batch[:3]
         bbox = batch[3]
@@ -130,8 +135,10 @@ def draw_one(
 
         if len(transformed_image.shape) == 3:
             transformed_image = transformed_image.unsqueeze(0)
-
-        transformed_images.append(transformed_image.to(device))
+        if i % 2 == 0:
+            imgs_0.append(transformed_image.to(device))
+        else:
+            imgs_1.append(transformed_image.to(device))
 
         img_size = tuple(transformed_image.shape[-2:])
         pretransform_image = load_image(path)
@@ -140,10 +147,12 @@ def draw_one(
             pretransform_image = get_chip_from_img(pretransform_image, bbox, theta)
 
         pretransform_image = np.array(transforms.Resize(img_size)(Image.fromarray(pretransform_image)))
-        pretransform_images.append(pretransform_image)
+        if i % 2 == 0:
+            imgs_np_0.append(pretransform_image)
+        else:
+            imgs_np_1.append(pretransform_image)
+        i += 1
 
-    img_0, img_1 = transformed_images
-    img_np_0, img_np_1 = pretransform_images
 
     # If only returning image with lines, skip generating color maps to save time
     if visualization_type == "only_lines":
@@ -151,18 +160,18 @@ def draw_one(
 
     # generate explanation image and return
     model.eval()
-    #model.device = device
+    model = model.to(device)
     pairx_img = explain(
-        img_0,
-        img_1,
-        img_np_0,
-        img_np_1,
+        torch.cat(imgs_0),
+        torch.cat(imgs_1),
+        imgs_np_0,
+        imgs_np_1,
         model,
         [layer_key],
         k_lines=k_lines,
         k_colors=k_colors,
     )
-
+    
     pairx_img = pairx_img[0] #pairx returns a list of images, what are the others??
     pairx_height = pairx_img.shape[0] // 2
 

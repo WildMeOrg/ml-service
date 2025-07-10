@@ -19,6 +19,7 @@ import matplotlib.cm as cm
 import pickle
 
 
+
 COLORS = ['Grey', 'Purple', 'Blue', 'Green', 'Orange', 'Red']
 CMAPS = ['Greys', 'Purples', 'Blues', 'Greens', 'Oranges', 'Reds']
 
@@ -302,6 +303,7 @@ def explain(img_0, img_1, img_np_0, img_np_1, model, layer_keys, k_lines=10, k_c
     for layer_key in layer_keys:
         matches = pairx_results[layer_key]["matches"]
         intermediate_relevance_0, intermediate_relevance_1 = pairx_results[layer_key]["intermediate_relevances"]
+        print(intermediate_relevance_0)
         pixel_relevances_0, pixel_relevances_1 = pairx_results[layer_key]["pixel_relevances"]
 
         output_images.append(draw_matches_and_color_maps(img_np_0, img_np_1, matches[:k_lines],
