@@ -86,6 +86,11 @@ async def startup_event():
         app.state.model_handler = model_handler
         logger.info("All models loaded successfully")
         
+        # Check if /data/db is accessible
+        db_path = "/data/db"
+        if not os.path.isdir(db_path) or not os.access(db_path, os.W_OK):
+            logger.warning(f"Warning: Database directory {db_path} is not accessible or writable. This may cause issues with accessing image data.")
+        
     except Exception as e:
         logger.error(f"Error during model initialization: {str(e)}")
         raise
