@@ -2,27 +2,44 @@
     "models": [
         {
             "model_id": "msv3",
+            "model_type": "yolo-ultralytics",
             "model_path": "https://cthulhu.dyn.wildme.io/public/models/detect.yolov11.msv3.pt",
             "imgsz": 640,
-            "conf": 0.3
+            "conf": 0.5
         },
         {  
             "model_id": "obb-amphibian",
-            "model_path": "https://cthulhu.dyn.wildme.io/public/models/detector.yolo11m_obb.amphibian.pt",
+            "model_type": "yolo-ultralytics",
+            "model_path": "https://cthulhu.dyn.wildme.io/public/models/detector.yolo11m_abb.amphibian_v2.pt",
             "imgsz": 640,
             "conf": 0.5
         },
         {  
             "model_id": "obb-python",
+            "model_type": "yolo-ultralytics",
             "model_path": "https://cthulhu.dyn.wildme.io/public/models/detector.yolo11m_obb.python.pt",
             "imgsz": 640,
             "conf": 0.5
         },
         {  
-            "model_id": "obb-whale",
-            "model_path": "https://cthulhu.dyn.wildme.io/public/models/detector.yolo11m_obb.bowhead_whale_v2.pt",
+            "model_id": "obb-whale-v4",
+            "model_type": "yolo-ultralytics",
+            "model_path": "https://cthulhu.dyn.wildme.io/public/models/detector.yolo11m_obb.bowhead_whale_v4.pt",
             "imgsz": 640,
-            "conf": 0.5
-        }
+            "conf": 0.5,
+            "dilation_factors": [0.3, 0.2]
+        },
+	{
+            "model_id": "mdv6-yolov9-c",
+            "model_type": "megadetector",
+            "model_path": "https://cthulhu.dyn.wildme.io/public/models/mdv6-yolov9-c.pt",
+            "version": "MDV6-yolov9-c",
+            "conf": 0.3
+        },
+	{
+	    "model_id": "miewid",
+	    "model_type": "miewid",
+	    "imgsz": 440
+	}
     ]
 }
