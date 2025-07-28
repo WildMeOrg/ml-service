@@ -12,8 +12,12 @@ class MiewidModel(BaseModel):
         self.model_info = {}
 
     def load(self, device: str = "cuda", **kwargs) -> None:
-        model_tag = f"conservationxlabs/miewid-msv3"
-        self.model = AutoModel.from_pretrained(model_tag, trust_remote_code=True)
+        if kwargs['version'] == 3:
+            model_tag = f"conservationxlabs/miewid-msv3"
+            self.model = AutoModel.from_pretrained(model_tag, trust_remote_code=True)
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported miewid version.")
+
         self.model.eval()
         self.model.to(device)
 

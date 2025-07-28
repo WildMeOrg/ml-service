@@ -37,9 +37,10 @@
             "conf": 0.3
         },
 	{
-	    "model_id": "miewid",
+	    "model_id": "miewidv3",
 	    "model_type": "miewid",
-	    "imgsz": 440
+	    "imgsz": 440,
+	    "version": 3
 	}
     ]
 }
