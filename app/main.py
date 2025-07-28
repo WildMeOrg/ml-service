@@ -4,7 +4,7 @@ import sys
 import logging
 import argparse
 from fastapi import FastAPI
-from app.routers import predict_router
+from app.routers import predict_router, explain_router
 from app.models.model_handler import ModelHandler
 
 # Configure logging
@@ -24,11 +24,11 @@ app = FastAPI()
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='FastAPI Model Serving Application')
-parser.add_argument('--device', type=str, default='cpu', 
+parser.add_argument('--device', type=str, default='cuda', 
                    help='Device to run the models on (e.g., cpu, cuda, mps)')
 parser.add_argument('--host', type=str, default='0.0.0.0', 
                    help='Host to run the server on')
-parser.add_argument('--port', type=int, default=8000, 
+parser.add_argument('--port', type=int, default=8888, 
                    help='Port to run the server on')
 parser.add_argument('--reload', action='store_true', 
                    help='Enable auto-reload')
@@ -54,7 +54,8 @@ async def startup_event():
     """
     # Initialize model handler
     model_handler = ModelHandler()
-    
+    app.state.device = args.device
+
     try:
         # Load model configuration
         config_path = os.path.join(os.path.dirname(__file__), 'model_config.json')
@@ -96,3 +97,4 @@ async def startup_event():
         raise
 
 app.include_router(predict_router.router)
+app.include_router(explain_router.router)

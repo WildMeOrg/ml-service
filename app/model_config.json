@@ -29,12 +29,17 @@
             "conf": 0.5,
             "dilation_factors": [0.3, 0.2]
         },
-        {  
+	{
             "model_id": "mdv6-yolov9-c",
             "model_type": "megadetector",
             "model_path": "https://cthulhu.dyn.wildme.io/public/models/mdv6-yolov9-c.pt",
             "version": "MDV6-yolov9-c",
             "conf": 0.3
-        }
+        },
+	{
+	    "model_id": "miewid",
+	    "model_type": "miewid",
+	    "imgsz": 440
+	}
     ]
 }

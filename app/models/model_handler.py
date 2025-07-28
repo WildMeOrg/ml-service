@@ -13,7 +13,11 @@ MODEL_REGISTRY = {
     },
     'megadetector': {
         'module': 'app.models.megadetector',
-        'class': 'MegaDetectorModel'
+        'class': 'MegaDetectorModel',
+    },
+    'miewid': {
+        'module': 'app.models.miewid',
+        'class': 'MiewidModel'
     }
     # Add new model types here as they are implemented
 }
@@ -29,7 +33,7 @@ class ModelHandler:
         """Initialize the ModelHandler with an empty models dictionary."""
         self.models = {}
     
-    def load_model(self, model_id: str, model_type: str, model_path: str, 
+    def load_model(self, model_id: str, model_type: str, model_path: str = "", 
                   device: str = 'cpu', **kwargs) -> None:
         """Load a model with the specified parameters.
         
