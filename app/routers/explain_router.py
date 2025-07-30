@@ -22,10 +22,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/explain", tags=["Explain"])
 
 MAX_BATCH_SIZE = 16
-MAX_CONCURRENT_EXPLANATIONS = 1
+MAX_CONCURRENT_EXPLANATIONS = 2
 explain_semaphore = asyncio.Semaphore(MAX_CONCURRENT_EXPLANATIONS)
 
 def is_url(string):
+    """Checks if a string is formatted as a url"""
     return string.startswith(('http://', 'https://'))
 
 async def get_model_handler(request: Request) -> ModelHandler:
@@ -33,8 +34,9 @@ async def get_model_handler(request: Request) -> ModelHandler:
     return request.app.state.model_handler
 
 def preprocess(image, model):
+    """Runs preprocessing on an image based on the model to be used."""
     image = Image.fromarray(image.astype("uint8"))
-    if model == "miewid":
+    if model.lower() == "miewidv3":
         transform = transforms.Compose([
             transforms.Resize((440, 440)),
             transforms.ToTensor(),
@@ -45,16 +47,21 @@ def preprocess(image, model):
     return transform(image)
 
 def extend_bb_list(img_list, bb_list):
+    """Extends a list a bounding boxes to the length of a list of images.
+    Values added mean that no bounding takes place"""
     for x in range(len(img_list) - len(bb_list)):
         bb_list.append([0, 0, 0, 0])
     return bb_list
 
 def extend_theta_list(img_list, theta_list):
+    """Extends a list of thetas to the length of a list of images.
+    Thetas added mean that no rotation takes place"""
     for x in range(len(img_list) - len(theta_list)):
         theta_list.append(0.0)
     return theta_list 
 
 def validate_img_parameters(bbox, theta):
+    """Ensure that a bounding box and theta are valid"""
     if len(bbox) != 4:
         raise HTTPException(status_code=400, detail=f"Each bounding box should have 4 values")
     for x in bbox:
@@ -64,6 +71,7 @@ def validate_img_parameters(bbox, theta):
         raise HTTPException(status_code=400, detail="Theta should be greater than 0")
 
 def validate_vis_parameters(body):
+    """Checks if body parameters related to a specific visualization algorithm are valid."""
     if body.algorithm.lower() == "pairx":
         if body.k_lines < 0:
             raise HTTPException(status_code=400, detail=f"K Lines must be positive")
@@ -75,13 +83,16 @@ def validate_vis_parameters(body):
             raise HTTPException(status_code=400, detail=f"K Colors must be less than 100")
         if body.visualization_type not in ["lines_and_colors", "only_lines", "only_colors"]:
             raise HTTPException(status_code=400, detail="Unsupported visualization type.")
-        possible_models = ["miewid"]
-        if not body.model_id in possible_models:
+        possible_models = ["miewidv3"]
+        if not body.model_id.lower() in possible_models:
             raise HTTPException(status_code=400, detail="Unsupported model for pairx.")
     else:
         raise HTTPException(status_code=400, detail="Unsupported algorithm.")
 
 async def process_image(uri, bbox, theta, crop_bbox, model, device):
+    """Reads image in from uri and generates pretransform and transform images to use for visualiztaion. 
+    If crop_bbox is true, the preptransform image will be cropped. The transformed image will always be cropped.
+    The transformed image will be stored on the device provided, ("cpu", "cuda", etc.)"""
     uri = uri.strip()
     try:
         if is_url(uri):
@@ -112,13 +123,43 @@ async def process_image(uri, bbox, theta, crop_bbox, model, device):
     return image, transformed_image.to(device)
 
 def process_asyncio_result(result):
+    """Processes a result of process_image() when it is run via asyncio."""
     if isinstance(result, Exception):
         raise HTTPException(status_code=400, detail=f"{str(result)}")
     else:
         image, transform = result
         return image, transform
 
-def run_pairx(imgs1_transformed, imgs2_transformed, imgs1, imgs2, model, layer_key, k_lines, k_colors, visualization_type):
+def run_pairx(imgs1_transformed, imgs2_transformed, imgs1, imgs2, model, layer_key, 
+        k_lines, k_colors, visualization_type):
+    """Run PAIR-X on provided images with given parameters.
+        
+        Args:
+            imgs1_transformed: List of transformed images
+            imgs2_transformed: List of transformed images. Length should match imgs1_transformed
+            imgs1: Untransformed counterparts of imgs1_transformed
+            imgs2: Untransformed counterparts of imgs2_transformed
+            model: Actual model to be used rather than model id
+            layer_key: layer within the model to use for feature matching and relevance propagation. 
+                Earlier layer keys lead to visualizations that are focused on very specific points. 
+                Later layer keys lead to visualizations that encompass broad swaths of the image.
+                Layer keys in the middle tend to be preferred qualitatively.
+            k_lines: The number of points on the two images to be matched and connected with lines
+                in the visualization. High values of k lines often lead to clearly erroneous matches,
+                but do not significantly impact performance.
+            k_colors:
+                The number of matches to backpropagate relevance on. Higher values of k_colors make 
+                the algorithm much slower.
+            visualization_type: One of "lines_and_colors", "only_colors", or "only_lines". 
+                "lines_and_colors" yields the entire visualization
+                "only_colors" crops out the half to only show the backpropagated relevances.
+                "only_lines" crops out the bottom half to only show the feature matches.
+            
+        Returns:
+            List of completed visualizations
+    """
+    
+    # There is no reason to do backpropagation if we are not going to display it.
     if visualization_type == "only_lines":
         k_colors = 0
 
@@ -137,6 +178,7 @@ def run_pairx(imgs1_transformed, imgs2_transformed, imgs1, imgs2, model, layer_k
             k_lines=k_lines,
             k_colors=k_colors,
         )
+    # Handle out of memory errors by breaking into two batches and running again
     except Exception as e:
         if e.startsWith("torch.cuda.OutOfMemoryError:"):
             dim_size = imgs1_transformed.shape[0]
@@ -162,13 +204,14 @@ def run_pairx(imgs1_transformed, imgs2_transformed, imgs1, imgs2, model, layer_k
     return toReturn
 
 class body(BaseModel):
+    # API input parameters
     image1_uris: list[str]
     bb1: list[list[float]]
     theta1: list[float] = [0.0]
     image2_uris: list[str]
     bb2: list[list[float]]
     theta2: list[float] = [0.0]
-    model_id: str
+    model_id: str = "miewidv3"
     crop_bbox: bool = False
     visualization_type: str = "lines_and_colors"
     layer_key: str = "backbone.blocks.3"
@@ -197,7 +240,7 @@ async def read_items(
     theta1s = extend_theta_list(body.image1_uris, body.theta1)
     theta2s = extend_theta_list(body.image2_uris, body.theta2)
 
-    # Read in images
+    # Read in images asynchronously
     tasks = []
     for uri, bb, theta in zip(body.image1_uris, bb1s, theta1s):
         tasks.append(process_image(uri, bb, theta, body.crop_bbox, body.model_id, device))
@@ -239,6 +282,7 @@ async def read_items(
             visualizations = run_pairx(image1s_transformed, image2s_transformed, image1s, image2s, model, body.layer_key, body.k_lines, body.k_colors, body.visualization_type)
         else:
             raise HTTPException(status_code=400, detail="Unsupported algorithm.")
-
-    cv2.imwrite("response.png", visualizations[0])
+    
+    for i in range(len(visualizations)):
+        cv2.imwrite("response"+str(i)+".png", visualizations[i])
     return {'response': 'visualizations'}
