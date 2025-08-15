@@ -141,20 +141,26 @@ POST /explain
 **Considerations:**
 image_uris can be either urls or file paths. If only one image1_uri is specified, it will be run with every image2_uri.
 If there are more uris specified than bounding boxes (bb1 or bb2), the remaining images will be uncropped. 
+
 A bounding box of [0, 0, 0, 0] will not crop the image. Thetas function the same way if not enough are supplied.
 The first bounding box coordinate is the number of pixels to be cropped from the left side of the image. The second is 
 the number to be cropped from the top of the image. The third is the width of the new image and the fourth is the height
 of the new image. 
+
 Currently the only supported model_id is miewidv3 and the only supported algorithm is pairx. These are also the default
 if not specified.
+
 If crop_bbox is true, the final visualization will include only the image cropped based on the bounding box. 
 If it is false, the full image will be used. However, regardless of the value of crop_bbox only the cropped image will be used
 in matching.
+
 A visualization_type of lines_and_colors will return the whole visualization, only_lines will return only the two images with
 lines matching similar points, and only_colors will return only a heatmap of relevant points.
+
 layer_key determines how focused or general the generated visualization will be. Layer keys that are earlier in the model
 (e.g. backbone.blocks.1) will focus on very specific points while later ones (e.g. backbone.blocks.5) will generate visualizations
 that focus on broad areas of similarity. Using the default is generally recommended.
+
 Larger values of k_lines often leads to erroneous matches (e.g. matching an animal's ear with another animal's paw), but 
 it does not have a significant impact on the time to generate visualizations. 
 The higher k_colors is, the longer it will take to generate visualizations. 
