@@ -139,6 +139,7 @@ POST /explain
 ```
 
 **Considerations:**
+
 image_uris can be either urls or file paths. If only one image1_uri is specified, it will be run with every image2_uri.
 If there are more uris specified than bounding boxes (bb1 or bb2), the remaining images will be uncropped. 
 
