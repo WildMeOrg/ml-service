@@ -1,21 +1,19 @@
-import logging
-from fastapi import APIRouter, UploadFile, File, HTTPException, Request, Depends
-from typing import Optional
-import httpx
 import asyncio
+import logging
 from pathlib import Path
-from app.schemas.model_response import ModelResponse
-import torch
-from torch.utils.data import DataLoader
+
 import cv2
-from pydantic import BaseModel
+import httpx
+import numpy as np
+import torch
 import torchvision.transforms as transforms
 from PIL import Image
-from app.utils.helpers import get_chip_from_img
-from app.utils.pairx.core import explain
-from app.models.model_handler import ModelHandler
-import numpy as np
+from fastapi import APIRouter, HTTPException, Request, Depends
+from pydantic import BaseModel
+from pairx import explain
 
+from app.models.model_handler import ModelHandler
+from app.utils.helpers import get_chip_from_img
 
 logger = logging.getLogger(__name__)
 
