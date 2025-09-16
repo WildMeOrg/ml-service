@@ -23,5 +23,5 @@ typing-extensions==4.12.2
 pyyaml==6.0.1
 PytorchWildlife==1.2.3
 zennit==0.5.1
-git+https://github.com/WildMeOrg/pairx.git@pip-setup#egg=pairx
+git+https://github.com/WildMeOrg/pairx.git#egg=pairx
 
