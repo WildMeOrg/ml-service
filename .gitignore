@@ -3,3 +3,13 @@
 *.pyc
 .venv/
 __pycache__/
+
+## ide / dev
+.idea/
+.vscode/
+.venv
+.python-version
+
+## ds
+.DS_Store
+Thumbs.db
