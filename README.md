@@ -128,7 +128,7 @@ POST /explain
     [0, 0, 0, 0]
   ],
   "theta2": [0.0]
-  "model_id": "miewidv3",
+  "model_id": "miewid-msv3",
   "crop_bbox": false,
   "visualization_type": "lines_and_colors",
   "layer_key": "backbone.blocks.3",
@@ -148,7 +148,7 @@ The first bounding box coordinate is the number of pixels to be cropped from the
 the number to be cropped from the top of the image. The third is the width of the new image and the fourth is the height
 of the new image. 
 
-Currently the only supported model_id is miewidv3 and the only supported algorithm is pairx. These are also the default
+Currently the only supported model_id is miewid-msv3 and the only supported algorithm is pairx. These are also the default
 if not specified.
 
 If crop_bbox is true, the final visualization will include only the image cropped based on the bounding box. 
@@ -169,6 +169,161 @@ The higher k_colors is, the longer it will take to generate visualizations.
 ### Response format
 
 Returns a list of images. Each image will be a numpy array.
+
+## Embeddings Extraction
+
+The service provides a dedicated endpoint for extracting embeddings from images using MiewID models. This is useful for feature extraction, similarity matching, and other machine learning tasks.
+
+### Extract Embeddings
+
+```
+POST /extract/
+```
+
+**Request Body**:
+```json
+{
+    "model_id": "miewid_v3",
+    "image_uri": "https://example.com/image.jpg",
+    "bbox": [50, 50, 200, 200],
+    "theta": 0.0
+}
+```
+
+**Parameters**:
+- `model_id` (required): ID of the MiewID model to use for extraction
+- `image_uri` (required): URI of the image to process (URL or local file path)
+- `bbox` (optional): Bounding box coordinates `[x, y, width, height]` to crop the image before extraction. If not provided, uses the full image
+- `theta` (optional): Rotation angle in radians (default: 0.0)
+
+**Response**:
+```json
+{
+    "model_id": "miewid_v3",
+    "embeddings": [0.1234, -0.5678, 0.9012, ...],
+    "embeddings_shape": [1, 512],
+    "bbox": [50, 50, 200, 200],
+    "theta": 0.0,
+    "image_uri": "https://example.com/image.jpg"
+}
+```
+
+**Response Fields**:
+- `model_id`: The model used for extraction
+- `embeddings`: The extracted feature embeddings as a flat list
+- `embeddings_shape`: Shape of the embeddings array (e.g., `[1, 512]` for a 512-dimensional feature vector)
+- `bbox`: The bounding box used (if any)
+- `theta`: The rotation angle applied
+- `image_uri`: The original image URI
+
+### Usage Examples
+
+#### Basic Embeddings Extraction
+
+Extract embeddings from a full image:
+
+```bash
+curl -X POST "http://localhost:8000/extract/" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_id": "miewid_v3",
+    "image_uri": "https://example.com/image.jpg"
+  }'
+```
+
+#### Cropped Region Extraction
+
+Extract embeddings from a specific region of the image:
+
+```bash
+curl -X POST "http://localhost:8000/extract/" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_id": "miewid_v3",
+    "image_uri": "https://example.com/image.jpg",
+    "bbox": [100, 100, 300, 200]
+  }'
+```
+
+#### Local File with Rotation
+
+Extract embeddings from a local file with rotation:
+
+```bash
+curl -X POST "http://localhost:8000/extract/" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_id": "miewid_v3",
+    "image_uri": "/path/to/local/image.jpg",
+    "bbox": [50, 50, 200, 200],
+    "theta": 0.785
+  }'
+```
+
+#### Python Example
+
+```python
+import requests
+import numpy as np
+
+# Extract embeddings
+response = requests.post("http://localhost:8000/extract/", json={
+    "model_id": "miewid_v3",
+    "image_uri": "https://example.com/image.jpg",
+    "bbox": [100, 100, 300, 200]
+})
+
+if response.status_code == 200:
+    result = response.json()
+    
+    # Convert embeddings back to numpy array
+    embeddings = np.array(result["embeddings"])
+    embeddings = embeddings.reshape(result["embeddings_shape"])
+    
+    print(f"Extracted {embeddings.shape} embeddings")
+    print(f"First 5 values: {embeddings.flatten()[:5]}")
+else:
+    print(f"Error: {response.status_code} - {response.text}")
+```
+
+### Error Handling
+
+The endpoint returns appropriate HTTP status codes:
+
+- `200`: Success
+- `400`: Bad request (invalid bbox format, file not found, non-MiewID model)
+- `404`: Model not found
+- `500`: Internal server error
+
+**Common Error Responses**:
+
+```json
+{
+    "detail": {
+        "error": "Model 'invalid_model' not found.",
+        "available_models": ["miewid_v3", "msv3", "mdv6"]
+    }
+}
+```
+
+```json
+{
+    "detail": "Bounding box must contain exactly 4 values: [x, y, width, height]"
+}
+```
+
+```json
+{
+    "detail": "Model 'msv3' is not a MiewID model. Only MiewID models support embeddings extraction."
+}
+```
+
+### Performance Considerations
+
+- The service limits concurrent extractions to prevent out-of-memory errors
+- Large images or complex models may take longer to process
+- Consider using appropriate bounding boxes to focus on regions of interest
+- URL-based images are downloaded and cached temporarily during processing
 
 ## Setup
 

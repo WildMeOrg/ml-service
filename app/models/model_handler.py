@@ -59,7 +59,7 @@ class ModelHandler:
             
             # Create and initialize the model
             model_instance: BaseModel = model_class()
-            model_instance.load(model_path=model_path, device=device, **kwargs)
+            model_instance.load(model_path=model_path, device=device, model_id=model_id, **kwargs)
             
             # Store the model instance
             self.models[model_id] = {

@@ -48,50 +48,42 @@ class MegaDetectorModel(BaseModel):
         self.model_info = {}
     
     def load(self, model_path: str, device: str, **kwargs) -> None:
-        """Load the MegaDetector model from the specified path or URL.
+        """Load the MegaDetector model using model_id as version.
         
         Args:
-            model_path: URL or local path to the model weights file
+            model_path: Not used for MegaDetector V6 (kept for interface compatibility)
             device: Device to load the model on (e.g., 'cpu', 'cuda', 'mps')
             **kwargs: Additional parameters including:
+                - model_id: The model variant (e.g., 'MDV6-yolov10-e')
                 - conf: Default confidence threshold
         """
-        logger.info(f"Loading MegaDetector model from {model_path} on device {device}")
+        # Use model_id from kwargs as the version
+        model_id = kwargs.get('model_id')
+        if not model_id:
+            raise ValueError("Model ID must be provided in the model configuration")
         
-        # Cache the model file if it's a URL
-        if model_path.startswith(('http://', 'https://')):
-            try:
-                model_path = cache_model_file(model_path)
-            except Exception as e:
-                logger.error(f"Failed to download model: {str(e)}")
-                raise
+        logger.info(f"Loading MegaDetector model {model_id} on device {device}")
         
-        # Get model version from kwargs (passed from config)
-        model_version = kwargs.get('version')
-        if not model_version:
-            raise ValueError("Model version must be provided in the model configuration")
-        
-        # Load the model
+        # Load the model using model_id as version
         try:
             self.model = pw_detection.MegaDetectorV6(
-                version=model_version,
-                weights=model_path,
-                device=device
+                version=model_id,
+                device=device,
+                pretrained=True
             )
             
             # Store model info
             self.model_info = {
                 'model_type': 'MegaDetector',
-                'version': model_version,
+                'model_id': model_id,
                 'device': device,
-                'weights_path': model_path,
                 'confidence_threshold': kwargs.get('conf', 0.5)
             }
             
-            logger.info(f"Successfully loaded {model_version} on {device}")
+            logger.info(f"Successfully loaded MegaDetector {model_id} on {device}")
             
         except Exception as e:
-            logger.error(f"Error loading MegaDetector model: {str(e)}")
+            logger.error(f"Error loading MegaDetector model {model_id}: {str(e)}")
             raise
 
     def _bytes_to_numpy(self, image_bytes: bytes) -> np.ndarray:

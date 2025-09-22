@@ -44,6 +44,7 @@ class ModelInfo(BaseModel):
     handler_type: str
     parameters: Dict[str, Any]
 
+
 async def get_model_handler(request: Request) -> ModelHandler:
     """Dependency to get the model handler from the app state."""
     return request.app.state.model_handler

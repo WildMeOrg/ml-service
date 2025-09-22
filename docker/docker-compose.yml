@@ -13,6 +13,7 @@ services:
       - ../requirements.txt:/app/requirements.txt
       - ../app/model_config.json:/app/model_config.json:ro
       - ultralytics_config:/root/.config/Ultralytics
+      - /data0/lasha.otarashvili/datasets:/datasets
     environment:
       - PYTHONPATH=/app
     command: python -m app.main --host 0.0.0.0 --port 6050 --reload --workers 4 --device cuda
