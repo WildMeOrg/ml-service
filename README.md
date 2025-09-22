@@ -170,6 +170,208 @@ The higher k_colors is, the longer it will take to generate visualizations.
 
 Returns a list of images. Each image will be a numpy array.
 
+## Image Classification
+
+The service provides a dedicated endpoint for image classification using EfficientNet models. This endpoint classifies images into predefined categories with configurable confidence thresholds.
+
+### Classify Image
+
+```
+POST /classify/
+```
+
+**Request Body**:
+```json
+{
+    "model_id": "efficientnet-classifier",
+    "image_uri": "https://example.com/image.jpg",
+    "bbox": [0, 0, 1000, 1000],
+    "theta": 0.0
+}
+```
+
+**Parameters**:
+- `model_id` (required): ID of the EfficientNet model to use for classification
+- `image_uri` (required): URI of the image to process (URL or local file path)
+- `bbox` (optional): Bounding box coordinates `[x, y, width, height]` to crop the image before classification. If not provided, uses the full image
+- `theta` (optional): Rotation angle in radians (default: 0.0)
+
+**Response**:
+```json
+{
+    "model_id": "efficientnet-classifier",
+    "predictions": [
+        {
+            "index": 0,
+            "label": "back",
+            "probability": 0.8111463785171509
+        }
+    ],
+    "all_probabilities": [
+        0.8111463785171509,
+        5.336962090041197e-07,
+        0.00027203475474379957,
+        0.0071563138626515865,
+        0.457361102104187,
+        2.727882019826211e-05
+    ],
+    "threshold": 0.5,
+    "bbox": [0, 0, 1000, 1000],
+    "theta": 0.0,
+    "image_uri": "https://example.com/image.jpg"
+}
+```
+
+**Response Fields**:
+- `model_id`: The model used for classification
+- `predictions`: List of predictions above the threshold, sorted by probability (descending)
+  - `index`: Class index in the model
+  - `label`: Human-readable class label
+  - `probability`: Confidence score (0.0 to 1.0)
+- `all_probabilities`: Raw probabilities for all classes
+- `threshold`: The confidence threshold used to filter predictions
+- `bbox`: The bounding box used (if any)
+- `theta`: The rotation angle applied
+- `image_uri`: The original image URI
+
+### Usage Examples
+
+#### Basic Image Classification
+
+Classify a full image:
+
+```bash
+curl -X POST "http://localhost:8000/classify/" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_id": "efficientnet-classifier",
+    "image_uri": "https://example.com/image.jpg"
+  }'
+```
+
+#### Classification with Bounding Box
+
+Classify a specific region of the image:
+
+```bash
+curl -X POST "http://localhost:8000/classify/" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_id": "efficientnet-classifier",
+    "image_uri": "https://example.com/image.jpg",
+    "bbox": [100, 100, 300, 200]
+  }'
+```
+
+#### Local File with Rotation
+
+Classify a local file with rotation:
+
+```bash
+curl -X POST "http://localhost:8000/classify/" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_id": "efficientnet-classifier",
+    "image_uri": "/path/to/local/image.jpg",
+    "bbox": [50, 50, 200, 200],
+    "theta": 0.785
+  }'
+```
+
+#### Python Example
+
+```python
+import requests
+from pprint import pprint
+
+# Classify image
+response = requests.post("http://localhost:8000/classify/", json={
+    "model_id": "efficientnet-classifier",
+    "image_uri": "https://example.com/image.jpg",
+    "bbox": [0, 0, 1000, 1000]
+})
+
+if response.status_code == 200:
+    result = response.json()
+    
+    print(f"Model: {result['model_id']}")
+    print(f"Threshold: {result['threshold']}")
+    print(f"Predictions above threshold: {len(result['predictions'])}")
+    
+    for pred in result['predictions']:
+        print(f"  - {pred['label']}: {pred['probability']:.4f}")
+else:
+    print(f"Error: {response.status_code} - {response.text}")
+```
+
+### Model Configuration
+
+EfficientNet models are configured in `model_config.json` with the following parameters:
+
+```json
+{
+    "model_id": "efficientnet-classifier",
+    "model_type": "efficientnetv2",
+    "checkpoint_path": "/path/to/checkpoint.pt",
+    "img_size": 512,
+    "threshold": 0.5
+}
+```
+
+**Configuration Parameters**:
+- `checkpoint_path` (required): Path or URL to the model checkpoint
+- `img_size`: Input image size for preprocessing (default: 512)
+- `threshold`: Classification confidence threshold (default: 0.5)
+
+### Supported Classes
+
+The current model supports the following classes:
+- `back` (index: 0)
+- `down` (index: 1) 
+- `front` (index: 2)
+- `left` (index: 3)
+- `right` (index: 4)
+- `up` (index: 5)
+
+### Error Handling
+
+The endpoint returns appropriate HTTP status codes:
+
+- `200`: Success
+- `400`: Bad request (invalid bbox format, file not found, non-EfficientNet model)
+- `404`: Model not found
+- `500`: Internal server error
+
+**Common Error Responses**:
+
+```json
+{
+    "detail": {
+        "error": "Model 'invalid_model' not found.",
+        "available_models": ["efficientnet-classifier", "miewid_v3"]
+    }
+}
+```
+
+```json
+{
+    "detail": "Bounding box must contain exactly 4 values: [x, y, width, height]"
+}
+```
+
+```json
+{
+    "detail": "Model 'miewid_v3' is not an EfficientNet model. Only EfficientNet models support classification."
+}
+```
+
+### Performance Considerations
+
+- The service limits concurrent classifications to prevent out-of-memory errors
+- Large images or high resolution inputs may take longer to process
+- Consider using appropriate bounding boxes to focus on regions of interest
+- URL-based images are downloaded and cached temporarily during processing
+
 ## Embeddings Extraction
 
 The service provides a dedicated endpoint for extracting embeddings from images using MiewID models. This is useful for feature extraction, similarity matching, and other machine learning tasks.
@@ -373,3 +575,205 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
 - `DEVICE`: Set to `cuda`, `mps`, or `cpu` (default: `cpu`)
 - `LOG_LEVEL`: Logging level (default: `info`)
 - `MODEL_CONFIG_PATH`: Path to model configuration (default: `app/model_config.json`)
+
+## Image Classification
+
+The service provides a dedicated endpoint for image classification using EfficientNet models. This endpoint classifies images into predefined categories with configurable confidence thresholds.
+
+### Classify Image
+
+```
+POST /classify/
+```
+
+**Request Body**:
+```json
+{
+    "model_id": "efficientnet-classifier",
+    "image_uri": "https://example.com/image.jpg",
+    "bbox": [0, 0, 1000, 1000],
+    "theta": 0.0
+}
+```
+
+**Parameters**:
+- `model_id` (required): ID of the EfficientNet model to use for classification
+- `image_uri` (required): URI of the image to process (URL or local file path)
+- `bbox` (optional): Bounding box coordinates `[x, y, width, height]` to crop the image before classification. If not provided, uses the full image
+- `theta` (optional): Rotation angle in radians (default: 0.0)
+
+**Response**:
+```json
+{
+    "model_id": "efficientnet-classifier",
+    "predictions": [
+        {
+            "index": 0,
+            "label": "back",
+            "probability": 0.8111463785171509
+        }
+    ],
+    "all_probabilities": [
+        0.8111463785171509,
+        5.336962090041197e-07,
+        0.00027203475474379957,
+        0.0071563138626515865,
+        0.457361102104187,
+        2.727882019826211e-05
+    ],
+    "threshold": 0.5,
+    "bbox": [0, 0, 1000, 1000],
+    "theta": 0.0,
+    "image_uri": "https://example.com/image.jpg"
+}
+```
+
+**Response Fields**:
+- `model_id`: The model used for classification
+- `predictions`: List of predictions above the threshold, sorted by probability (descending)
+  - `index`: Class index in the model
+  - `label`: Human-readable class label
+  - `probability`: Confidence score (0.0 to 1.0)
+- `all_probabilities`: Raw probabilities for all classes
+- `threshold`: The confidence threshold used to filter predictions
+- `bbox`: The bounding box used (if any)
+- `theta`: The rotation angle applied
+- `image_uri`: The original image URI
+
+### Usage Examples
+
+#### Basic Image Classification
+
+Classify a full image:
+
+```bash
+curl -X POST "http://localhost:8000/classify/" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_id": "efficientnet-classifier",
+    "image_uri": "https://example.com/image.jpg"
+  }'
+```
+
+#### Classification with Bounding Box
+
+Classify a specific region of the image:
+
+```bash
+curl -X POST "http://localhost:8000/classify/" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_id": "efficientnet-classifier",
+    "image_uri": "https://example.com/image.jpg",
+    "bbox": [100, 100, 300, 200]
+  }'
+```
+
+#### Local File with Rotation
+
+Classify a local file with rotation:
+
+```bash
+curl -X POST "http://localhost:8000/classify/" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_id": "efficientnet-classifier",
+    "image_uri": "/path/to/local/image.jpg",
+    "bbox": [50, 50, 200, 200],
+    "theta": 0.785
+  }'
+```
+
+#### Python Example
+
+```python
+import requests
+from pprint import pprint
+
+# Classify image
+response = requests.post("http://localhost:8000/classify/", json={
+    "model_id": "efficientnet-classifier",
+    "image_uri": "https://example.com/image.jpg",
+    "bbox": [0, 0, 1000, 1000]
+})
+
+if response.status_code == 200:
+    result = response.json()
+    
+    print(f"Model: {result['model_id']}")
+    print(f"Threshold: {result['threshold']}")
+    print(f"Predictions above threshold: {len(result['predictions'])}")
+    
+    for pred in result['predictions']:
+        print(f"  - {pred['label']}: {pred['probability']:.4f}")
+else:
+    print(f"Error: {response.status_code} - {response.text}")
+```
+
+### Model Configuration
+
+EfficientNet models are configured in `model_config.json` with the following parameters:
+
+```json
+{
+    "model_id": "efficientnet-classifier",
+    "model_type": "efficientnetv2",
+    "checkpoint_path": "/path/to/checkpoint.pt",
+    "img_size": 512,
+    "threshold": 0.5
+}
+```
+
+**Configuration Parameters**:
+- `checkpoint_path` (required): Path or URL to the model checkpoint
+- `img_size`: Input image size for preprocessing (default: 512)
+- `threshold`: Classification confidence threshold (default: 0.5)
+
+### Supported Classes
+
+The current model supports the following classes:
+- `back` (index: 0)
+- `down` (index: 1) 
+- `front` (index: 2)
+- `left` (index: 3)
+- `right` (index: 4)
+- `up` (index: 5)
+
+### Error Handling
+
+The endpoint returns appropriate HTTP status codes:
+
+- `200`: Success
+- `400`: Bad request (invalid bbox format, file not found, non-EfficientNet model)
+- `404`: Model not found
+- `500`: Internal server error
+
+**Common Error Responses**:
+
+```json
+{
+    "detail": {
+        "error": "Model 'invalid_model' not found.",
+        "available_models": ["efficientnet-classifier", "miewid_v3"]
+    }
+}
+```
+
+```json
+{
+    "detail": "Bounding box must contain exactly 4 values: [x, y, width, height]"
+}
+```
+
+```json
+{
+    "detail": "Model 'miewid_v3' is not an EfficientNet model. Only EfficientNet models support classification."
+}
+```
+
+### Performance Considerations
+
+- The service limits concurrent classifications to prevent out-of-memory errors
+- Large images or high resolution inputs may take longer to process
+- Consider using appropriate bounding boxes to focus on regions of interest
+- URL-based images are downloaded and cached temporarily during processing

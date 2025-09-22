@@ -18,6 +18,10 @@ MODEL_REGISTRY = {
     'miewid': {
         'module': 'app.models.miewid',
         'class': 'MiewidModel'
+    },
+    'efficientnetv2': {
+        'module': 'app.models.efficientnet',
+        'class': 'EfficientNetModel'
     }
     # Add new model types here as they are implemented
 }

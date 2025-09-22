@@ -18,6 +18,13 @@
 	    "model_type": "miewid",
 	    "imgsz": 440,
 	    "checkpoint_path": "/datasets/miewid_trout.bin"
+	},
+	{
+	    "model_id": "efficientnet-classifier",
+	    "model_type": "efficientnetv2",
+	    "checkpoint_path": "/datasets/vplabeler-msv3.pt",
+	    "img_size": 512,
+	    "threshold": 0.5
 	}
     ]
 }
