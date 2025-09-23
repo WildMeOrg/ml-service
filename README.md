@@ -372,6 +372,246 @@ The endpoint returns appropriate HTTP status codes:
 - Consider using appropriate bounding boxes to focus on regions of interest
 - URL-based images are downloaded and cached temporarily during processing
 
+## Pipeline Processing
+
+The service provides a comprehensive pipeline endpoint that orchestrates multiple machine learning operations in sequence. The pipeline runs prediction (bbox detection), then performs classification and embeddings extraction on each detected region above a specified confidence threshold.
+
+### Run Pipeline
+
+```
+POST /pipeline/
+```
+
+**Request Body**:
+```json
+{
+    "predict_model_id": "msv3",
+    "classify_model_id": "efficientnet-classifier",
+    "extract_model_id": "miewid_v3",
+    "image_uri": "https://example.com/image.jpg",
+    "bbox_score_threshold": 0.5,
+    "predict_model_params": {
+        "conf": 0.6,
+        "imgsz": 640
+    }
+}
+```
+
+**Parameters**:
+- `predict_model_id` (required): ID of the model to use for object detection/prediction
+- `classify_model_id` (required): ID of the EfficientNet model to use for classification
+- `extract_model_id` (required): ID of the MiewID model to use for embeddings extraction
+- `image_uri` (required): URI of the image to process (URL or local file path)
+- `bbox_score_threshold` (optional): Minimum bbox confidence score threshold to process (default: 0.5)
+- `predict_model_params` (optional): Parameters to override prediction model configuration
+
+**Response**:
+```json
+{
+    "image_uri": "https://example.com/image.jpg",
+    "models_used": {
+        "predict_model_id": "msv3",
+        "classify_model_id": "efficientnet-classifier", 
+        "extract_model_id": "miewid_v3"
+    },
+    "bbox_score_threshold": 0.5,
+    "total_predictions": 15,
+    "filtered_predictions": 3,
+    "pipeline_results": [
+        {
+            "bbox": [68.0103, 134.594, 71.4746, 130.7195],
+            "bbox_score": 0.9054,
+            "detection_class": "dog",
+            "detection_class_id": 16,
+            "classification": {
+                "class": "back",
+                "probability": 0.8111,
+                "class_id": 0
+            },
+            "embedding": [0.1234, -0.5678, 0.9012, ...],
+            "embedding_shape": [1, 512]
+        }
+    ],
+    "original_predict": {...},
+    "original_classify": [...],
+    "original_extract": [...]
+}
+```
+
+**Response Fields**:
+- `image_uri`: The original image URI processed
+- `models_used`: Dictionary containing the IDs of all models used in the pipeline
+- `bbox_score_threshold`: The confidence threshold used to filter detections
+- `total_predictions`: Total number of bboxes detected by the prediction model
+- `filtered_predictions`: Number of bboxes above the score threshold that were processed
+- `pipeline_results`: Array of results for each processed bbox containing:
+  - `bbox`: Bounding box coordinates `[x, y, width, height]`
+  - `bbox_score`: Confidence score from the detection model
+  - `detection_class`: Class name from the detection model
+  - `detection_class_id`: Class ID from the detection model
+  - `classification`: Top classification result with class, probability, and class_id
+  - `embedding`: Extracted embeddings as a flat array
+  - `embedding_shape`: Shape of the embeddings array
+- `original_predict`: Full prediction results from the detection model
+- `original_classify`: Array of full classification results for each bbox
+- `original_extract`: Array of full extraction results for each bbox
+
+### Pipeline Workflow
+
+The pipeline executes the following steps:
+
+1. **Validation**: Validates that all specified models exist and are of the correct types
+   - Prediction model: Any supported detection model (YOLO, MegaDetector)
+   - Classification model: Must be an EfficientNet model
+   - Extraction model: Must be a MiewID model
+
+2. **Image Loading**: Downloads the image (if URL) or loads from local path
+
+3. **Object Detection**: Runs the prediction model to detect bounding boxes
+
+4. **Filtering**: Filters detected bboxes by the specified confidence threshold
+
+5. **Parallel Processing**: For each filtered bbox, runs classification and extraction in parallel
+
+6. **Result Aggregation**: Combines all results into a structured response
+
+### Usage Examples
+
+#### Basic Pipeline Processing
+
+Process an image with default threshold:
+
+```bash
+curl -X POST "http://localhost:8000/pipeline/" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "predict_model_id": "msv3",
+    "classify_model_id": "efficientnet-classifier",
+    "extract_model_id": "miewid_v3",
+    "image_uri": "https://example.com/image.jpg"
+  }'
+```
+
+#### Custom Threshold and Parameters
+
+Use a higher confidence threshold and custom prediction parameters:
+
+```bash
+curl -X POST "http://localhost:8000/pipeline/" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "predict_model_id": "msv3",
+    "classify_model_id": "efficientnet-classifier",
+    "extract_model_id": "miewid_v3",
+    "image_uri": "https://example.com/image.jpg",
+    "bbox_score_threshold": 0.7,
+    "predict_model_params": {
+      "conf": 0.8,
+      "imgsz": 1024
+    }
+  }'
+```
+
+#### Local File Processing
+
+Process a local image file:
+
+```bash
+curl -X POST "http://localhost:8000/pipeline/" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "predict_model_id": "mdv6",
+    "classify_model_id": "efficientnet-classifier",
+    "extract_model_id": "miewid_v3",
+    "image_uri": "/path/to/local/image.jpg",
+    "bbox_score_threshold": 0.6
+  }'
+```
+
+#### Python Example
+
+```python
+import requests
+import numpy as np
+from pprint import pprint
+
+# Run pipeline
+response = requests.post("http://localhost:8000/pipeline/", json={
+    "predict_model_id": "msv3",
+    "classify_model_id": "efficientnet-classifier", 
+    "extract_model_id": "miewid_v3",
+    "image_uri": "https://example.com/image.jpg",
+    "bbox_score_threshold": 0.5
+})
+
+if response.status_code == 200:
+    result = response.json()
+    
+    print(f"Processed {result['total_predictions']} detections")
+    print(f"Found {result['filtered_predictions']} above threshold")
+    print(f"Pipeline results: {len(result['pipeline_results'])}")
+    
+    for i, bbox_result in enumerate(result['pipeline_results']):
+        print(f"\nBbox {i+1}:")
+        print(f"  Detection: {bbox_result['detection_class']} ({bbox_result['bbox_score']:.3f})")
+        if bbox_result['classification']:
+            print(f"  Classification: {bbox_result['classification']['class']} ({bbox_result['classification']['probability']:.3f})")
+        print(f"  Embedding shape: {bbox_result['embedding_shape']}")
+        
+        # Convert embedding back to numpy array
+        embedding = np.array(bbox_result['embedding'])
+        embedding = embedding.reshape(bbox_result['embedding_shape'])
+        print(f"  First 5 embedding values: {embedding.flatten()[:5]}")
+else:
+    print(f"Error: {response.status_code} - {response.text}")
+```
+
+### Error Handling
+
+The endpoint returns appropriate HTTP status codes:
+
+- `200`: Success
+- `400`: Bad request (invalid parameters, file not found, wrong model types)
+- `404`: Model not found
+- `500`: Internal server error
+
+**Common Error Responses**:
+
+```json
+{
+    "detail": {
+        "error": "Prediction model 'invalid_model' not found.",
+        "available_models": ["msv3", "mdv6", "efficientnet-classifier", "miewid_v3"]
+    }
+}
+```
+
+```json
+{
+    "detail": "Model 'msv3' is not an EfficientNet model. Only EfficientNet models support classification."
+}
+```
+
+```json
+{
+    "detail": "File not found: /path/to/nonexistent/image.jpg"
+}
+```
+
+### Performance Considerations
+
+- **Concurrency**: Pipeline operations are limited to prevent out-of-memory errors
+- **Parallel Processing**: Classification and extraction run in parallel for each bbox to optimize performance
+- **Memory Usage**: Large images or many detections may require more memory
+- **Threshold Tuning**: Higher bbox_score_threshold values reduce processing time by filtering out low-confidence detections
+- **Model Selection**: Choose appropriate models based on your use case and available computational resources
+
+### Model Requirements
+
+- **Prediction Model**: Any supported detection model (YOLO variants, MegaDetector)
+- **Classification Model**: Must be configured as `efficientnetv2` type in model_config.json
+- **Extraction Model**: Must be configured as `miewid` type in model_config.json
+
 ## Embeddings Extraction
 
 The service provides a dedicated endpoint for extracting embeddings from images using MiewID models. This is useful for feature extraction, similarity matching, and other machine learning tasks.
