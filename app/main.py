@@ -4,7 +4,7 @@ import sys
 import logging
 import argparse
 from fastapi import FastAPI
-from app.routers import predict_router, explain_router
+from app.routers import predict_router, explain_router, extract_router, classify_router, pipeline_router
 from app.models.model_handler import ModelHandler
 
 # Configure logging
@@ -98,3 +98,6 @@ async def startup_event():
 
 app.include_router(predict_router.router)
 app.include_router(explain_router.router)
+app.include_router(extract_router.router)
+app.include_router(classify_router.router)
+app.include_router(pipeline_router.router)

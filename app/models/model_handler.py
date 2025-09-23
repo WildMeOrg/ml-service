@@ -18,6 +18,10 @@ MODEL_REGISTRY = {
     'miewid': {
         'module': 'app.models.miewid',
         'class': 'MiewidModel'
+    },
+    'efficientnetv2': {
+        'module': 'app.models.efficientnet',
+        'class': 'EfficientNetModel'
     }
     # Add new model types here as they are implemented
 }
@@ -59,7 +63,7 @@ class ModelHandler:
             
             # Create and initialize the model
             model_instance: BaseModel = model_class()
-            model_instance.load(model_path=model_path, device=device, **kwargs)
+            model_instance.load(model_path=model_path, device=device, model_id=model_id, **kwargs)
             
             # Store the model instance
             self.models[model_id] = {
