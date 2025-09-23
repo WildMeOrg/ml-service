@@ -1,10 +1,11 @@
 {
     "models": [
 	{
-	    "model_id": "miewid-msv3",
-	    "model_type": "miewid",
-	    "imgsz": 440,
-	    "checkpoint_path": null
+		"model_id": "msv3",
+		"model_type": "yolo-ultralytics",
+		"model_path": "/datasets/detect.yolov11.msv3.pt",
+		"imgsz": 640,
+		"conf": 0.5
 	},
 	{
 	    "model_id": "MDV6-yolov10-e",
@@ -12,6 +13,12 @@
 	    "imgsz": 1280,
 	    "conf": 0.1,
 	    "iou": 0.45
+	},
+	{
+	    "model_id": "miewid-msv3",
+	    "model_type": "miewid",
+	    "imgsz": 440,
+	    "checkpoint_path": null
 	},
 	{
 	    "model_id": "miewid-trout",
