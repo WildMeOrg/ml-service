@@ -16,7 +16,7 @@ services:
       - /data0/lasha.otarashvili/datasets:/datasets
     environment:
       - PYTHONPATH=/app
-    command: python -m app.main --host 0.0.0.0 --port 6050 --reload --workers 4 --device cuda
+    command: python3 -m app.main --host 0.0.0.0 --port 6050 --reload --workers 4 --device cuda
     deploy:
       resources:
         reservations:
