@@ -20,6 +20,8 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+RUN pip3 install --upgrade pip setuptools
+
 # Install PyTorch and CUDA support first
 RUN pip3 install torch==2.1.2 torchvision==0.16.2 --index-url https://download.pytorch.org/whl/cu121
 
