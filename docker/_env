@@ -1,3 +1,5 @@
 # rename to .env and set local values - examples:
+
 DATASETS_DIR=/data0/user/datasets
+# to share paths with WBIA:
 DATA_DB_DIR=/data2/tier2/data/whiskerbook/data/db
