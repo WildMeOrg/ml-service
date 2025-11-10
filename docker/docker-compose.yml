@@ -7,7 +7,7 @@ services:
       dockerfile: docker/dockerfile
     container_name: detector_inference
     ports:
-      - "6050:6050"
+      - "127.0.0.1:6050:6050"
     volumes:
       - ../app:/app/app
       - ../requirements.txt:/app/requirements.txt
@@ -29,6 +29,14 @@ services:
           memory: '32G'
     shm_size: '16G'
     restart: unless-stopped
+    labels:
+      - "autoheal=true"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6050/health"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 90s
     networks:
       - shared_net
 
