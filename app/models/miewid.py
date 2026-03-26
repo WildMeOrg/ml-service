@@ -16,15 +16,35 @@ from app.utils.checkpoint_utils import get_checkpoint_path
 logger = logging.getLogger(__name__)
 
 
-class MiewIdNet(nn.Module):
-    """Standalone MiewID model architecture using timm backbone."""
-    def __init__(self, model_name='efficientnetv2_rw_m'):
+class GeM(nn.Module):
+    """Generalized Mean Pooling."""
+    def __init__(self, p=3, eps=1e-6):
         super().__init__()
-        self.backbone = timm.create_model(model_name, pretrained=False, num_classes=0)
-        self.bn = nn.BatchNorm1d(self.backbone.num_features)
+        self.p = nn.Parameter(torch.ones(1) * p)
+        self.eps = eps
 
     def forward(self, x):
-        return self.bn(self.backbone(x))
+        return nn.functional.avg_pool2d(
+            x.clamp(min=self.eps).pow(self.p),
+            (x.size(-2), x.size(-1))
+        ).pow(1.0 / self.p)
+
+
+class MiewIdNet(nn.Module):
+    """Standalone MiewID model architecture matching wbia-plugin-miew-id training code."""
+    def __init__(self, model_name='efficientnetv2_rw_m'):
+        super().__init__()
+        self.backbone = timm.create_model(model_name, pretrained=False)
+        final_in_features = self.backbone.classifier.in_features
+        self.backbone.classifier = nn.Identity()
+        self.backbone.global_pool = nn.Identity()
+        self.pooling = GeM()
+        self.bn = nn.BatchNorm1d(final_in_features)
+
+    def forward(self, x):
+        x = self.backbone.forward_features(x)
+        x = self.pooling(x).view(x.size(0), -1)
+        return self.bn(x)
 
 
 class MiewidModel(BaseModel):
@@ -89,6 +109,7 @@ class MiewidModel(BaseModel):
             model.load_state_dict(checkpoint, strict=strict)
             model.eval()
             model.to(device)
+            model.device = torch.device(device)
             self.model = model
             logger.info(f"Loaded MiewID model from checkpoint: {checkpoint_path}")
         except Exception as e:
