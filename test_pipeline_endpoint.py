@@ -19,7 +19,7 @@ def test_pipeline_endpoint(base_url="http://localhost:8888", image_path="Images/
     test_payload = {
         "predict_model_id": "yolov8n",  # Adjust based on your predict model
         "classify_model_id": "efficientnetv2",  # Adjust based on your classify model  
-        "extract_model_id": "miewid",  # Adjust based on your extract model
+        "extract_model_id": "miewid-msv4.1",  # Adjust based on your extract model
         "image_uri": image_path,
         "bbox_score_threshold": 0.5,
         "predict_model_params": {

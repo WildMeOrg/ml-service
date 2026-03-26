@@ -15,10 +15,11 @@
 	    "iou": 0.45
 	},
 	{
-	    "model_id": "miewid-msv3",
+	    "model_id": "miewid-msv4.1",
 	    "model_type": "miewid",
 	    "imgsz": 440,
-	    "checkpoint_path": null
+	    "checkpoint_path": "/datasets/miew_id.msv4_1_main.bin",
+	    "version": 4.1
 	},
 	{
 	    "model_id": "miewid-trout",

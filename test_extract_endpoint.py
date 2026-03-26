@@ -17,7 +17,7 @@ def test_extract_endpoint():
     
     # Test data
     test_request = {
-        "model_id": "miewid_v3",  # Adjust this based on your model configuration
+        "model_id": "miewid-msv4.1",  # Adjust this based on your model configuration
         "image_uri": "/data0/lasha.otarashvili/docker/ml-service/Images/img1.png",  # Using local test image
         "bbox": [50, 50, 200, 200],  # x, y, width, height
         "theta": 0.0  # No rotation

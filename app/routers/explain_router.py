@@ -34,7 +34,7 @@ async def get_model_handler(request: Request) -> ModelHandler:
 def preprocess(image, model):
     """Runs preprocessing on an image based on the model to be used."""
     image = Image.fromarray(image.astype("uint8"))
-    if model.lower() == "miewid-msv3":
+    if model.lower().startswith("miewid"):
         transform = transforms.Compose([
             transforms.Resize((440, 440)),
             transforms.ToTensor(),
@@ -81,7 +81,7 @@ def validate_vis_parameters(body):
             raise HTTPException(status_code=400, detail=f"K Colors must be less than 100")
         if body.visualization_type not in ["lines_and_colors", "only_lines", "only_colors"]:
             raise HTTPException(status_code=400, detail="Unsupported visualization type.")
-        possible_models = ["miewid-msv3"]
+        possible_models = ["miewid-msv3", "miewid-msv4.1"]
         if not body.model_id.lower() in possible_models:
             raise HTTPException(status_code=400, detail="Unsupported model for pairx.")
     else:
@@ -209,7 +209,7 @@ class body(BaseModel):
     image2_uris: list[str]
     bb2: list[list[float]]
     theta2: list[float] = [0.0]
-    model_id: str = "miewid-msv3"
+    model_id: str = "miewid-msv4.1"
     crop_bbox: bool = False
     visualization_type: str = "lines_and_colors"
     layer_key: str = "backbone.blocks.3"
