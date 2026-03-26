@@ -16,7 +16,7 @@ def test_extract_with_bbox():
     """Test the extract endpoint with bbox parameter."""
     
     test_request = {
-        "model_id": "miewid_v3",
+        "model_id": "miewid-msv4.1",
         "image_uri": "/data0/lasha.otarashvili/docker/ml-service/Images/img1.png",
         "bbox": [50, 50, 200, 200],  # x, y, width, height
         "theta": 0.0
@@ -46,7 +46,7 @@ def test_extract_without_bbox():
     """Test the extract endpoint without bbox parameter (should use full image)."""
     
     test_request = {
-        "model_id": "miewid_v3",
+        "model_id": "miewid-msv4.1",
         "image_uri": "/data0/lasha.otarashvili/docker/ml-service/Images/img1.png",
         "theta": 0.0
     }

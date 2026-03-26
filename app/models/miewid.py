@@ -3,6 +3,7 @@ import logging
 from transformers import AutoModel
 from fastapi import HTTPException
 from typing import Dict, Any, List, Optional, Tuple
+import timm
 import torch
 import torch.nn as nn
 import torchvision.transforms as transforms
@@ -13,6 +14,38 @@ import math
 from app.utils.checkpoint_utils import get_checkpoint_path
 
 logger = logging.getLogger(__name__)
+
+
+class GeM(nn.Module):
+    """Generalized Mean Pooling."""
+    def __init__(self, p=3, eps=1e-6):
+        super().__init__()
+        self.p = nn.Parameter(torch.ones(1) * p)
+        self.eps = eps
+
+    def forward(self, x):
+        return nn.functional.avg_pool2d(
+            x.clamp(min=self.eps).pow(self.p),
+            (x.size(-2), x.size(-1))
+        ).pow(1.0 / self.p)
+
+
+class MiewIdNet(nn.Module):
+    """Standalone MiewID model architecture matching wbia-plugin-miew-id training code."""
+    def __init__(self, model_name='efficientnetv2_rw_m'):
+        super().__init__()
+        self.backbone = timm.create_model(model_name, pretrained=False)
+        final_in_features = self.backbone.classifier.in_features
+        self.backbone.classifier = nn.Identity()
+        self.backbone.global_pool = nn.Identity()
+        self.pooling = GeM()
+        self.bn = nn.BatchNorm1d(final_in_features)
+
+    def forward(self, x):
+        x = self.backbone.forward_features(x)
+        x = self.pooling(x).view(x.size(0), -1)
+        return self.bn(x)
+
 
 class MiewidModel(BaseModel):
     def __init__(self):
@@ -32,7 +65,11 @@ class MiewidModel(BaseModel):
             local_checkpoint_path = get_checkpoint_path(checkpoint_path)
             # Remove checkpoint_path from kwargs to avoid duplicate parameter error
             filtered_kwargs = {k: v for k, v in kwargs.items() if k != 'checkpoint_path'}
-            self._load_from_checkpoint(local_checkpoint_path, device, **filtered_kwargs)
+            version = kwargs.get('version', 3)
+            if isinstance(version, (int, float)) and version >= 4:
+                self._load_standalone(local_checkpoint_path, device)
+            else:
+                self._load_from_checkpoint(local_checkpoint_path, device, **filtered_kwargs)
         else:
             self.use_checkpoint = False
             self._load_from_huggingface(device, **kwargs)
@@ -65,37 +102,36 @@ class MiewidModel(BaseModel):
         self.model.to(device)
         logger.info(f"Loaded MiewID model from HuggingFace: {model_tag}")
 
-    def _load_from_checkpoint(self, checkpoint_path: str, device: str, **kwargs) -> None:
-        """Load model from checkpoint file."""
+    def _apply_checkpoint(self, model: nn.Module, checkpoint_path: str, device: str, strict: bool = True) -> None:
+        """Load checkpoint weights into a model and move to device."""
         try:
-            # For now, we'll use the HuggingFace model as base and load checkpoint weights
-            # This is a simplified approach - you may need to adjust based on your specific model architecture
-            if kwargs.get('version', 3) == 3:
-                model_tag = f"conservationxlabs/miewid-msv3"
-            else:
-                model_tag = f"conservationxlabs/miewid-msv2"
-            
-            # Load base model architecture
-            self.model = AutoModel.from_pretrained(model_tag, trust_remote_code=True)
-            
-            # Load checkpoint weights
-            device_obj = torch.device(device)
-            checkpoint = torch.load(checkpoint_path, map_location=device_obj)
-            
-            # Load state dict with strict=False to handle potential mismatches
-            self.model.load_state_dict(checkpoint, strict=False)
-            
-            self.model.eval()
-            self.model.to(device)
-            
+            checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
+            model.load_state_dict(checkpoint, strict=strict)
+            model.eval()
+            model.to(device)
+            model.device = torch.device(device)
+            self.model = model
             logger.info(f"Loaded MiewID model from checkpoint: {checkpoint_path}")
-            
         except Exception as e:
             logger.error(f"Failed to load checkpoint from {checkpoint_path}: {str(e)}")
             raise HTTPException(
-                status_code=500, 
+                status_code=500,
                 detail=f"Failed to load model checkpoint: {str(e)}"
             )
+
+    def _load_from_checkpoint(self, checkpoint_path: str, device: str, **kwargs) -> None:
+        """Load HuggingFace base model and overlay checkpoint weights."""
+        if kwargs.get('version', 3) == 3:
+            model_tag = "conservationxlabs/miewid-msv3"
+        else:
+            model_tag = "conservationxlabs/miewid-msv2"
+        model = AutoModel.from_pretrained(model_tag, trust_remote_code=True)
+        self._apply_checkpoint(model, checkpoint_path, device, strict=False)
+
+    def _load_standalone(self, checkpoint_path: str, device: str) -> None:
+        """Load model from checkpoint using standalone timm-based architecture."""
+        model = MiewIdNet()
+        self._apply_checkpoint(model, checkpoint_path, device, strict=True)
 
     def get_model_info(self) -> Dict[str, Any]:
         """Get information about the loaded model."""
