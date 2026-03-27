@@ -166,20 +166,22 @@ def run_pairx(imgs1_transformed, imgs2_transformed, imgs1, imgs2, model, layer_k
 
     pairx_imgs = []
     try:
-        pairx_imgs = explain(
-            torch.cat(imgs1_transformed),
-            torch.cat(imgs2_transformed),
-            imgs1,
-            imgs2,
-            model,
-            [layer_key],
-            k_lines=k_lines,
-            k_colors=k_colors,
-        )
+        with torch.no_grad():
+            pairx_imgs = explain(
+                torch.cat(imgs1_transformed),
+                torch.cat(imgs2_transformed),
+                imgs1,
+                imgs2,
+                model,
+                [layer_key],
+                k_lines=k_lines,
+                k_colors=k_colors,
+            )
     # Handle out of memory errors by breaking into two batches and running again
     except Exception as e:
-        if e.startsWith("torch.cuda.OutOfMemoryError:"):
+        if str(e).startswith("torch.cuda.OutOfMemoryError:"):
             dim_size = imgs1_transformed.shape[0]
+            midpoint = dim_size // 2
             first_half = run_pairx(imgs1_transformed[:midpoint], imgs2_transformed[:midpoint], imgs1[:midpoint], imgs2[:midpoint], model,
                     layer_key, k_lines, k_colors, visualization_type)
             second_half = run_pairx(imgs1_transformed[midpoint:], imgs2_transformed[midpoint:], imgs1[midpoint:], imgs2[midpoint:], model,
@@ -242,7 +244,7 @@ async def read_items(
     tasks = []
     for uri, bb, theta in zip(body.image1_uris, bb1s, theta1s):
         tasks.append(process_image(uri, bb, theta, body.crop_bbox, body.model_id, device))
-    results1 = await asyncio.gather(*tasks, return_exceptions=False)
+    results1 = await asyncio.gather(*tasks, return_exceptions=True)
     
     tasks = []
     for uri, bb, theta in zip(body.image2_uris, bb2s, theta2s):
@@ -272,7 +274,6 @@ async def read_items(
                 image2s.append(image2)
                 image2s_transformed.append(image2_transformed)
 
-    visualiztions = []
     # Only apply semaphore to the actual prediction
     async with explain_semaphore:
         if body.algorithm.lower() == "pairx":
@@ -281,6 +282,4 @@ async def read_items(
         else:
             raise HTTPException(status_code=400, detail="Unsupported algorithm.")
     
-    for i in range(len(visualizations)):
-        cv2.imwrite("response"+str(i)+".png", visualizations[i])
-    return {'response': 'visualizations'}
+    return {'response': 'visualizations', 'count': len(visualizations)}

@@ -18,7 +18,7 @@ services:
       - "$DATA_DB_DIR:/data/db"
     environment:
       - PYTHONPATH=/app
-    command: python3 -m app.main --host 0.0.0.0 --port 6050 --reload --workers 4 --device cuda
+    command: python3 -m app.main --host 0.0.0.0 --port 6050 --reload --workers 1 --device cuda
     deploy:
       resources:
         reservations:

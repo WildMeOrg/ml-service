@@ -96,6 +96,16 @@ async def startup_event():
         logger.error(f"Error during model initialization: {str(e)}")
         raise
 
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up models and free GPU memory on shutdown."""
+    import torch
+    if hasattr(app.state, 'model_handler'):
+        for model_id, info in app.state.model_handler.models.items():
+            info['instance'].model = None
+        torch.cuda.empty_cache()
+        logger.info("Models unloaded and GPU memory freed")
+
 @app.get("/health")
 async def health_check():
     """Enhanced health check endpoint for Grafana and autoheal monitoring.
