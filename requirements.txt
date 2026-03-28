@@ -4,7 +4,7 @@ ultralytics==8.3.139
 pydantic==2.5.3
 python-multipart==0.0.6
 httpx==0.26.0
-Pillow==10.1.0
+Pillow==10.3.0
 numpy==1.26.3
 transformers==4.52.4
 opencv-python==4.8.1.78
