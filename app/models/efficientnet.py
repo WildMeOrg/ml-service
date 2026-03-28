@@ -74,7 +74,7 @@ class EfficientNetModel(BaseModel):
             )
             
             # Load checkpoint
-            checkpoint = torch.load(actual_checkpoint_path, map_location=self.device)
+            checkpoint = torch.load(actual_checkpoint_path, map_location=self.device, weights_only=True)
             self.model.load_state_dict(checkpoint, strict=False)
             
             # Move to device and set to eval mode

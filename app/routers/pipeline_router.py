@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/pipeline", tags=["Pipeline"])
 
 # Limit concurrent pipeline operations to prevent OOM errors
-MAX_CONCURRENT_PIPELINES = 1
+MAX_CONCURRENT_PIPELINES = 2
 pipeline_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PIPELINES)
 
 def is_url(string: str) -> bool:

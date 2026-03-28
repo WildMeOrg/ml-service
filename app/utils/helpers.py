@@ -1,6 +1,9 @@
+import logging
 import cv2
 import numpy as np
 from torchvision import transforms
+
+logger = logging.getLogger(__name__)
 
 def unnormalize(img_base):
     aug_mean = np.array([0.485, 0.456, 0.406])
@@ -18,21 +21,6 @@ def resize_image(image, new_height):
 
 ## Functions for handling rotated bounding boxes
 
-import numpy as np
-import cv2
-import matplotlib.pyplot as plt
-
-def get_img(path):
-    im_bgr = cv2.imread(path)
-    im_rgb = im_bgr[:, :, ::-1]
-    return im_rgb
-
-def imshow(img):
-    plt.figure(figsize=(12, 8))
-    plt_img = img.copy()
-    plt.imshow(plt_img)
-    plt.show()
-    
 def rotate_box(x1,y1,x2,y2,theta):
     xm = (x1 + x2) // 2
     ym = (y1 + y2) // 2
@@ -99,7 +87,7 @@ def get_chip_from_img(img, bbox, theta):
 
     if min(cropped_image.shape) < 1:
         # Use original image
-        print(f'Using original image. Invalid parameters - theta: {theta}, bbox: {bbox}')
+        logger.warning(f'Using original image. Invalid parameters - theta: {theta}, bbox: {bbox}')
         cropped_image = img
 
     return cropped_image

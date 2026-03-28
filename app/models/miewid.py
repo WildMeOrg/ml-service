@@ -109,7 +109,10 @@ class MiewidModel(BaseModel):
             model.load_state_dict(checkpoint, strict=strict)
             model.eval()
             model.to(device)
-            model.device = torch.device(device)
+            try:
+                model.device = torch.device(device)
+            except AttributeError:
+                pass  # HuggingFace models have read-only .device property
             self.model = model
             logger.info(f"Loaded MiewID model from checkpoint: {checkpoint_path}")
         except Exception as e:
