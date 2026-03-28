@@ -188,6 +188,9 @@ def run_pairx(imgs1_transformed, imgs2_transformed, imgs1, imgs2, model, layer_k
             return first_half + second_half
         else:
             raise HTTPException(status_code=500, detail=f"Internal Server Error")
+    finally:
+        # PAIR-X backward() accumulates .grad on model params — clear to prevent VRAM growth
+        model.zero_grad(set_to_none=True)
     
     toReturn = []
     for pairx_img in pairx_imgs:
