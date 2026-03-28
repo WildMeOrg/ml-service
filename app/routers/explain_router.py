@@ -166,17 +166,16 @@ def run_pairx(imgs1_transformed, imgs2_transformed, imgs1, imgs2, model, layer_k
 
     pairx_imgs = []
     try:
-        with torch.no_grad():
-            pairx_imgs = explain(
-                torch.cat(imgs1_transformed),
-                torch.cat(imgs2_transformed),
-                imgs1,
-                imgs2,
-                model,
-                [layer_key],
-                k_lines=k_lines,
-                k_colors=k_colors,
-            )
+        pairx_imgs = explain(
+            torch.cat(imgs1_transformed),
+            torch.cat(imgs2_transformed),
+            imgs1,
+            imgs2,
+            model,
+            [layer_key],
+            k_lines=k_lines,
+            k_colors=k_colors,
+        )
     # Handle out of memory errors by breaking into two batches and running again
     except Exception as e:
         if str(e).startswith("torch.cuda.OutOfMemoryError:"):
