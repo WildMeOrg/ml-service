@@ -22,6 +22,14 @@ MODEL_REGISTRY = {
     'efficientnetv2': {
         'module': 'app.models.efficientnet',
         'class': 'EfficientNetModel'
+    },
+    'densenet-orientation': {
+        'module': 'app.models.densenet_orientation',
+        'class': 'DenseNetOrientationModel'
+    },
+    'lightnet': {
+        'module': 'app.models.lightnet_model',
+        'class': 'LightNetModel'
     }
     # Add new model types here as they are implemented
 }

@@ -6,7 +6,6 @@ import asyncio
 from pathlib import Path
 from pydantic import BaseModel, Field
 from app.models.model_handler import ModelHandler
-from app.models.efficientnet import EfficientNetModel
 from fastapi.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
@@ -77,13 +76,13 @@ async def classify_image(
                     }
                 )
             
-            # Check if the model is an EfficientNet model
-            if not isinstance(model, EfficientNetModel):
+            # Check if the model supports classification (has predict method)
+            if not hasattr(model, 'predict'):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Model '{classify_request.model_id}' is not an EfficientNet model. Only EfficientNet models support classification."
+                    detail=f"Model '{classify_request.model_id}' does not support classification."
                 )
-            
+
             # Download image if it's a URL
             if is_url(classify_request.image_uri):
                 async with httpx.AsyncClient() as client:
