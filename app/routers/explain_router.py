@@ -287,7 +287,7 @@ async def read_items(
     
     images_b64 = []
     for vis in visualizations:
-        _, buf = cv2.imencode('.png', vis)
+        _, buf = cv2.imencode('.png', cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
         images_b64.append(base64.b64encode(buf).decode('utf-8'))
 
-    return {'images': images_b64, 'count': len(images_b64)}
+    return {'response': 'visualizations', 'images': images_b64, 'count': len(images_b64)}
