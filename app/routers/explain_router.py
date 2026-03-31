@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import logging
 from pathlib import Path
 
@@ -284,4 +285,9 @@ async def read_items(
         else:
             raise HTTPException(status_code=400, detail="Unsupported algorithm.")
     
-    return {'response': 'visualizations', 'count': len(visualizations)}
+    images_b64 = []
+    for vis in visualizations:
+        _, buf = cv2.imencode('.png', vis)
+        images_b64.append(base64.b64encode(buf).decode('utf-8'))
+
+    return {'images': images_b64, 'count': len(images_b64)}
