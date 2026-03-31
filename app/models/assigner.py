@@ -164,7 +164,16 @@ def compute_pair_features(
     except ImportError:
         raise ImportError("shapely is required for assigner feature computation. Install with: pip install shapely")
 
-    # Normalize bbox coordinates to [0, 1]
+    # WBIA rotates in pixel space first, then normalizes.
+    # We must match this order for compatibility with trained classifiers.
+    part_verts_px = _bbox_to_polygon_verts(part_bbox, part_theta)
+    body_verts_px = _bbox_to_polygon_verts(body_bbox, body_theta)
+
+    # Normalize vertices to [0, 1]
+    part_verts = [[x / image_width, y / image_height] for x, y in part_verts_px]
+    body_verts = [[x / image_width, y / image_height] for x, y in body_verts_px]
+
+    # Normalize bboxes (unrotated) for area calculations
     norm_part_bbox = [
         part_bbox[0] / image_width, part_bbox[1] / image_height,
         part_bbox[2] / image_width, part_bbox[3] / image_height,
@@ -173,10 +182,6 @@ def compute_pair_features(
         body_bbox[0] / image_width, body_bbox[1] / image_height,
         body_bbox[2] / image_width, body_bbox[3] / image_height,
     ]
-
-    # Get rotated vertices (normalized)
-    part_verts = _bbox_to_polygon_verts(norm_part_bbox, part_theta)
-    body_verts = _bbox_to_polygon_verts(norm_body_bbox, body_theta)
 
     part_poly = geometry.Polygon(part_verts)
     body_poly = geometry.Polygon(body_verts)
@@ -224,15 +229,16 @@ def compute_pair_features(
 
     features.extend([int_over_union, int_over_part, int_over_body, part_over_body])
 
-    # Viewpoint features
+    # Viewpoint features — WBIA training quirk: both slots use the part's viewpoint.
+    # See core_annots.py line 2648 and train_assigner.py line 1889 where
+    # body_lrudfb is computed from part_aid_list, not body_aid_list.
     if feature_type == 'unit_viewpoint':
         features.extend(_viewpoint_to_lrudfb_unit_vector(part_viewpoint))
-        features.extend(_viewpoint_to_lrudfb_unit_vector(body_viewpoint))
+        features.extend(_viewpoint_to_lrudfb_unit_vector(part_viewpoint))
     else:
         bools_part = _viewpoint_to_lrudfb_bools(part_viewpoint)
-        bools_body = _viewpoint_to_lrudfb_bools(body_viewpoint)
         features.extend([float(b) for b in bools_part])
-        features.extend([float(b) for b in bools_body])
+        features.extend([float(b) for b in bools_part])
 
     return features
 

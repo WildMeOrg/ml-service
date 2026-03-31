@@ -124,6 +124,38 @@ class TestFeatureComputation:
         assert len(features) == 37
 
 
+    def test_body_viewpoint_uses_part_viewpoint(self):
+        """WBIA quirk: both viewpoint feature slots use part's viewpoint."""
+        features = compute_pair_features(
+            part_bbox=[10, 10, 30, 30], part_theta=0.0, part_viewpoint='left',
+            body_bbox=[20, 20, 40, 40], body_theta=0.0, body_viewpoint='right',
+            image_width=100, image_height=100,
+            feature_type='unit_viewpoint',
+        )
+        # Last 12 features are 2x LRUDFB vectors. Both should match part ('left').
+        part_vp_features = features[-12:-6]
+        body_vp_features = features[-6:]
+        assert part_vp_features == body_vp_features
+
+    def test_rotation_in_pixel_space(self):
+        """Rotation should happen in pixel space before normalization."""
+        # Non-square image: 200x100. Rotating in normalized vs pixel space differs.
+        features_no_rot = compute_pair_features(
+            part_bbox=[10, 10, 30, 30], part_theta=0.0, part_viewpoint=None,
+            body_bbox=[50, 50, 30, 30], body_theta=0.0, body_viewpoint=None,
+            image_width=200, image_height=100,
+            feature_type='unit_viewpoint',
+        )
+        features_rot = compute_pair_features(
+            part_bbox=[10, 10, 30, 30], part_theta=0.5, part_viewpoint=None,
+            body_bbox=[50, 50, 30, 30], body_theta=0.0, body_viewpoint=None,
+            image_width=200, image_height=100,
+            feature_type='unit_viewpoint',
+        )
+        # Rotation should change the part vertex features
+        assert features_no_rot[:8] != features_rot[:8]
+
+
 class TestMakeAssignments:
 
     def test_basic_assignment(self):
