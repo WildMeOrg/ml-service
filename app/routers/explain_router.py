@@ -213,7 +213,7 @@ class body(BaseModel):
     theta2: list[float] = [0.0]
     model_id: str = "miewid-msv4.1"
     crop_bbox: bool = False
-    visualization_type: str = "lines_and_colors"
+    visualization_type: str = "only_colors"
     layer_key: str = "backbone.blocks.3"
     k_lines: int = 20
     k_colors: int = 5
