@@ -101,7 +101,25 @@ class EfficientNetModel(BaseModel):
             else:
                 self.label_map = DEFAULT_LABEL_MAP
 
-            num_classes = n_classes if n_classes is not None else len(self.label_map)
+            # Detect mismatch between label count and actual classifier output size.
+            # Some WBIA checkpoints have stale 'classes' metadata that doesn't match
+            # the trained classifier dimensions.
+            if n_classes is not None:
+                num_classes = n_classes
+            else:
+                num_classes = len(self.label_map)
+                # Check actual classifier output dimension from state dict
+                sd = checkpoint.get('state', checkpoint) if isinstance(checkpoint, dict) else checkpoint
+                classifier_keys = [k for k in sd.keys() if 'classifier' in k and 'weight' in k]
+                if classifier_keys:
+                    actual_n = sd[classifier_keys[-1]].shape[0]
+                    if actual_n != num_classes:
+                        logger.warning(
+                            f"Label map has {num_classes} classes but classifier weights have "
+                            f"{actual_n} outputs. Truncating label map to match weights."
+                        )
+                        num_classes = actual_n
+                        self.label_map = {i: v for i, v in self.label_map.items() if i < actual_n}
 
             # Create model
             self.model = ImgClassifier(

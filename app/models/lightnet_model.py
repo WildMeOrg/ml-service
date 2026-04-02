@@ -7,8 +7,6 @@ from io import BytesIO
 from PIL import Image
 import torchvision.transforms as tf
 
-import lightnet as ln
-
 from .base_model import BaseModel
 from ..utils.checkpoint_utils import get_checkpoint_path
 
@@ -21,6 +19,18 @@ class LightNetModel(BaseModel):
     Compatible with WBIA lightnet species-specific detection models.
     Uses .py config files and .weights binary weight files.
     """
+
+    _ln = None  # Lazy-loaded lightnet module
+
+    @classmethod
+    def _import_lightnet(cls):
+        """Lazy-import lightnet with brambox compatibility shim."""
+        if cls._ln is None:
+            from ._brambox_compat import ensure_brambox_compat
+            ensure_brambox_compat()
+            import lightnet
+            cls._ln = lightnet
+        return cls._ln
 
     def __init__(self):
         self.params = None
@@ -64,6 +74,7 @@ class LightNetModel(BaseModel):
             actual_weight_path = get_checkpoint_path(weight_path)
 
             # Load via lightnet HyperParameters
+            ln = self._import_lightnet()
             self.params = ln.engine.HyperParameters.from_file(actual_config_path)
             self.params.load(actual_weight_path)
             self.params.device = self.device
@@ -113,6 +124,7 @@ class LightNetModel(BaseModel):
             img_size = (img_w, img_h)
 
             # Letterbox preprocessing
+            ln = self._import_lightnet()
             img_lb = ln.data.transform.Letterbox.apply(img, dimension=self.params.input_dimension)
             img_tensor = tf.ToTensor()(img_lb).unsqueeze(0)
 

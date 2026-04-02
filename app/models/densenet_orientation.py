@@ -127,7 +127,16 @@ class DenseNetOrientationModel(BaseModel):
             # Apply bounding box
             if bbox is not None:
                 x, y, w, h = bbox
-                image = image[y:y+h, x:x+w]
+                img_h, img_w = image.shape[:2]
+                # Clamp to image bounds
+                x1 = max(0, int(x))
+                y1 = max(0, int(y))
+                x2 = min(img_w, int(x + w))
+                y2 = min(img_h, int(y + h))
+                if x2 > x1 and y2 > y1:
+                    image = image[y1:y2, x1:x2]
+                else:
+                    logger.warning(f"Invalid crop bbox [{x},{y},{w},{h}] for image {img_w}x{img_h}, using full image")
 
             # Apply rotation
             if theta != 0.0:

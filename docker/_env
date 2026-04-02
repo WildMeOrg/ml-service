@@ -1,5 +1,26 @@
-# rename to .env and set local values - examples:
+# Copy this file to .env and set values for your environment.
+#
+#   cp _env .env
+#
+# Required ----------------------------------------------------------------
 
-DATASETS_DIR=/data0/user/datasets
-# to share paths with WBIA:
-DATA_DB_DIR=/data2/tier2/data/whiskerbook/data/db
+# Directory containing model weight files (.pt, .weights, .bin, .pth, etc.)
+# These are mounted into the container at /models/ — use /models/ paths in model_config.json
+MODELS_DIR=/data0/user/models
+
+# Optional ----------------------------------------------------------------
+
+# GPU device ID (default: 0)
+# GPU_ID=0
+
+# PyTorch device: cuda, cpu (default: cuda)
+# DEVICE=cuda
+
+# Number of uvicorn workers (default: 1 — use 1 for GPU to avoid VRAM contention)
+# WORKERS=1
+
+# Host port to expose (default: 6050)
+# ML_SERVICE_PORT=6050
+
+# Directory shared with WBIA/Wildbook for image paths (so image_uuid_list file paths resolve)
+# DATA_DB_DIR=/data/db
