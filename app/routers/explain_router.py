@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import logging
 from pathlib import Path
 
@@ -166,17 +167,16 @@ def run_pairx(imgs1_transformed, imgs2_transformed, imgs1, imgs2, model, layer_k
 
     pairx_imgs = []
     try:
-        with torch.no_grad():
-            pairx_imgs = explain(
-                torch.cat(imgs1_transformed),
-                torch.cat(imgs2_transformed),
-                imgs1,
-                imgs2,
-                model,
-                [layer_key],
-                k_lines=k_lines,
-                k_colors=k_colors,
-            )
+        pairx_imgs = explain(
+            torch.cat(imgs1_transformed),
+            torch.cat(imgs2_transformed),
+            imgs1,
+            imgs2,
+            model,
+            [layer_key],
+            k_lines=k_lines,
+            k_colors=k_colors,
+        )
     # Handle out of memory errors by breaking into two batches and running again
     except Exception as e:
         if str(e).startswith("torch.cuda.OutOfMemoryError:"):
@@ -189,6 +189,9 @@ def run_pairx(imgs1_transformed, imgs2_transformed, imgs1, imgs2, model, layer_k
             return first_half + second_half
         else:
             raise HTTPException(status_code=500, detail=f"Internal Server Error")
+    finally:
+        # PAIR-X backward() accumulates .grad on model params — clear to prevent VRAM growth
+        model.zero_grad(set_to_none=True)
     
     toReturn = []
     for pairx_img in pairx_imgs:
@@ -213,7 +216,7 @@ class body(BaseModel):
     theta2: list[float] = [0.0]
     model_id: str = "miewid-msv4.1"
     crop_bbox: bool = False
-    visualization_type: str = "lines_and_colors"
+    visualization_type: str = "only_colors"
     layer_key: str = "backbone.blocks.3"
     k_lines: int = 20
     k_colors: int = 5
@@ -282,4 +285,9 @@ async def read_items(
         else:
             raise HTTPException(status_code=400, detail="Unsupported algorithm.")
     
-    return {'response': 'visualizations', 'count': len(visualizations)}
+    images_b64 = []
+    for vis in visualizations:
+        _, buf = cv2.imencode('.png', cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
+        images_b64.append(base64.b64encode(buf).decode('utf-8'))
+
+    return {'response': 'visualizations', 'images': images_b64, 'count': len(images_b64)}
