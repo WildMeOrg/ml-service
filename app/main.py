@@ -3,6 +3,9 @@ import os
 import sys
 import logging
 import argparse
+
+# Add vendor/ to path for vendored dependencies (e.g. lightnet)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'vendor'))
 from fastapi import FastAPI
 from app.routers import predict_router, explain_router, extract_router, classify_router, pipeline_router, assign_router, wbia_compat_router
 from app.models.model_handler import ModelHandler

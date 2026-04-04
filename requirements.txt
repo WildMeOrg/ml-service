@@ -27,6 +27,6 @@ scikit-learn>=1.3.0
 joblib>=1.3.0
 shapely>=2.0
 brambox>=4.0
-git+https://github.com/WildMeOrg/wbia-deprecate-tpl-lightnet.git@cad0ca27e2706f5ade247e09229fa02522e3c458#egg=lightnet
+# lightnet is vendored in vendor/lightnet/ (upstream submodule dependency is broken)
 git+https://github.com/WildMeOrg/pairx.git#egg=pairx
 git+https://github.com/WildMeOrg/wbia-plugin-miew-id.git#egg=wbia-miew-id

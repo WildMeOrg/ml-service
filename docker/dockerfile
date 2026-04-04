@@ -3,7 +3,7 @@ FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
 WORKDIR /app
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONPATH=/app
+ENV PYTHONPATH=/app:/app/vendor
 ENV PYTHONUNBUFFERED=1
 
 # Install Python and system dependencies
@@ -33,8 +33,9 @@ RUN ln -sf /usr/share/zoneinfo/Etc/UTC /etc/localtime && echo "Etc/UTC" > /etc/t
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy application code and vendored dependencies
 COPY app/ app/
+COPY vendor/ vendor/
 
 EXPOSE 6050
 
