@@ -37,7 +37,7 @@ class PipelineRequest(BaseModel):
     extract_model_id: str = Field(..., description="ID of the MiewID model to use for embeddings extraction")
     orientation_model_id: Optional[str] = Field(None, description="ID of the DenseNet orientation model (optional)")
     image_uri: str = Field(..., description="URI of the image to process (URL or file path)")
-    bbox_score_threshold: float = Field(default=0.5, description="Minimum bbox score threshold to process")
+    bbox_score_threshold: float = Field(default=0.5, ge=0.0, le=1.0, description="Minimum bbox score threshold to process")
     predict_model_params: Optional[Dict[str, Any]] = Field(
         None,
         description="Optional parameters to override prediction model configuration"
@@ -219,26 +219,18 @@ async def run_pipeline(
                     logger.warning(f"Skipping bbox {i}: invalid dimensions width={width}, height={height}")
                     continue
                 
-                # Step 2b: Run orientation if model provided
-                orientation_result = None
-                if orientation_model:
-                    try:
-                        orientation_result = await run_in_threadpool(
-                            orientation_model.predict,
-                            image_bytes=image_bytes,
-                            bbox=bbox_list,
-                            theta=0.0
-                        )
-                    except Exception as e:
-                        logger.warning(f"Orientation failed for bbox {i}: {e}")
+                # Run orientation, classification, and extraction in parallel
+                tasks = []
+                task_names = []
 
-                # Step 3: Run classification and extraction in parallel for this bbox
                 classify_task = run_in_threadpool(
                     classify_model.predict,
                     image_bytes=image_bytes,
                     bbox=bbox_list,
                     theta=0.0
                 )
+                tasks.append(classify_task)
+                task_names.append('classify')
 
                 extract_task = run_in_threadpool(
                     extract_model.extract_embeddings,
@@ -246,36 +238,66 @@ async def run_pipeline(
                     bbox=tuple(bbox_list),
                     theta=0.0
                 )
+                tasks.append(extract_task)
+                task_names.append('extract')
 
-                # Wait for both tasks to complete
-                classify_result, embeddings = await asyncio.gather(classify_task, extract_task)
-                
-                # Store original results for backup
+                if orientation_model:
+                    orientation_task = run_in_threadpool(
+                        orientation_model.predict,
+                        image_bytes=image_bytes,
+                        bbox=bbox_list,
+                        theta=0.0
+                    )
+                    tasks.append(orientation_task)
+                    task_names.append('orientation')
+
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                # Unpack results, handling per-task failures
+                classify_result = results[0]
+                embeddings = results[1]
+                orientation_result = results[2] if len(results) > 2 else None
+
+                if isinstance(classify_result, Exception):
+                    logger.warning(f"Classification failed for bbox {i}: {classify_result}")
+                    classify_result = {}
+                if isinstance(embeddings, Exception):
+                    logger.warning(f"Extraction failed for bbox {i}: {embeddings}")
+                    embeddings = None
+                if isinstance(orientation_result, Exception):
+                    logger.warning(f"Orientation failed for bbox {i}: {orientation_result}")
+                    orientation_result = None
+
+                embeddings_list = embeddings.tolist() if embeddings is not None else None
+                embeddings_shape = list(embeddings.shape) if embeddings is not None else None
+
+                # Store original results
                 original_classify_results.append(classify_result)
                 original_extract_results.append({
-                    'embeddings': embeddings.tolist(),
-                    'embeddings_shape': list(embeddings.shape),
+                    'embeddings': embeddings_list,
+                    'embeddings_shape': embeddings_shape,
                     'bbox': bbox_list
                 })
-                
+
                 # Extract the top classification result
                 top_classification = None
-                if 'predictions' in classify_result and classify_result['predictions']:
+                if isinstance(classify_result, dict) and 'predictions' in classify_result and classify_result['predictions']:
                     top_class = classify_result['predictions'][0]
                     top_classification = {
-                        'class': top_class.get('label'),  # EfficientNet uses 'label' not 'class'
+                        'class': top_class.get('label'),
                         'probability': top_class.get('probability'),
-                        'class_id': top_class.get('index')  # EfficientNet uses 'index' not 'class_id'
+                        'class_id': top_class.get('index')
                     }
-                
+
                 # Extract orientation top prediction
                 top_orientation = None
-                if orientation_result and 'predictions' in orientation_result:
+                if isinstance(orientation_result, dict) and 'predictions' in orientation_result:
                     preds = orientation_result['predictions']
                     if preds:
                         top_orientation = {
                             'label': preds[0].get('label'),
                             'probability': preds[0].get('probability'),
+                            'class_id': preds[0].get('index')
                         }
 
                 # Create clean pipeline result entry
@@ -284,11 +306,12 @@ async def run_pipeline(
                     'bbox_score': bbox_prediction.get('score'),
                     'detection_class': bbox_prediction.get('class'),
                     'detection_class_id': bbox_prediction.get('class_id'),
-                    'orientation': top_orientation,
                     'classification': top_classification,
-                    'embedding': embeddings.tolist(),
-                    'embedding_shape': list(embeddings.shape)
+                    'embedding': embeddings_list,
+                    'embedding_shape': embeddings_shape
                 }
+                if top_orientation is not None:
+                    bbox_result['orientation'] = top_orientation
                 
                 pipeline_results.append(bbox_result)
             
@@ -306,7 +329,8 @@ async def run_pipeline(
                     'predict_model_id': pipeline_request.predict_model_id,
                     'classify_model_id': pipeline_request.classify_model_id,
                     'extract_model_id': pipeline_request.extract_model_id,
-                    'orientation_model_id': pipeline_request.orientation_model_id
+                    **(({'orientation_model_id': pipeline_request.orientation_model_id}
+                        ) if pipeline_request.orientation_model_id else {})
                 },
                 'bbox_score_threshold': pipeline_request.bbox_score_threshold,
                 'total_predictions': total_predictions,

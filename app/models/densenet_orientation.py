@@ -152,7 +152,7 @@ class DenseNetOrientationModel(BaseModel):
 
             # Inference
             with torch.no_grad():
-                probs = self.model(tensor).squeeze().cpu().numpy()
+                probs = self.model(tensor).squeeze(0).cpu().numpy()
 
             # Build results — return all classes with probabilities
             results = []
