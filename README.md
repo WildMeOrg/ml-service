@@ -35,6 +35,13 @@ Runs object detection and returns bounding boxes. Works with any detection model
 }
 ```
 
+`image_uri` accepts:
+- **URL**: `https://example.com/image.jpg` (fetched server-side)
+- **Local path**: `/data/db/images/image.jpg` (read from server filesystem)
+- **Data URI**: `data:image/jpeg;base64,/9j/4AAQ...` (inline base64-encoded image)
+
+Data URIs are supported across all endpoints (`/predict/`, `/classify/`, `/extract/`, `/pipeline/`).
+
 **Response**:
 ```json
 {
@@ -178,6 +185,34 @@ Runs detection, then classifies and extracts embeddings for each detected region
     "image_uri": "https://example.com/image.jpg",
     "bbox_score_threshold": 0.5,
     "predict_model_params": {"conf": 0.6}
+}
+```
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `predict_model_id` | yes | Detection model (YOLO, MegaDetector, or LightNet) |
+| `classify_model_id` | yes | Classification model (EfficientNet) |
+| `extract_model_id` | yes | Embedding model (MiewID) |
+| `image_uri` | yes | URL, local path, or `data:` URI |
+| `orientation_model_id` | no | DenseNet orientation model; when provided, orientation is estimated for each detection and included in results |
+| `bbox_score_threshold` | no | Minimum detection confidence (default: 0.5, range: 0.0-1.0) |
+| `predict_model_params` | no | Override detection model parameters |
+
+When `orientation_model_id` is provided, each result includes an `orientation` field:
+
+```json
+{
+    "pipeline_results": [
+        {
+            "bbox": [68.0, 134.6, 71.5, 130.7],
+            "bbox_score": 0.91,
+            "detection_class": "elephant+head",
+            "classification": {"class": "elephant:left", "probability": 0.99, "class_id": 2},
+            "orientation": {"label": "left", "probability": 0.95},
+            "embedding": [0.1234, -0.5678],
+            "embedding_shape": [1, 512]
+        }
+    ]
 }
 ```
 
