@@ -1,12 +1,11 @@
 import logging
-import base64
 from fastapi import APIRouter, HTTPException, Request, status, Depends
 from typing import Dict, Any, List, Optional
 import httpx
 import asyncio
-from pathlib import Path
 from pydantic import BaseModel, Field
 from app.models.model_handler import ModelHandler
+from app.utils.image_uri import resolve_image_uri, sanitize_uri_for_response
 from fastapi.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
@@ -16,17 +15,6 @@ router = APIRouter(prefix="/classify", tags=["Image Classification"])
 # Limit concurrent classifications to prevent OOM errors
 MAX_CONCURRENT_CLASSIFICATIONS = 2
 classify_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CLASSIFICATIONS)
-
-def is_url(string: str) -> bool:
-    """Check if a string is a valid URL.
-    
-    Args:
-        string: The string to check
-        
-    Returns:
-        bool: True if the string is a URL, False otherwise
-    """
-    return string.startswith(('http://', 'https://'))
 
 class ClassifyRequest(BaseModel):
     """Request model for image classification endpoint."""
@@ -85,28 +73,13 @@ async def classify_image(
                 )
 
             # Resolve image bytes from URI (URL, data URI, or local path)
-            if classify_request.image_uri.startswith('data:'):
-                try:
-                    header, encoded = classify_request.image_uri.split(',', 1)
-                    image_bytes = base64.b64decode(encoded)
-                except Exception as e:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"Invalid data URI: {e}"
-                    )
-            elif is_url(classify_request.image_uri):
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(classify_request.image_uri)
-                    response.raise_for_status()
-                    image_bytes = response.content
-            else:
-                # Handle local file path
-                file_path = Path(classify_request.image_uri)
-                if not file_path.exists():
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"File not found: {classify_request.image_uri}"
-                    )
+            try:
+                image_bytes = await resolve_image_uri(classify_request.image_uri)
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=str(e)
+                )
                 with open(file_path, "rb") as f:
                     image_bytes = f.read()
             
@@ -119,7 +92,7 @@ async def classify_image(
             )
             
             # Add request metadata to result
-            result['image_uri'] = classify_request.image_uri
+            result['image_uri'] = sanitize_uri_for_response(classify_request.image_uri)
             
             return result
             

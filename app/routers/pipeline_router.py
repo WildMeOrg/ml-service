@@ -1,15 +1,14 @@
 import logging
-import base64
 from fastapi import APIRouter, HTTPException, Request, status, Depends
 from typing import Dict, Any, List, Optional
 import httpx
 import asyncio
-from pathlib import Path
 from pydantic import BaseModel, Field
 from app.models.model_handler import ModelHandler
 from app.models.efficientnet import EfficientNetModel
 from app.models.miewid import MiewidModel
 from app.models.densenet_orientation import DenseNetOrientationModel
+from app.utils.image_uri import resolve_image_uri, sanitize_uri_for_response, sanitize_uri_for_logging
 from fastapi.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
@@ -19,17 +18,6 @@ router = APIRouter(prefix="/pipeline", tags=["Pipeline"])
 # Limit concurrent pipeline operations to prevent OOM errors
 MAX_CONCURRENT_PIPELINES = 2
 pipeline_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PIPELINES)
-
-def is_url(string: str) -> bool:
-    """Check if a string is a valid URL.
-    
-    Args:
-        string: The string to check
-        
-    Returns:
-        bool: True if the string is a URL, False otherwise
-    """
-    return string.startswith(('http://', 'https://'))
 
 class PipelineRequest(BaseModel):
     """Request model for pipeline endpoint."""
@@ -133,31 +121,13 @@ async def run_pipeline(
                     )
             
             # Resolve image bytes from URI (URL, data URI, or local path)
-            if pipeline_request.image_uri.startswith('data:'):
-                # Base64 data URI: data:image/jpeg;base64,/9j/4AAQ...
-                try:
-                    header, encoded = pipeline_request.image_uri.split(',', 1)
-                    image_bytes = base64.b64decode(encoded)
-                except Exception as e:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"Invalid data URI: {e}"
-                    )
-            elif is_url(pipeline_request.image_uri):
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(pipeline_request.image_uri)
-                    response.raise_for_status()
-                    image_bytes = response.content
-            else:
-                # Handle local file path
-                file_path = Path(pipeline_request.image_uri)
-                if not file_path.exists():
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"File not found: {pipeline_request.image_uri}"
-                    )
-                with open(file_path, "rb") as f:
-                    image_bytes = f.read()
+            try:
+                image_bytes = await resolve_image_uri(pipeline_request.image_uri)
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=str(e)
+                )
             
             # Step 1: Run prediction to get bboxes
             logger.info(f"Running prediction with model {pipeline_request.predict_model_id}")
@@ -335,7 +305,7 @@ async def run_pipeline(
             
             # Prepare final response
             final_result = {
-                'image_uri': pipeline_request.image_uri,
+                'image_uri': sanitize_uri_for_response(pipeline_request.image_uri),
                 'models_used': {
                     'predict_model_id': pipeline_request.predict_model_id,
                     'classify_model_id': pipeline_request.classify_model_id,

@@ -430,7 +430,8 @@ def _load_image(image_uri: str) -> Optional[bytes]:
             with open(image_uri, "rb") as f:
                 return f.read()
     except Exception as e:
-        logger.error(f"Failed to load image '{image_uri}': {e}")
+        safe_uri = image_uri[:80] + '...' if len(image_uri) > 80 else image_uri
+        logger.error(f"Failed to load image '{safe_uri}': {e}")
         return None
 
 
