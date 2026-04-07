@@ -1,5 +1,6 @@
 import torch
 import torchvision
+import timm
 import cv2
 import numpy as np
 from typing import Dict, Any, List, Optional, Tuple
@@ -13,12 +14,35 @@ from ..utils.checkpoint_utils import get_checkpoint_path
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_ORIENTATION_CLASSES = ['down', 'front', 'left', 'right', 'up']
+
+
+def _detect_architecture(state_dict: dict) -> str:
+    """Detect model architecture from state dict keys."""
+    keys = set(state_dict.keys())
+    if any('stage2' in k or 'transition1' in k for k in keys):
+        return 'hrnet_w32'
+    if any('denseblock' in k or 'denselayer' in k for k in keys):
+        return 'densenet201'
+    if any('features.denseblock' in k for k in keys):
+        return 'densenet201'
+    # Check classifier output features to distinguish
+    for k in keys:
+        if 'classifier.weight' in k:
+            n_features = state_dict[k].shape[1]
+            if n_features == 1920:
+                return 'densenet201'
+            if n_features == 2048:
+                return 'hrnet_w32'
+    return 'densenet201'  # fallback
+
 
 class DenseNetOrientationModel(BaseModel):
-    """DenseNet-201 model for orientation classification.
+    """Orientation classification model supporting DenseNet-201 and HRNet-W32.
 
-    Compatible with WBIA orientation model checkpoints.
-    Checkpoint format: {'state': state_dict, 'classes': class_list}
+    Compatible with WBIA orientation model checkpoints in two formats:
+    - Wrapped: {'state': state_dict, 'classes': class_list}
+    - Raw: bare state_dict (classes must come from config or defaults)
     """
 
     def __init__(self):
@@ -28,11 +52,12 @@ class DenseNetOrientationModel(BaseModel):
         self.label_map = None
         self.transforms = None
         self.model_id = None
+        self.architecture = None
 
     def load(self, model_path: str = "", device: str = 'cpu', model_id: str = "",
              checkpoint_path: str = None, img_size: int = 224, label_map: dict = None,
              **kwargs) -> None:
-        """Load the DenseNet-201 orientation model.
+        """Load the orientation model.
 
         Args:
             model_path: Not used (kept for compatibility)
@@ -49,37 +74,56 @@ class DenseNetOrientationModel(BaseModel):
             self.img_size = img_size
 
             if checkpoint_path is None:
-                raise ValueError("checkpoint_path is required for DenseNet orientation models")
+                raise ValueError("checkpoint_path is required for orientation models")
 
             actual_checkpoint_path = get_checkpoint_path(checkpoint_path)
 
             # Load checkpoint
             checkpoint = torch.load(actual_checkpoint_path, map_location=self.device, weights_only=False)
 
-            # Extract classes and state
-            if isinstance(checkpoint, dict) and 'classes' in checkpoint:
-                classes = checkpoint['classes']
+            # Handle both wrapped {'state': ..., 'classes': ...} and raw state_dict formats
+            if isinstance(checkpoint, dict) and 'state' in checkpoint:
                 state_dict = checkpoint['state']
+                classes = checkpoint.get('classes')
             else:
-                raise ValueError("Checkpoint must contain 'state' and 'classes' keys")
+                state_dict = checkpoint
+                classes = None
 
-            # Determine label map
-            if label_map is not None:
-                self.label_map = {int(k): v for k, v in label_map.items()}
-            else:
-                self.label_map = {i: c for i, c in enumerate(classes)}
-
-            num_classes = len(self.label_map)
-
-            # Create DenseNet-201 model
-            self.model = torchvision.models.densenet201()
-            num_ftrs = self.model.classifier.in_features  # 1920
-            self.model.classifier = nn.Linear(num_ftrs, num_classes)
-
-            # Strip 'module.' prefix from DataParallel-wrapped models
+            # Strip 'model.' and 'module.' prefixes from DataParallel-wrapped models
             clean_state = OrderedDict()
             for k, v in state_dict.items():
-                clean_state[k.replace('module.', '')] = v
+                clean_key = k.replace('module.', '').replace('model.', '')
+                clean_state[clean_key] = v
+
+            # Detect architecture from state dict
+            self.architecture = _detect_architecture(clean_state)
+
+            # Determine number of classes from classifier weights
+            classifier_key = 'classifier.weight'
+            if classifier_key in clean_state:
+                num_classes = clean_state[classifier_key].shape[0]
+            else:
+                raise ValueError(f"Cannot determine num_classes: '{classifier_key}' not found in checkpoint")
+
+            # Determine label map: config > checkpoint > default
+            if label_map is not None:
+                self.label_map = {int(k): v for k, v in label_map.items()}
+            elif classes is not None:
+                self.label_map = {i: c for i, c in enumerate(classes)}
+            elif num_classes == len(DEFAULT_ORIENTATION_CLASSES):
+                self.label_map = {i: c for i, c in enumerate(DEFAULT_ORIENTATION_CLASSES)}
+                logger.info(f"Using default orientation classes: {DEFAULT_ORIENTATION_CLASSES}")
+            else:
+                self.label_map = {i: f"class_{i}" for i in range(num_classes)}
+                logger.warning(f"No class labels found, using generic labels for {num_classes} classes")
+
+            # Create model based on detected architecture
+            if self.architecture == 'hrnet_w32':
+                self.model = timm.create_model('hrnet_w32', pretrained=False, num_classes=num_classes)
+            else:
+                self.model = torchvision.models.densenet201()
+                num_ftrs = self.model.classifier.in_features  # 1920
+                self.model.classifier = nn.Linear(num_ftrs, num_classes)
 
             self.model.load_state_dict(clean_state)
 
@@ -100,10 +144,10 @@ class DenseNetOrientationModel(BaseModel):
                 ToTensorV2()
             ])
 
-            logger.info(f"Loaded DenseNet orientation model '{model_id}' with {num_classes} classes")
+            logger.info(f"Loaded {self.architecture} orientation model '{model_id}' with {num_classes} classes")
 
         except Exception as e:
-            logger.error(f"Error loading DenseNet orientation model: {str(e)}")
+            logger.error(f"Error loading orientation model: {str(e)}")
             raise
 
     def predict(self, image_bytes: bytes, bbox: Optional[List[int]] = None,
@@ -174,14 +218,14 @@ class DenseNetOrientationModel(BaseModel):
             }
 
         except Exception as e:
-            logger.error(f"Error during DenseNet orientation prediction: {str(e)}")
+            logger.error(f"Error during orientation prediction: {str(e)}")
             raise
 
     def get_model_info(self) -> Dict[str, Any]:
         """Get information about the loaded model."""
         return {
             'model_type': 'densenet-orientation',
-            'model_architecture': 'densenet201',
+            'model_architecture': self.architecture or 'unknown',
             'image_size': self.img_size,
             'num_classes': len(self.label_map),
             'label_map': self.label_map,
