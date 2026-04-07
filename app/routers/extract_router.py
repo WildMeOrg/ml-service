@@ -1,4 +1,5 @@
 import logging
+import base64
 from fastapi import APIRouter, HTTPException, Request, status, Depends
 from typing import Dict, Any, List, Optional
 import httpx
@@ -84,8 +85,17 @@ async def extract_embeddings(
                     detail=f"Model '{extract_request.model_id}' is not a MiewID model. Only MiewID models support embeddings extraction."
                 )
             
-            # Download image if it's a URL
-            if is_url(extract_request.image_uri):
+            # Resolve image bytes from URI (URL, data URI, or local path)
+            if extract_request.image_uri.startswith('data:'):
+                try:
+                    header, encoded = extract_request.image_uri.split(',', 1)
+                    image_bytes = base64.b64decode(encoded)
+                except Exception as e:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Invalid data URI: {e}"
+                    )
+            elif is_url(extract_request.image_uri):
                 async with httpx.AsyncClient() as client:
                     response = await client.get(extract_request.image_uri)
                     response.raise_for_status()

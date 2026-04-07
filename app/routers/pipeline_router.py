@@ -1,4 +1,5 @@
 import logging
+import base64
 from fastapi import APIRouter, HTTPException, Request, status, Depends
 from typing import Dict, Any, List, Optional
 import httpx
@@ -131,8 +132,18 @@ async def run_pipeline(
                         detail=f"Model '{pipeline_request.orientation_model_id}' is not a DenseNet orientation model."
                     )
             
-            # Download image if it's a URL
-            if is_url(pipeline_request.image_uri):
+            # Resolve image bytes from URI (URL, data URI, or local path)
+            if pipeline_request.image_uri.startswith('data:'):
+                # Base64 data URI: data:image/jpeg;base64,/9j/4AAQ...
+                try:
+                    header, encoded = pipeline_request.image_uri.split(',', 1)
+                    image_bytes = base64.b64decode(encoded)
+                except Exception as e:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Invalid data URI: {e}"
+                    )
+            elif is_url(pipeline_request.image_uri):
                 async with httpx.AsyncClient() as client:
                     response = await client.get(pipeline_request.image_uri)
                     response.raise_for_status()

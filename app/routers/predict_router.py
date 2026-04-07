@@ -1,4 +1,5 @@
 import logging
+import base64
 from fastapi import APIRouter, HTTPException, Request, status, Depends
 from typing import Optional, Dict, Any, List
 import httpx
@@ -96,8 +97,17 @@ async def predict(
                     }
                 )
             
-            # Download image if it's a URL
-            if is_url(prediction.image_uri):
+            # Resolve image bytes from URI (URL, data URI, or local path)
+            if prediction.image_uri.startswith('data:'):
+                try:
+                    header, encoded = prediction.image_uri.split(',', 1)
+                    image_bytes = base64.b64decode(encoded)
+                except Exception as e:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Invalid data URI: {e}"
+                    )
+            elif is_url(prediction.image_uri):
                 async with httpx.AsyncClient() as client:
                     response = await client.get(prediction.image_uri)
                     response.raise_for_status()

@@ -1,4 +1,5 @@
 import logging
+import base64
 from fastapi import APIRouter, HTTPException, Request, status, Depends
 from typing import Dict, Any, List, Optional
 import httpx
@@ -83,8 +84,17 @@ async def classify_image(
                     detail=f"Model '{classify_request.model_id}' does not support classification."
                 )
 
-            # Download image if it's a URL
-            if is_url(classify_request.image_uri):
+            # Resolve image bytes from URI (URL, data URI, or local path)
+            if classify_request.image_uri.startswith('data:'):
+                try:
+                    header, encoded = classify_request.image_uri.split(',', 1)
+                    image_bytes = base64.b64decode(encoded)
+                except Exception as e:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Invalid data URI: {e}"
+                    )
+            elif is_url(classify_request.image_uri):
                 async with httpx.AsyncClient() as client:
                     response = await client.get(classify_request.image_uri)
                     response.raise_for_status()
