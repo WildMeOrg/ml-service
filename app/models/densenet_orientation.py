@@ -20,13 +20,14 @@ DEFAULT_ORIENTATION_CLASSES = ['down', 'front', 'left', 'right', 'up']
 def _detect_architecture(state_dict: dict) -> str:
     """Detect model architecture from state dict keys."""
     keys = set(state_dict.keys())
-    if any('stage2' in k or 'transition1' in k for k in keys):
-        return 'hrnet_w32'
+    # Check DenseNet first — both DenseNet and HRNet have 'transition' keys,
+    # but only DenseNet has 'denseblock' or 'denselayer'.
     if any('denseblock' in k or 'denselayer' in k for k in keys):
         return 'densenet201'
-    if any('features.denseblock' in k for k in keys):
-        return 'densenet201'
-    # Check classifier output features to distinguish
+    # HRNet has 'stage2'/'stage3'/'stage4' which DenseNet does not
+    if any('stage2' in k or 'stage3' in k or 'stage4' in k for k in keys):
+        return 'hrnet_w32'
+    # Fallback: check classifier output features
     for k in keys:
         if 'classifier.weight' in k:
             n_features = state_dict[k].shape[1]
