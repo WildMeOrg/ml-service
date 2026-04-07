@@ -111,11 +111,14 @@ async def process_image(uri, bbox, theta, crop_bbox, model, device):
 
     validate_img_parameters(bbox, theta)
 
+    has_bbox = any(v != 0 for v in bbox)
     chip = get_chip_from_img(image, bbox, theta)
     transformed_image = preprocess(chip, model)
     if len(transformed_image.shape) == 3:
             transformed_image = transformed_image.unsqueeze(0)
-    if crop_bbox:
+    # Always use the chip as the display image when a real bbox is provided,
+    # otherwise the PAIR-X heatmap coordinates won't match the display image.
+    if crop_bbox or has_bbox:
         image = chip
     img_size = tuple(transformed_image.shape[-2:])
     image = np.array(transforms.Resize(img_size)(Image.fromarray(image)))
@@ -215,7 +218,7 @@ class body(BaseModel):
     bb2: list[list[float]]
     theta2: list[float] = [0.0]
     model_id: str = "miewid-msv4.1"
-    crop_bbox: bool = False
+    crop_bbox: bool = True
     visualization_type: str = "only_colors"
     layer_key: str = "backbone.blocks.3"
     k_lines: int = 20
