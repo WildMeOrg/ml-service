@@ -3,11 +3,12 @@ from fastapi import APIRouter, HTTPException, Request, status, Depends
 from typing import Dict, Any, List, Optional
 import httpx
 import asyncio
-from pathlib import Path
 from pydantic import BaseModel, Field
 from app.models.model_handler import ModelHandler
 from app.models.efficientnet import EfficientNetModel
 from app.models.miewid import MiewidModel
+from app.models.densenet_orientation import DenseNetOrientationModel
+from app.utils.image_uri import resolve_image_uri, sanitize_uri_for_response, sanitize_uri_for_logging
 from fastapi.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
@@ -18,26 +19,16 @@ router = APIRouter(prefix="/pipeline", tags=["Pipeline"])
 MAX_CONCURRENT_PIPELINES = 2
 pipeline_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PIPELINES)
 
-def is_url(string: str) -> bool:
-    """Check if a string is a valid URL.
-    
-    Args:
-        string: The string to check
-        
-    Returns:
-        bool: True if the string is a URL, False otherwise
-    """
-    return string.startswith(('http://', 'https://'))
-
 class PipelineRequest(BaseModel):
     """Request model for pipeline endpoint."""
     predict_model_id: str = Field(..., description="ID of the model to use for prediction (bbox detection)")
     classify_model_id: str = Field(..., description="ID of the EfficientNet model to use for classification")
     extract_model_id: str = Field(..., description="ID of the MiewID model to use for embeddings extraction")
+    orientation_model_id: Optional[str] = Field(None, description="ID of the DenseNet orientation model (optional)")
     image_uri: str = Field(..., description="URI of the image to process (URL or file path)")
-    bbox_score_threshold: float = Field(default=0.5, description="Minimum bbox score threshold to process")
+    bbox_score_threshold: float = Field(default=0.5, ge=0.0, le=1.0, description="Minimum bbox score threshold to process")
     predict_model_params: Optional[Dict[str, Any]] = Field(
-        None, 
+        None,
         description="Optional parameters to override prediction model configuration"
     )
 
@@ -110,23 +101,33 @@ async def run_pipeline(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Model '{pipeline_request.extract_model_id}' is not a MiewID model. Only MiewID models support embeddings extraction."
                 )
-            
-            # Download image if it's a URL
-            if is_url(pipeline_request.image_uri):
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(pipeline_request.image_uri)
-                    response.raise_for_status()
-                    image_bytes = response.content
-            else:
-                # Handle local file path
-                file_path = Path(pipeline_request.image_uri)
-                if not file_path.exists():
+
+            # Validate optional orientation model
+            orientation_model = None
+            if pipeline_request.orientation_model_id:
+                orientation_model = handler.get_model(pipeline_request.orientation_model_id)
+                if not orientation_model:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail={
+                            "error": f"Orientation model '{pipeline_request.orientation_model_id}' not found.",
+                            "available_models": available_models
+                        }
+                    )
+                if not isinstance(orientation_model, DenseNetOrientationModel):
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"File not found: {pipeline_request.image_uri}"
+                        detail=f"Model '{pipeline_request.orientation_model_id}' is not a DenseNet orientation model."
                     )
-                with open(file_path, "rb") as f:
-                    image_bytes = f.read()
+            
+            # Resolve image bytes from URI (URL, data URI, or local path)
+            try:
+                image_bytes = await resolve_image_uri(pipeline_request.image_uri)
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=str(e)
+                )
             
             # Step 1: Run prediction to get bboxes
             logger.info(f"Running prediction with model {pipeline_request.predict_model_id}")
@@ -193,58 +194,107 @@ async def run_pipeline(
                 # YOLO already returns bbox in [x, y, width, height] format, no conversion needed
                 x, y, width, height = bbox_coords
                 bbox_list = [int(x), int(y), int(width), int(height)]
-                
+                theta = float(bbox_prediction.get('theta', 0.0))
+
                 # Validate bbox coordinates
                 if width <= 0 or height <= 0:
                     logger.warning(f"Skipping bbox {i}: invalid dimensions width={width}, height={height}")
                     continue
-                
-                # Run classification and extraction in parallel for this bbox
+
+                # Run orientation, classification, and extraction in parallel
+                tasks = []
+                task_names = []
+
                 classify_task = run_in_threadpool(
                     classify_model.predict,
                     image_bytes=image_bytes,
                     bbox=bbox_list,
-                    theta=0.0
+                    theta=theta
                 )
-                
+                tasks.append(classify_task)
+                task_names.append('classify')
+
                 extract_task = run_in_threadpool(
                     extract_model.extract_embeddings,
                     image_bytes=image_bytes,
                     bbox=tuple(bbox_list),
-                    theta=0.0
+                    theta=theta
                 )
-                
-                # Wait for both tasks to complete
-                classify_result, embeddings = await asyncio.gather(classify_task, extract_task)
-                
-                # Store original results for backup
+                tasks.append(extract_task)
+                task_names.append('extract')
+
+                if orientation_model:
+                    orientation_task = run_in_threadpool(
+                        orientation_model.predict,
+                        image_bytes=image_bytes,
+                        bbox=bbox_list,
+                        theta=theta
+                    )
+                    tasks.append(orientation_task)
+                    task_names.append('orientation')
+
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                # Unpack results, handling per-task failures
+                classify_result = results[0]
+                embeddings = results[1]
+                orientation_result = results[2] if len(results) > 2 else None
+
+                if isinstance(classify_result, Exception):
+                    logger.warning(f"Classification failed for bbox {i}: {classify_result}")
+                    classify_result = {}
+                if isinstance(embeddings, Exception):
+                    logger.warning(f"Extraction failed for bbox {i}: {embeddings}")
+                    embeddings = None
+                if isinstance(orientation_result, Exception):
+                    logger.warning(f"Orientation failed for bbox {i}: {orientation_result}")
+                    orientation_result = None
+
+                embeddings_list = embeddings.tolist() if embeddings is not None else None
+                embeddings_shape = list(embeddings.shape) if embeddings is not None else None
+
+                # Store original results
                 original_classify_results.append(classify_result)
                 original_extract_results.append({
-                    'embeddings': embeddings.tolist(),
-                    'embeddings_shape': list(embeddings.shape),
+                    'embeddings': embeddings_list,
+                    'embeddings_shape': embeddings_shape,
                     'bbox': bbox_list
                 })
-                
+
                 # Extract the top classification result
                 top_classification = None
-                if 'predictions' in classify_result and classify_result['predictions']:
+                if isinstance(classify_result, dict) and 'predictions' in classify_result and classify_result['predictions']:
                     top_class = classify_result['predictions'][0]
                     top_classification = {
-                        'class': top_class.get('label'),  # EfficientNet uses 'label' not 'class'
+                        'class': top_class.get('label'),
                         'probability': top_class.get('probability'),
-                        'class_id': top_class.get('index')  # EfficientNet uses 'index' not 'class_id'
+                        'class_id': top_class.get('index')
                     }
-                
+
+                # Extract orientation top prediction
+                top_orientation = None
+                if isinstance(orientation_result, dict) and 'predictions' in orientation_result:
+                    preds = orientation_result['predictions']
+                    if preds:
+                        top_orientation = {
+                            'label': preds[0].get('label'),
+                            'probability': preds[0].get('probability'),
+                            'class_id': preds[0].get('index')
+                        }
+
                 # Create clean pipeline result entry
                 bbox_result = {
                     'bbox': bbox_coords,
+                    'theta': theta,
                     'bbox_score': bbox_prediction.get('score'),
                     'detection_class': bbox_prediction.get('class'),
                     'detection_class_id': bbox_prediction.get('class_id'),
                     'classification': top_classification,
-                    'embedding': embeddings.tolist(),
-                    'embedding_shape': list(embeddings.shape)
+                    'embedding': embeddings_list,
+                    'embedding_shape': embeddings_shape
                 }
+                if top_orientation is not None:
+                    bbox_result['orientation'] = top_orientation
                 
                 pipeline_results.append(bbox_result)
             
@@ -257,11 +307,13 @@ async def run_pipeline(
             
             # Prepare final response
             final_result = {
-                'image_uri': pipeline_request.image_uri,
+                'image_uri': sanitize_uri_for_response(pipeline_request.image_uri),
                 'models_used': {
                     'predict_model_id': pipeline_request.predict_model_id,
                     'classify_model_id': pipeline_request.classify_model_id,
-                    'extract_model_id': pipeline_request.extract_model_id
+                    'extract_model_id': pipeline_request.extract_model_id,
+                    **(({'orientation_model_id': pipeline_request.orientation_model_id}
+                        ) if pipeline_request.orientation_model_id else {})
                 },
                 'bbox_score_threshold': pipeline_request.bbox_score_threshold,
                 'total_predictions': total_predictions,

@@ -1,0 +1,17 @@
+.git
+.gitignore
+.venv
+.vscode
+.idea
+__pycache__
+*.pyc
+*.log
+*.pt
+*.weights
+*.bin
+*.pth
+docker/.env
+test_*.py
+test_*.sh
+README.md
+LICENSE

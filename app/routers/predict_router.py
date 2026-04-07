@@ -3,11 +3,11 @@ from fastapi import APIRouter, HTTPException, Request, status, Depends
 from typing import Optional, Dict, Any, List
 import httpx
 import asyncio
-from pathlib import Path
 from pydantic import BaseModel, Field
 import json
 import os
 from app.models.model_handler import ModelHandler
+from app.utils.image_uri import resolve_image_uri, sanitize_uri_for_logging
 from fastapi.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
@@ -17,17 +17,6 @@ router = APIRouter(prefix="/predict", tags=["Prediction"])
 # Limit concurrent predictions to prevent OOM errors
 MAX_CONCURRENT_PREDICTIONS = 2
 predict_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PREDICTIONS)
-
-def is_url(string: str) -> bool:
-    """Check if a string is a valid URL.
-    
-    Args:
-        string: The string to check
-        
-    Returns:
-        bool: True if the string is a URL, False otherwise
-    """
-    return string.startswith(('http://', 'https://'))
 
 class PredictionRequest(BaseModel):
     """Request model for prediction endpoint."""
@@ -96,22 +85,14 @@ async def predict(
                     }
                 )
             
-            # Download image if it's a URL
-            if is_url(prediction.image_uri):
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(prediction.image_uri)
-                    response.raise_for_status()
-                    image_bytes = response.content
-            else:
-                # Handle local file path
-                file_path = Path(prediction.image_uri)
-                if not file_path.exists():
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"File not found: {prediction.image_uri}"
-                    )
-                with open(file_path, "rb") as f:
-                    image_bytes = f.read()
+            # Resolve image bytes from URI (URL, data URI, or local path)
+            try:
+                image_bytes = await resolve_image_uri(prediction.image_uri)
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=str(e)
+                )
             
             # Get model info for default parameters
             model_info = handler.get_model_info(prediction.model_id)

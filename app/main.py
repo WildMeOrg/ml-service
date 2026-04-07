@@ -3,8 +3,11 @@ import os
 import sys
 import logging
 import argparse
+
+# Add vendor/ to path for vendored dependencies (e.g. lightnet)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'vendor'))
 from fastapi import FastAPI
-from app.routers import predict_router, explain_router, extract_router, classify_router, pipeline_router
+from app.routers import predict_router, explain_router, extract_router, classify_router, pipeline_router, assign_router, wbia_compat_router
 from app.models.model_handler import ModelHandler
 
 # Configure logging
@@ -87,10 +90,12 @@ async def startup_event():
         app.state.model_handler = model_handler
         logger.info("All models loaded successfully")
         
-        # Check if /data/db is accessible
+        # Check if /data/db is accessible (read-only mount from host for shared image paths)
         db_path = "/data/db"
-        if not os.path.isdir(db_path) or not os.access(db_path, os.W_OK):
-            logger.warning(f"Warning: Database directory {db_path} is not accessible or writable. This may cause issues with accessing image data.")
+        if os.path.isdir(db_path) and os.access(db_path, os.R_OK):
+            logger.info(f"Shared image directory {db_path} is accessible")
+        else:
+            logger.info(f"Shared image directory {db_path} not mounted (WBIA image path sharing disabled)")
         
     except Exception as e:
         logger.error(f"Error during model initialization: {str(e)}")
@@ -108,65 +113,66 @@ async def shutdown_event():
 
 @app.get("/health")
 async def health_check():
-    """Enhanced health check endpoint for Grafana and autoheal monitoring.
-    
-    Performs comprehensive checks:
-    - Service is running
-    - CUDA/GPU accessibility via nvidia-smi
-    - GPU device detection
-    - Model handler availability
-    
-    Returns:
-        dict: Detailed health status with 200 OK response
-    Raises:
-        500: If critical health checks fail
+    """Health check endpoint for Grafana and autoheal monitoring.
+
+    Device-aware: GPU checks only run when device is cuda.
+    Returns 200 if healthy, 500 if critical checks fail.
     """
     import subprocess
     import torch
     from fastapi import HTTPException
-    
+
+    device = getattr(app.state, 'device', 'cpu')
+
     health_status = {
         "status": "healthy",
         "service": "running",
+        "device": device,
         "checks": {}
     }
-    
-    # Check CUDA via nvidia-smi
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=index,name,temperature.gpu,utilization.gpu", "--format=csv,noheader"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            gpu_lines = result.stdout.strip().split('\n')
-            health_status["checks"]["nvidia_smi"] = "ok"
-            health_status["checks"]["gpu_count"] = len(gpu_lines)
-            health_status["checks"]["gpus"] = [line.strip() for line in gpu_lines]
-        else:
-            health_status["checks"]["nvidia_smi"] = "failed"
+
+    # GPU checks only when running on CUDA
+    if device == "cuda":
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=index,name,temperature.gpu,utilization.gpu", "--format=csv,noheader"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                gpu_lines = result.stdout.strip().split('\n')
+                health_status["checks"]["nvidia_smi"] = "ok"
+                health_status["checks"]["gpu_count"] = len(gpu_lines)
+                health_status["checks"]["gpus"] = [line.strip() for line in gpu_lines]
+            else:
+                health_status["checks"]["nvidia_smi"] = "failed"
+                health_status["status"] = "unhealthy"
+                raise HTTPException(status_code=500, detail="nvidia-smi check failed")
+        except HTTPException:
+            raise
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+            health_status["checks"]["nvidia_smi"] = f"error: {str(e)}"
             health_status["status"] = "unhealthy"
-            raise HTTPException(status_code=500, detail="nvidia-smi check failed")
-    except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
-        health_status["checks"]["nvidia_smi"] = f"error: {str(e)}"
-        health_status["status"] = "unhealthy"
-        raise HTTPException(status_code=500, detail=f"GPU check failed: {str(e)}")
-    
-    # Check PyTorch CUDA availability
-    try:
-        cuda_available = torch.cuda.is_available()
-        health_status["checks"]["torch_cuda"] = "available" if cuda_available else "unavailable"
-        if cuda_available:
-            health_status["checks"]["torch_gpu_count"] = torch.cuda.device_count()
-        else:
+            raise HTTPException(status_code=500, detail=f"GPU check failed: {str(e)}")
+
+        try:
+            cuda_available = torch.cuda.is_available()
+            health_status["checks"]["torch_cuda"] = "available" if cuda_available else "unavailable"
+            if cuda_available:
+                health_status["checks"]["torch_gpu_count"] = torch.cuda.device_count()
+            else:
+                health_status["status"] = "unhealthy"
+                raise HTTPException(status_code=500, detail="PyTorch CUDA unavailable")
+        except HTTPException:
+            raise
+        except Exception as e:
+            health_status["checks"]["torch_cuda"] = f"error: {str(e)}"
             health_status["status"] = "unhealthy"
-            raise HTTPException(status_code=500, detail="PyTorch CUDA unavailable")
-    except Exception as e:
-        health_status["checks"]["torch_cuda"] = f"error: {str(e)}"
-        health_status["status"] = "unhealthy"
-        raise HTTPException(status_code=500, detail=f"PyTorch CUDA check failed: {str(e)}")
-    
+            raise HTTPException(status_code=500, detail=f"PyTorch CUDA check failed: {str(e)}")
+    else:
+        health_status["checks"]["gpu"] = "skipped (device is not cuda)"
+
     # Check if models are loaded
     try:
         if hasattr(app.state, 'model_handler') and app.state.model_handler:
@@ -178,7 +184,7 @@ async def health_check():
     except Exception as e:
         health_status["checks"]["models_loaded"] = f"error: {str(e)}"
         health_status["status"] = "degraded"
-    
+
     return health_status
 
 app.include_router(predict_router.router)
@@ -186,3 +192,5 @@ app.include_router(explain_router.router)
 app.include_router(extract_router.router)
 app.include_router(classify_router.router)
 app.include_router(pipeline_router.router)
+app.include_router(assign_router.router)
+app.include_router(wbia_compat_router.router)

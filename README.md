@@ -1,81 +1,29 @@
-# FastAPI Model Serving
+# Wildbook ML Service
 
-This project provides a flexible and extensible framework for serving computer vision models using FastAPI. It supports multiple model types including YOLO variants and MegaDetector, providing a unified interface for object detection.
+A flexible FastAPI service for serving computer vision models used by the [Wildbook](https://wildbook.org/) platform. Supports detection, classification, orientation estimation, embedding extraction, explainability, and part-body assignment across multiple model architectures.
 
-## Features
+## Supported Model Types
 
-- **Multiple Model Support**: Supports YOLO variants and MegaDetector models
-- **Unified API**: Consistent interface for all models
-- **Flexible Configuration**: Configure models via JSON config with support for remote model files
-- **Concurrent Processing**: Handle multiple prediction requests efficiently
-- **Detailed Model Information**: Get information about loaded models
-- **Rotation Support**: Handle oriented bounding boxes for specialized detection tasks
-
-## Supported Models
-
-1. **YOLO Ultralytics** (`yolo-ultralytics`):
-
-2. **MegaDetector** (`megadetector`):
-
-## Model Architecture
-
-The application uses a plugin-like architecture for model handlers:
-
-1. **BaseModel**: Abstract base class that all model handlers must implement
-2. **ModelHandler**: Manages multiple model instances and routes requests to the appropriate handler
-3. **Model Handlers**: Implementations for specific model types (YOLOUltralyticsModel, MegaDetectorModel)
-
-## Configuration
-
-Models are configured in `app/model_config.json`. The configuration includes pre-configured models for various use cases.
-
-### Configuration Options
-
-#### Common Parameters
-- `model_id`: Unique identifier for the model
-- `model_type`: Type of the model (`yolo-ultralytics` or `megadetector`)
-- `model_path`: URL or local path to the model file
-- `conf`: Default confidence threshold (0.0 to 1.0)
-
-#### YOLO-specific Parameters
-- `imgsz`: Input image size (e.g., 640)
-- `dilation_factors`: Optional list of [x, y] dilation factors for bounding boxes
-
-#### MegaDetector-specific Parameters
-- `version`: Model version identifier
-
-### Example Configuration
-
-```json
-{
-    "models": [
-        {
-            "model_id": "msv3",
-            "model_type": "yolo-ultralytics",
-            "model_path": "https://example.com/models/detect.yolov11.msv3.pt",
-            "imgsz": 640,
-            "conf": 0.5
-        },
-        {
-            "model_id": "mdv6",
-            "model_type": "megadetector",
-            "model_path": "https://example.com/models/mdv6-yolov9-c.pt",
-            "version": "MDV6-yolov9-c",
-            "conf": 0.5
-        }
-    ]
-}
-```
+| Type | Architecture | Use Case |
+|------|-------------|----------|
+| `yolo-ultralytics` | YOLOv11 (Ultralytics) | Object detection |
+| `megadetector` | MegaDetector (PytorchWildlife) | Animal/person/vehicle detection |
+| `lightnet` | PyDarknet YOLO v2/v3 | Species-specific detection (WBIA legacy models) |
+| `efficientnetv2` | EfficientNet-B4 (timm) | Species/viewpoint classification |
+| `densenet-orientation` | DenseNet-201 (torchvision) | Orientation classification |
+| `miewid` | MiewID transformer | Embedding extraction for re-identification |
 
 ## API Endpoints
 
-### Run Prediction
+### Detection
 
 ```
-POST /predict
+POST /predict/
 ```
 
-**Request Body**:
+Runs object detection and returns bounding boxes. Works with any detection model type (YOLO, MegaDetector, LightNet).
+
+**Request**:
 ```json
 {
     "model_id": "msv3",
@@ -87,323 +35,187 @@ POST /predict
 }
 ```
 
+`image_uri` accepts:
+- **URL**: `https://example.com/image.jpg` (fetched server-side)
+- **Local path**: `/data/db/images/image.jpg` (read from server filesystem)
+- **Data URI**: `data:image/jpeg;base64,/9j/4AAQ...` (inline base64-encoded image)
+
+Data URIs are supported across all endpoints (`/predict/`, `/classify/`, `/extract/`, `/pipeline/`).
+
 **Response**:
 ```json
 {
-    "bboxes": [
-        [68.0103, 134.594, 71.4746, 130.7195],
-        [118.8744, 93.5619, 177.9465, 115.3508]
-    ],
-    "scores": [0.9054, 0.9014],
-    "thetas": [0.0, 0.0],
-    "class_names": ["dog", "cat"],
-    "class_ids": [16, 15]
+    "bboxes": [[68.0, 134.6, 71.5, 130.7]],
+    "scores": [0.9054],
+    "thetas": [0.0],
+    "class_names": ["dog"],
+    "class_ids": [16]
 }
 ```
 
-### Response Format
+- `bboxes`: `[x, y, width, height]` in pixels (top-left origin)
+- `thetas`: Rotation angle in radians (0.0 for axis-aligned boxes)
+- `scores`: Confidence scores (0.0 to 1.0)
 
-- `bboxes`: List of bounding boxes in [x, y, w, h] format (top-left corner, width, height)
-- `thetas`: List of rotation angles in radians (0.0 for axis-aligned boxes)
-- `scores`: List of confidence scores (0.0 to 1.0)
-- `class_names`: List of class names
-- `class_ids`: List of class IDs
-
-### Run Explain
-
-```
-POST /explain
-```
-
-**Request Body**:
-```json
-{
-  "image1_uris": ["Images/img1.png", "Images/img1.png"],
-  "bb1": [
-    [100, 100, 300, 200], [100, 100, 300, 200]
-  ],
-  "theta1": [10.3, 10.3]
-  "image2_uris": ["Images/img1.png", "Images/img2.png"],
-  "bb2": [
-    [0, 0, 0, 0]
-  ],
-  "theta2": [0.0]
-  "model_id": "miewid-msv3",
-  "crop_bbox": false,
-  "visualization_type": "lines_and_colors",
-  "layer_key": "backbone.blocks.3",
-  "k_lines": 20,
-  "k_colors": 5,
-  "algorithm": "pairx"
-}
-```
-
-**Considerations:**
-
-image_uris can be either urls or file paths. If only one image1_uri is specified, it will be run with every image2_uri.
-If there are more uris specified than bounding boxes (bb1 or bb2), the remaining images will be uncropped. 
-
-A bounding box of [0, 0, 0, 0] will not crop the image. Thetas function the same way if not enough are supplied.
-The first bounding box coordinate is the number of pixels to be cropped from the left side of the image. The second is 
-the number to be cropped from the top of the image. The third is the width of the new image and the fourth is the height
-of the new image. 
-
-Currently the only supported model_id is miewid-msv3 and the only supported algorithm is pairx. These are also the default
-if not specified.
-
-If crop_bbox is true, the final visualization will include only the image cropped based on the bounding box. 
-If it is false, the full image will be used. However, regardless of the value of crop_bbox only the cropped image will be used
-in matching.
-
-A visualization_type of lines_and_colors will return the whole visualization, only_lines will return only the two images with
-lines matching similar points, and only_colors will return only a heatmap of relevant points.
-
-layer_key determines how focused or general the generated visualization will be. Layer keys that are earlier in the model
-(e.g. backbone.blocks.1) will focus on very specific points while later ones (e.g. backbone.blocks.5) will generate visualizations
-that focus on broad areas of similarity. Using the default is generally recommended.
-
-Larger values of k_lines often leads to erroneous matches (e.g. matching an animal's ear with another animal's paw), but 
-it does not have a significant impact on the time to generate visualizations. 
-The higher k_colors is, the longer it will take to generate visualizations. 
-
-### Response format
-
-Returns a list of images. Each image will be a numpy array.
-
-## Image Classification
-
-The service provides a dedicated endpoint for image classification using EfficientNet models. This endpoint classifies images into predefined categories with configurable confidence thresholds.
-
-### Classify Image
+### Classification
 
 ```
 POST /classify/
 ```
 
-**Request Body**:
+Runs image classification. Works with EfficientNet and DenseNet orientation models.
+
+**Request**:
 ```json
 {
     "model_id": "efficientnet-classifier",
     "image_uri": "https://example.com/image.jpg",
-    "bbox": [0, 0, 1000, 1000],
+    "bbox": [100, 100, 300, 200],
     "theta": 0.0
 }
 ```
 
-**Parameters**:
-- `model_id` (required): ID of the EfficientNet model to use for classification
-- `image_uri` (required): URI of the image to process (URL or local file path)
-- `bbox` (optional): Bounding box coordinates `[x, y, width, height]` to crop the image before classification. If not provided, uses the full image
-- `theta` (optional): Rotation angle in radians (default: 0.0)
+- `bbox` (optional): Crop region `[x, y, width, height]` before classifying
+- `theta` (optional): Rotation angle in radians
 
 **Response**:
 ```json
 {
     "model_id": "efficientnet-classifier",
     "predictions": [
-        {
-            "index": 0,
-            "label": "back",
-            "probability": 0.8111463785171509
-        }
+        {"index": 0, "label": "back", "probability": 0.811}
     ],
-    "all_probabilities": [
-        0.8111463785171509,
-        5.336962090041197e-07,
-        0.00027203475474379957,
-        0.0071563138626515865,
-        0.457361102104187,
-        2.727882019826211e-05
-    ],
+    "all_probabilities": [0.811, 0.0, 0.0003, 0.007, 0.457, 0.00003],
     "threshold": 0.5,
-    "bbox": [0, 0, 1000, 1000],
-    "theta": 0.0,
-    "image_uri": "https://example.com/image.jpg"
+    "bbox": [100, 100, 300, 200],
+    "theta": 0.0
 }
 ```
 
-**Response Fields**:
-- `model_id`: The model used for classification
-- `predictions`: List of predictions above the threshold, sorted by probability (descending)
-  - `index`: Class index in the model
-  - `label`: Human-readable class label
-  - `probability`: Confidence score (0.0 to 1.0)
-- `all_probabilities`: Raw probabilities for all classes
-- `threshold`: The confidence threshold used to filter predictions
-- `bbox`: The bounding box used (if any)
-- `theta`: The rotation angle applied
-- `image_uri`: The original image URI
+When `parse_compound_labels` is enabled in the model config, predictions include parsed species and viewpoint:
 
-### Usage Examples
-
-#### Basic Image Classification
-
-Classify a full image:
-
-```bash
-curl -X POST "http://localhost:8000/classify/" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model_id": "efficientnet-classifier",
-    "image_uri": "https://example.com/image.jpg"
-  }'
+```json
+{
+    "predictions": [
+        {
+            "label": "chelonia_mydas:left",
+            "species": "chelonia_mydas",
+            "viewpoint": "left",
+            "probability": 0.92
+        }
+    ]
+}
 ```
 
-#### Classification with Bounding Box
+### Embedding Extraction
 
-Classify a specific region of the image:
+```
+POST /extract/
+```
 
-```bash
-curl -X POST "http://localhost:8000/classify/" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model_id": "efficientnet-classifier",
+Extracts feature embeddings for re-identification using MiewID models.
+
+**Request**:
+```json
+{
+    "model_id": "miewid-msv4.1",
     "image_uri": "https://example.com/image.jpg",
-    "bbox": [100, 100, 300, 200]
-  }'
-```
-
-#### Local File with Rotation
-
-Classify a local file with rotation:
-
-```bash
-curl -X POST "http://localhost:8000/classify/" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model_id": "efficientnet-classifier",
-    "image_uri": "/path/to/local/image.jpg",
     "bbox": [50, 50, 200, 200],
-    "theta": 0.785
-  }'
-```
-
-#### Python Example
-
-```python
-import requests
-from pprint import pprint
-
-# Classify image
-response = requests.post("http://localhost:8000/classify/", json={
-    "model_id": "efficientnet-classifier",
-    "image_uri": "https://example.com/image.jpg",
-    "bbox": [0, 0, 1000, 1000]
-})
-
-if response.status_code == 200:
-    result = response.json()
-    
-    print(f"Model: {result['model_id']}")
-    print(f"Threshold: {result['threshold']}")
-    print(f"Predictions above threshold: {len(result['predictions'])}")
-    
-    for pred in result['predictions']:
-        print(f"  - {pred['label']}: {pred['probability']:.4f}")
-else:
-    print(f"Error: {response.status_code} - {response.text}")
-```
-
-### Model Configuration
-
-EfficientNet models are configured in `model_config.json` with the following parameters:
-
-```json
-{
-    "model_id": "efficientnet-classifier",
-    "model_type": "efficientnetv2",
-    "checkpoint_path": "/path/to/checkpoint.pt",
-    "img_size": 512,
-    "threshold": 0.5
+    "theta": 0.0
 }
 ```
 
-**Configuration Parameters**:
-- `checkpoint_path` (required): Path or URL to the model checkpoint
-- `img_size`: Input image size for preprocessing (default: 512)
-- `threshold`: Classification confidence threshold (default: 0.5)
-
-### Supported Classes
-
-The current model supports the following classes:
-- `back` (index: 0)
-- `down` (index: 1) 
-- `front` (index: 2)
-- `left` (index: 3)
-- `right` (index: 4)
-- `up` (index: 5)
-
-### Error Handling
-
-The endpoint returns appropriate HTTP status codes:
-
-- `200`: Success
-- `400`: Bad request (invalid bbox format, file not found, non-EfficientNet model)
-- `404`: Model not found
-- `500`: Internal server error
-
-**Common Error Responses**:
-
+**Response**:
 ```json
 {
-    "detail": {
-        "error": "Model 'invalid_model' not found.",
-        "available_models": ["efficientnet-classifier", "miewid_v3"]
-    }
+    "model_id": "miewid-msv4.1",
+    "embeddings": [0.1234, -0.5678, 0.9012],
+    "embeddings_shape": [1, 512],
+    "bbox": [50, 50, 200, 200],
+    "theta": 0.0
 }
 ```
 
+### Explainability
+
+```
+POST /explain/
+```
+
+Generates visual explanations of what features two images share, using PAIR-X.
+
+**Request**:
 ```json
 {
-    "detail": "Bounding box must contain exactly 4 values: [x, y, width, height]"
+    "image1_uris": ["image_a.jpg"],
+    "bb1": [[100, 100, 300, 200]],
+    "theta1": [0.0],
+    "image2_uris": ["image_b.jpg"],
+    "bb2": [[0, 0, 0, 0]],
+    "theta2": [0.0],
+    "model_id": "miewid-msv3",
+    "algorithm": "pairx",
+    "visualization_type": "lines_and_colors",
+    "layer_key": "backbone.blocks.3",
+    "k_lines": 20,
+    "k_colors": 5,
+    "crop_bbox": false
 }
 ```
 
-```json
-{
-    "detail": "Model 'miewid_v3' is not an EfficientNet model. Only EfficientNet models support classification."
-}
-```
+- `bb` of `[0,0,0,0]` means no crop (use full image)
+- `visualization_type`: `lines_and_colors`, `only_lines`, or `only_colors`
+- `layer_key`: Earlier layers (e.g. `backbone.blocks.1`) focus on specific points; later layers focus on broad areas
+- Returns a list of numpy arrays (images)
 
-### Performance Considerations
-
-- The service limits concurrent classifications to prevent out-of-memory errors
-- Large images or high resolution inputs may take longer to process
-- Consider using appropriate bounding boxes to focus on regions of interest
-- URL-based images are downloaded and cached temporarily during processing
-
-## Pipeline Processing
-
-The service provides a comprehensive pipeline endpoint that orchestrates multiple machine learning operations in sequence. The pipeline runs prediction (bbox detection), then performs classification and embeddings extraction on each detected region above a specified confidence threshold.
-
-### Run Pipeline
+### Pipeline (Detect + Classify + Extract)
 
 ```
 POST /pipeline/
 ```
 
-**Request Body**:
+Runs detection, then classifies and extracts embeddings for each detected region above a confidence threshold.
+
+**Request**:
 ```json
 {
     "predict_model_id": "msv3",
     "classify_model_id": "efficientnet-classifier",
-    "extract_model_id": "miewid_v3",
+    "extract_model_id": "miewid-msv4.1",
     "image_uri": "https://example.com/image.jpg",
     "bbox_score_threshold": 0.5,
-    "predict_model_params": {
-        "conf": 0.6,
-        "imgsz": 640
-    }
+    "predict_model_params": {"conf": 0.6}
 }
 ```
 
-**Parameters**:
-- `predict_model_id` (required): ID of the model to use for object detection/prediction
-- `classify_model_id` (required): ID of the EfficientNet model to use for classification
-- `extract_model_id` (required): ID of the MiewID model to use for embeddings extraction
-- `image_uri` (required): URI of the image to process (URL or local file path)
-- `bbox_score_threshold` (optional): Minimum bbox confidence score threshold to process (default: 0.5)
-- `predict_model_params` (optional): Parameters to override prediction model configuration
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `predict_model_id` | yes | Detection model (YOLO, MegaDetector, or LightNet) |
+| `classify_model_id` | yes | Classification model (EfficientNet) |
+| `extract_model_id` | yes | Embedding model (MiewID) |
+| `image_uri` | yes | URL, local path, or `data:` URI |
+| `orientation_model_id` | no | DenseNet orientation model; when provided, orientation is estimated for each detection and included in results |
+| `bbox_score_threshold` | no | Minimum detection confidence (default: 0.5, range: 0.0-1.0) |
+| `predict_model_params` | no | Override detection model parameters |
+
+When `orientation_model_id` is provided, each result includes an `orientation` field:
+
+```json
+{
+    "pipeline_results": [
+        {
+            "bbox": [68.0, 134.6, 71.5, 130.7],
+            "theta": 0.0,
+            "bbox_score": 0.91,
+            "detection_class": "elephant+head",
+            "classification": {"class": "elephant:left", "probability": 0.99, "class_id": 2},
+            "orientation": {"label": "left", "probability": 0.95},
+            "embedding": [0.1234, -0.5678],
+            "embedding_shape": [1, 512]
+        }
+    ]
+}
+```
 
 **Response**:
 ```json
@@ -411,609 +223,472 @@ POST /pipeline/
     "image_uri": "https://example.com/image.jpg",
     "models_used": {
         "predict_model_id": "msv3",
-        "classify_model_id": "efficientnet-classifier", 
-        "extract_model_id": "miewid_v3"
+        "classify_model_id": "efficientnet-classifier",
+        "extract_model_id": "miewid-msv4.1"
     },
-    "bbox_score_threshold": 0.5,
     "total_predictions": 15,
     "filtered_predictions": 3,
     "pipeline_results": [
         {
-            "bbox": [68.0103, 134.594, 71.4746, 130.7195],
+            "bbox": [68.0, 134.6, 71.5, 130.7],
+            "theta": 0.0,
             "bbox_score": 0.9054,
             "detection_class": "dog",
             "detection_class_id": 16,
             "classification": {
                 "class": "back",
-                "probability": 0.8111,
+                "probability": 0.811,
                 "class_id": 0
             },
-            "embedding": [0.1234, -0.5678, 0.9012, ...],
+            "embedding": [0.1234, -0.5678],
             "embedding_shape": [1, 512]
         }
+    ]
+}
+```
+
+### Part-Body Assignment
+
+```
+POST /assign/
+```
+
+Matches "part" annotations (e.g. `lion+head`) to "body" annotations using geometric features and species-specific scikit-learn classifiers.
+
+**Request**:
+```json
+{
+    "species": "lion",
+    "annotations": [
+        {"aid": 1, "bbox": [100, 50, 200, 300], "theta": 0.0, "viewpoint": "left", "is_part": false},
+        {"aid": 2, "bbox": [120, 60, 80, 80], "theta": 0.0, "viewpoint": "left", "is_part": true}
     ],
-    "original_predict": {...},
-    "original_classify": [...],
-    "original_extract": [...]
+    "image_width": 1024,
+    "image_height": 768,
+    "cutoff_score": 0.5
 }
 ```
-
-**Response Fields**:
-- `image_uri`: The original image URI processed
-- `models_used`: Dictionary containing the IDs of all models used in the pipeline
-- `bbox_score_threshold`: The confidence threshold used to filter detections
-- `total_predictions`: Total number of bboxes detected by the prediction model
-- `filtered_predictions`: Number of bboxes above the score threshold that were processed
-- `pipeline_results`: Array of results for each processed bbox containing:
-  - `bbox`: Bounding box coordinates `[x, y, width, height]`
-  - `bbox_score`: Confidence score from the detection model
-  - `detection_class`: Class name from the detection model
-  - `detection_class_id`: Class ID from the detection model
-  - `classification`: Top classification result with class, probability, and class_id
-  - `embedding`: Extracted embeddings as a flat array
-  - `embedding_shape`: Shape of the embeddings array
-- `original_predict`: Full prediction results from the detection model
-- `original_classify`: Array of full classification results for each bbox
-- `original_extract`: Array of full extraction results for each bbox
-
-### Pipeline Workflow
-
-The pipeline executes the following steps:
-
-1. **Validation**: Validates that all specified models exist and are of the correct types
-   - Prediction model: Any supported detection model (YOLO, MegaDetector)
-   - Classification model: Must be an EfficientNet model
-   - Extraction model: Must be a MiewID model
-
-2. **Image Loading**: Downloads the image (if URL) or loads from local path
-
-3. **Object Detection**: Runs the prediction model to detect bounding boxes
-
-4. **Filtering**: Filters detected bboxes by the specified confidence threshold
-
-5. **Parallel Processing**: For each filtered bbox, runs classification and extraction in parallel
-
-6. **Result Aggregation**: Combines all results into a structured response
-
-### Usage Examples
-
-#### Basic Pipeline Processing
-
-Process an image with default threshold:
-
-```bash
-curl -X POST "http://localhost:8000/pipeline/" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "predict_model_id": "msv3",
-    "classify_model_id": "efficientnet-classifier",
-    "extract_model_id": "miewid_v3",
-    "image_uri": "https://example.com/image.jpg"
-  }'
-```
-
-#### Custom Threshold and Parameters
-
-Use a higher confidence threshold and custom prediction parameters:
-
-```bash
-curl -X POST "http://localhost:8000/pipeline/" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "predict_model_id": "msv3",
-    "classify_model_id": "efficientnet-classifier",
-    "extract_model_id": "miewid_v3",
-    "image_uri": "https://example.com/image.jpg",
-    "bbox_score_threshold": 0.7,
-    "predict_model_params": {
-      "conf": 0.8,
-      "imgsz": 1024
-    }
-  }'
-```
-
-#### Local File Processing
-
-Process a local image file:
-
-```bash
-curl -X POST "http://localhost:8000/pipeline/" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "predict_model_id": "mdv6",
-    "classify_model_id": "efficientnet-classifier",
-    "extract_model_id": "miewid_v3",
-    "image_uri": "/path/to/local/image.jpg",
-    "bbox_score_threshold": 0.6
-  }'
-```
-
-#### Python Example
-
-```python
-import requests
-import numpy as np
-from pprint import pprint
-
-# Run pipeline
-response = requests.post("http://localhost:8000/pipeline/", json={
-    "predict_model_id": "msv3",
-    "classify_model_id": "efficientnet-classifier", 
-    "extract_model_id": "miewid_v3",
-    "image_uri": "https://example.com/image.jpg",
-    "bbox_score_threshold": 0.5
-})
-
-if response.status_code == 200:
-    result = response.json()
-    
-    print(f"Processed {result['total_predictions']} detections")
-    print(f"Found {result['filtered_predictions']} above threshold")
-    print(f"Pipeline results: {len(result['pipeline_results'])}")
-    
-    for i, bbox_result in enumerate(result['pipeline_results']):
-        print(f"\nBbox {i+1}:")
-        print(f"  Detection: {bbox_result['detection_class']} ({bbox_result['bbox_score']:.3f})")
-        if bbox_result['classification']:
-            print(f"  Classification: {bbox_result['classification']['class']} ({bbox_result['classification']['probability']:.3f})")
-        print(f"  Embedding shape: {bbox_result['embedding_shape']}")
-        
-        # Convert embedding back to numpy array
-        embedding = np.array(bbox_result['embedding'])
-        embedding = embedding.reshape(bbox_result['embedding_shape'])
-        print(f"  First 5 embedding values: {embedding.flatten()[:5]}")
-else:
-    print(f"Error: {response.status_code} - {response.text}")
-```
-
-### Error Handling
-
-The endpoint returns appropriate HTTP status codes:
-
-- `200`: Success
-- `400`: Bad request (invalid parameters, file not found, wrong model types)
-- `404`: Model not found
-- `500`: Internal server error
-
-**Common Error Responses**:
-
-```json
-{
-    "detail": {
-        "error": "Prediction model 'invalid_model' not found.",
-        "available_models": ["msv3", "mdv6", "efficientnet-classifier", "miewid_v3"]
-    }
-}
-```
-
-```json
-{
-    "detail": "Model 'msv3' is not an EfficientNet model. Only EfficientNet models support classification."
-}
-```
-
-```json
-{
-    "detail": "File not found: /path/to/nonexistent/image.jpg"
-}
-```
-
-### Performance Considerations
-
-- **Concurrency**: Pipeline operations are limited to prevent out-of-memory errors
-- **Parallel Processing**: Classification and extraction run in parallel for each bbox to optimize performance
-- **Memory Usage**: Large images or many detections may require more memory
-- **Threshold Tuning**: Higher bbox_score_threshold values reduce processing time by filtering out low-confidence detections
-- **Model Selection**: Choose appropriate models based on your use case and available computational resources
-
-### Model Requirements
-
-- **Prediction Model**: Any supported detection model (YOLO variants, MegaDetector)
-- **Classification Model**: Must be configured as `efficientnetv2` type in model_config.json
-- **Extraction Model**: Must be configured as `miewid` type in model_config.json
-
-## Embeddings Extraction
-
-The service provides a dedicated endpoint for extracting embeddings from images using MiewID models. This is useful for feature extraction, similarity matching, and other machine learning tasks.
-
-### Extract Embeddings
-
-```
-POST /extract/
-```
-
-**Request Body**:
-```json
-{
-    "model_id": "miewid_v3",
-    "image_uri": "https://example.com/image.jpg",
-    "bbox": [50, 50, 200, 200],
-    "theta": 0.0
-}
-```
-
-**Parameters**:
-- `model_id` (required): ID of the MiewID model to use for extraction
-- `image_uri` (required): URI of the image to process (URL or local file path)
-- `bbox` (optional): Bounding box coordinates `[x, y, width, height]` to crop the image before extraction. If not provided, uses the full image
-- `theta` (optional): Rotation angle in radians (default: 0.0)
 
 **Response**:
 ```json
 {
-    "model_id": "miewid_v3",
-    "embeddings": [0.1234, -0.5678, 0.9012, ...],
-    "embeddings_shape": [1, 512],
-    "bbox": [50, 50, 200, 200],
-    "theta": 0.0,
-    "image_uri": "https://example.com/image.jpg"
+    "assigned_pairs": [
+        {"part_aid": 2, "body_aid": 1, "score": 0.87}
+    ],
+    "unassigned_aids": []
 }
 ```
 
-**Response Fields**:
-- `model_id`: The model used for extraction
-- `embeddings`: The extracted feature embeddings as a flat list
-- `embeddings_shape`: Shape of the embeddings array (e.g., `[1, 512]` for a 512-dimensional feature vector)
-- `bbox`: The bounding box used (if any)
-- `theta`: The rotation angle applied
-- `image_uri`: The original image URI
+The assignment algorithm computes geometric features (IoU, distances, containment, aspect ratios, viewpoint matches) for every (part, body) pair, scores them with the species classifier, then greedily assigns highest-scoring pairs.
 
-### Usage Examples
+Supported species include wild dog (default fallback), lion, zebra (Grevy's, plains), sea turtles, hyena, and others.
 
-#### Basic Embeddings Extraction
+### Health Check
 
-Extract embeddings from a full image:
-
-```bash
-curl -X POST "http://localhost:8000/extract/" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model_id": "miewid_v3",
-    "image_uri": "https://example.com/image.jpg"
-  }'
+```
+GET /health
 ```
 
-#### Cropped Region Extraction
+Returns service health including GPU status, CUDA availability, and loaded model count.
 
-Extract embeddings from a specific region of the image:
+---
 
-```bash
-curl -X POST "http://localhost:8000/extract/" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model_id": "miewid_v3",
-    "image_uri": "https://example.com/image.jpg",
-    "bbox": [100, 100, 300, 200]
-  }'
-```
+## WBIA Compatibility Layer
 
-#### Local File with Rotation
+For backward compatibility with [Wildbook](https://github.com/WildMeOrg/Wildbook), ml-service provides endpoints that mimic WBIA's async job queue pattern. Wildbook can point to ml-service as a drop-in replacement for WBIA's detection/labeling pipeline without changing its HTTP client code.
 
-Extract embeddings from a local file with rotation:
+### Flow
 
-```bash
-curl -X POST "http://localhost:8000/extract/" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model_id": "miewid_v3",
-    "image_uri": "/path/to/local/image.jpg",
-    "bbox": [50, 50, 200, 200],
-    "theta": 0.785
-  }'
-```
+1. **Submit job**: `POST /api/engine/detect/cnn/` returns a `jobid`
+2. **Poll status**: `GET /api/engine/job/status/?jobid=X` returns `{"jobstatus": "completed"}`
+3. **Fetch result**: `GET /api/engine/job/result/?jobid=X` returns detection results
 
-#### Python Example
-
-```python
-import requests
-import numpy as np
-
-# Extract embeddings
-response = requests.post("http://localhost:8000/extract/", json={
-    "model_id": "miewid_v3",
-    "image_uri": "https://example.com/image.jpg",
-    "bbox": [100, 100, 300, 200]
-})
-
-if response.status_code == 200:
-    result = response.json()
-    
-    # Convert embeddings back to numpy array
-    embeddings = np.array(result["embeddings"])
-    embeddings = embeddings.reshape(result["embeddings_shape"])
-    
-    print(f"Extracted {embeddings.shape} embeddings")
-    print(f"First 5 values: {embeddings.flatten()[:5]}")
-else:
-    print(f"Error: {response.status_code} - {response.text}")
-```
-
-### Error Handling
-
-The endpoint returns appropriate HTTP status codes:
-
-- `200`: Success
-- `400`: Bad request (invalid bbox format, file not found, non-MiewID model)
-- `404`: Model not found
-- `500`: Internal server error
-
-**Common Error Responses**:
-
+All responses are wrapped in WBIA's standard envelope:
 ```json
 {
-    "detail": {
-        "error": "Model 'invalid_model' not found.",
-        "available_models": ["miewid_v3", "msv3", "mdv6"]
+    "status": {"success": true, "code": "", "message": "", "cache": -1},
+    "response": "<data>"
+}
+```
+
+### Submit Detection Job
+
+```
+POST /api/engine/detect/cnn/
+POST /api/engine/detect/cnn/yolo/
+POST /api/engine/detect/cnn/lightnet/
+```
+
+**Request**:
+```json
+{
+    "image_uuid_list": ["/path/to/image1.jpg", "/path/to/image2.jpg"],
+    "model_tag": "detect-hyaena",
+    "labeler_model_tag": "labeler-hyaena",
+    "use_labeler_species": true,
+    "sensitivity": 0.3,
+    "nms_thresh": 0.4,
+    "assigner_algo": null,
+    "callback_url": null
+}
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `image_uuid_list` | List of image file paths or URLs |
+| `model_tag` | Detection model ID (must be loaded in model config) |
+| `labeler_model_tag` | Optional classification model for viewpoint/species labeling |
+| `viewpoint_model_tag` | Alias for `labeler_model_tag` |
+| `use_labeler_species` | If true, override detection species with labeler's species prediction |
+| `sensitivity` | Minimum detection confidence threshold |
+| `nms_thresh` | NMS threshold |
+| `assigner_algo` | If set, run part-body assignment after detection |
+| `callback_url` | Accepted but not used (Wildbook polls instead) |
+
+**Response** (immediate): job ID string wrapped in WBIA envelope.
+
+### Poll Job Status
+
+```
+GET /api/engine/job/status/?jobid=<jobid>
+```
+
+**Response**:
+```json
+{
+    "status": {"success": true, "code": "", "message": "", "cache": -1},
+    "response": {"jobstatus": "completed"}
+}
+```
+
+Job statuses: `received`, `working`, `completed`, `exception`, `unknown`.
+
+### Fetch Job Result
+
+```
+GET /api/engine/job/result/?jobid=<jobid>
+```
+
+**Response**:
+```json
+{
+    "status": {"success": true, "code": "", "message": "", "cache": -1},
+    "response": {
+        "json_result": {
+            "image_uuid_list": ["/path/to/image1.jpg"],
+            "results_list": [
+                [
+                    {
+                        "id": 1,
+                        "uuid": "a1b2c3d4-...",
+                        "xtl": 120,
+                        "ytl": 45,
+                        "left": 120,
+                        "top": 45,
+                        "width": 200,
+                        "height": 150,
+                        "theta": 0.0,
+                        "confidence": 0.92,
+                        "class": "hyaena",
+                        "species": "hyaena",
+                        "viewpoint": "left",
+                        "quality": null,
+                        "multiple": false,
+                        "interest": false
+                    }
+                ]
+            ],
+            "score_list": [0.0],
+            "has_assignments": false
+        }
     }
 }
 ```
 
+Each entry in `results_list` is a list of annotation dicts for the corresponding image. Annotation fields match WBIA's format:
+
+| Field | Description |
+|-------|-------------|
+| `xtl`, `ytl` / `left`, `top` | Top-left corner (pixels) |
+| `width`, `height` | Bounding box dimensions |
+| `theta` | Rotation angle (radians) |
+| `confidence` | Detection score |
+| `class`, `species` | Detected/labeled species |
+| `viewpoint` | Viewpoint label (set by labeler, null if no labeler) |
+| `quality`, `multiple`, `interest` | WBIA-compatible flags (defaults) |
+
+### Pipeline Behavior
+
+When `labeler_model_tag` is provided, the endpoint runs a combined pipeline per image:
+
+1. **Detect** with `model_tag` -- get bounding boxes
+2. **Label** with `labeler_model_tag` -- classify each detection for viewpoint (and optionally species)
+3. **Assign** (if `assigner_algo` set) -- match parts to bodies
+
+Images are loaded once and passed through all pipeline steps as bytes.
+
+### List Jobs
+
+```
+GET /api/engine/job/
+```
+
+Returns a list of all job IDs. The job store is bounded to 10,000 entries with LRU eviction of completed jobs.
+
+---
+
+## Model Configuration
+
+Models are configured in `app/model_config.json`:
+
 ```json
 {
-    "detail": "Bounding box must contain exactly 4 values: [x, y, width, height]"
+    "models": [
+        {
+            "model_id": "msv3",
+            "model_type": "yolo-ultralytics",
+            "model_path": "/path/to/detect.yolov11.msv3.pt",
+            "imgsz": 640,
+            "conf": 0.5
+        },
+        {
+            "model_id": "mdv6",
+            "model_type": "megadetector",
+            "model_path": "/path/to/mdv6-yolov10-e.pt",
+            "imgsz": 1280,
+            "conf": 0.1,
+            "iou": 0.45
+        },
+        {
+            "model_id": "detect-hyaena",
+            "model_type": "lightnet",
+            "config_path": "/path/to/detect.lightnet.hyaena.v0.py",
+            "weight_path": "/path/to/detect.lightnet.hyaena.v0.weights",
+            "conf": 0.1,
+            "nms_thresh": 0.4
+        },
+        {
+            "model_id": "efficientnet-classifier",
+            "model_type": "efficientnetv2",
+            "checkpoint_path": "/path/to/vplabeler-msv3.pt",
+            "img_size": 512,
+            "threshold": 0.5
+        },
+        {
+            "model_id": "labeler-seaturtle",
+            "model_type": "efficientnetv2",
+            "checkpoint_path": "/path/to/classifier.seaturtle.v0.pth",
+            "img_size": 512,
+            "threshold": 0.5,
+            "model_arch": "tf_efficientnet_b4_ns",
+            "multi_label": true,
+            "parse_compound_labels": true
+        },
+        {
+            "model_id": "orientation-seaturtle",
+            "model_type": "densenet-orientation",
+            "checkpoint_path": "/path/to/orientation.seaturtle.v0.pth",
+            "img_size": 224
+        },
+        {
+            "model_id": "miewid-msv4.1",
+            "model_type": "miewid",
+            "checkpoint_path": "/path/to/miew_id.msv4_1_main.bin",
+            "imgsz": 440
+        }
+    ]
 }
 ```
 
-```json
-{
-    "detail": "Model 'msv3' is not a MiewID model. Only MiewID models support embeddings extraction."
-}
-```
+### Configuration by Model Type
 
-### Performance Considerations
+**YOLO Ultralytics** (`yolo-ultralytics`):
+- `model_path`: Path or URL to `.pt` weights
+- `imgsz`: Input image size (default: 640)
+- `conf`: Confidence threshold (default: 0.5)
+- `dilation_factors`: Optional `[x, y]` bbox dilation
 
-- The service limits concurrent extractions to prevent out-of-memory errors
-- Large images or complex models may take longer to process
-- Consider using appropriate bounding boxes to focus on regions of interest
-- URL-based images are downloaded and cached temporarily during processing
+**MegaDetector** (`megadetector`):
+- `model_path`: Path or URL to `.pt` weights
+- `imgsz`: Input image size (default: 1280)
+- `conf`: Confidence threshold (default: 0.1)
+- `iou`: IoU threshold for NMS (default: 0.45)
+
+**LightNet** (`lightnet`):
+- `config_path`: Path or URL to `.py` HyperParameters config
+- `weight_path`: Path or URL to `.weights` binary
+- `conf`: Confidence threshold (default: 0.1)
+- `nms_thresh`: NMS threshold (default: 0.4)
+- `batch_size`: Batch size for multi-image inference (default: 192)
+
+**EfficientNet** (`efficientnetv2`):
+- `checkpoint_path`: Path or URL to checkpoint
+- `img_size`: Input image size (default: 512)
+- `threshold`: Classification threshold (default: 0.5)
+- `model_arch`: timm architecture name (default: `tf_efficientnet_b4_ns`)
+- `label_map`: Optional dict of `{index: "label"}` (otherwise loaded from checkpoint)
+- `n_classes`: Optional explicit class count
+- `multi_label`: Use sigmoid + threshold (true) or softmax + argmax (false) (default: true)
+- `parse_compound_labels`: Split labels on `:` into species/viewpoint fields (default: false)
+
+**DenseNet Orientation** (`densenet-orientation`):
+- `checkpoint_path`: Path or URL to checkpoint (format: `{"state": state_dict, "classes": [...]}`)
+- `img_size`: Input image size (default: 224)
+- `label_map`: Optional explicit label map (otherwise loaded from checkpoint `classes` key)
+
+**MiewID** (`miewid`):
+- `checkpoint_path`: Path or URL to model binary
+- `imgsz`: Input image size (default: 440)
+
+All path parameters accept URLs, which are downloaded and cached on startup.
 
 ## Setup
 
-### Option 1: Local Development
+### Prerequisites
 
-1. Create and activate a virtual environment:
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
+- Python 3.10+ (3.12 recommended)
+- NVIDIA GPU with CUDA 12.1+ drivers (for GPU inference)
+- [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) (for Docker GPU access)
+- Docker and Docker Compose v2 (for containerized deployment)
 
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+### Docker Deployment (Recommended)
 
-### Option 2: Docker
-
-1. Navigate to the docker directory:
-   ```bash
-   cd docker
-   ```
-
-2. Start the container:
-   ```bash
-   docker-compose up
-   ```
-   
-   This will build and start a Docker container with the FastAPI server, exposing it on port 8000.
-
-## Running the Application
-
-Start the FastAPI server with:
+#### 1. Configure environment
 
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+cd docker
+cp _env .env
 ```
 
-For production use with multiple workers:
+Edit `.env` and set `MODELS_DIR` to the directory containing your model weight files:
 
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+# Required: directory with .pt, .weights, .bin, .pth model files
+MODELS_DIR=/data0/models
+
+# Optional overrides
+# GPU_ID=0          # which GPU (default: 0)
+# DEVICE=cuda       # cuda or cpu (default: cuda)
+# WORKERS=1         # uvicorn workers (default: 1, use 1 for GPU)
+# ML_SERVICE_PORT=6050  # host port (default: 6050)
+# DATA_DB_DIR=/data/db  # shared image path with WBIA/Wildbook
 ```
 
-### Environment Variables
+#### 2. Configure models
 
-- `DEVICE`: Set to `cuda`, `mps`, or `cpu` (default: `cpu`)
-- `LOG_LEVEL`: Logging level (default: `info`)
-- `MODEL_CONFIG_PATH`: Path to model configuration (default: `app/model_config.json`)
+Edit `app/model_config.json` to list the models you want to load. Paths in the config should use `/models/` (the container mount point for `MODELS_DIR`):
 
-## Image Classification
-
-The service provides a dedicated endpoint for image classification using EfficientNet models. This endpoint classifies images into predefined categories with configurable confidence thresholds.
-
-### Classify Image
-
-```
-POST /classify/
-```
-
-**Request Body**:
 ```json
 {
-    "model_id": "efficientnet-classifier",
-    "image_uri": "https://example.com/image.jpg",
-    "bbox": [0, 0, 1000, 1000],
-    "theta": 0.0
-}
-```
-
-**Parameters**:
-- `model_id` (required): ID of the EfficientNet model to use for classification
-- `image_uri` (required): URI of the image to process (URL or local file path)
-- `bbox` (optional): Bounding box coordinates `[x, y, width, height]` to crop the image before classification. If not provided, uses the full image
-- `theta` (optional): Rotation angle in radians (default: 0.0)
-
-**Response**:
-```json
-{
-    "model_id": "efficientnet-classifier",
-    "predictions": [
+    "models": [
         {
-            "index": 0,
-            "label": "back",
-            "probability": 0.8111463785171509
+            "model_id": "msv3",
+            "model_type": "yolo-ultralytics",
+            "model_path": "/models/detect.yolov11.msv3.pt",
+            "imgsz": 640,
+            "conf": 0.5
         }
-    ],
-    "all_probabilities": [
-        0.8111463785171509,
-        5.336962090041197e-07,
-        0.00027203475474379957,
-        0.0071563138626515865,
-        0.457361102104187,
-        2.727882019826211e-05
-    ],
-    "threshold": 0.5,
-    "bbox": [0, 0, 1000, 1000],
-    "theta": 0.0,
-    "image_uri": "https://example.com/image.jpg"
+    ]
 }
 ```
 
-**Response Fields**:
-- `model_id`: The model used for classification
-- `predictions`: List of predictions above the threshold, sorted by probability (descending)
-  - `index`: Class index in the model
-  - `label`: Human-readable class label
-  - `probability`: Confidence score (0.0 to 1.0)
-- `all_probabilities`: Raw probabilities for all classes
-- `threshold`: The confidence threshold used to filter predictions
-- `bbox`: The bounding box used (if any)
-- `theta`: The rotation angle applied
-- `image_uri`: The original image URI
+Model weights can also be URLs — they will be downloaded on first startup.
 
-### Usage Examples
-
-#### Basic Image Classification
-
-Classify a full image:
+#### 3. Build and start
 
 ```bash
-curl -X POST "http://localhost:8000/classify/" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model_id": "efficientnet-classifier",
-    "image_uri": "https://example.com/image.jpg"
-  }'
+cd docker
+docker compose up --build -d
 ```
 
-#### Classification with Bounding Box
-
-Classify a specific region of the image:
+The service starts on port 6050 (or `ML_SERVICE_PORT` if set). Check health:
 
 ```bash
-curl -X POST "http://localhost:8000/classify/" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model_id": "efficientnet-classifier",
-    "image_uri": "https://example.com/image.jpg",
-    "bbox": [100, 100, 300, 200]
-  }'
+curl http://localhost:6050/health
 ```
 
-#### Local File with Rotation
-
-Classify a local file with rotation:
+Watch logs:
 
 ```bash
-curl -X POST "http://localhost:8000/classify/" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model_id": "efficientnet-classifier",
-    "image_uri": "/path/to/local/image.jpg",
-    "bbox": [50, 50, 200, 200],
-    "theta": 0.785
-  }'
+docker compose logs -f ml-service
 ```
 
-#### Python Example
+#### 4. Stop
 
-```python
-import requests
-from pprint import pprint
-
-# Classify image
-response = requests.post("http://localhost:8000/classify/", json={
-    "model_id": "efficientnet-classifier",
-    "image_uri": "https://example.com/image.jpg",
-    "bbox": [0, 0, 1000, 1000]
-})
-
-if response.status_code == 200:
-    result = response.json()
-    
-    print(f"Model: {result['model_id']}")
-    print(f"Threshold: {result['threshold']}")
-    print(f"Predictions above threshold: {len(result['predictions'])}")
-    
-    for pred in result['predictions']:
-        print(f"  - {pred['label']}: {pred['probability']:.4f}")
-else:
-    print(f"Error: {response.status_code} - {response.text}")
+```bash
+docker compose down
 ```
 
-### Model Configuration
+#### Docker volume layout
 
-EfficientNet models are configured in `model_config.json` with the following parameters:
+| Container path | Source | Purpose |
+|----------------|--------|---------|
+| `/models/` | `MODELS_DIR` | Model weight files (read-only) |
+| `/datasets/` | `MODELS_DIR` | Alias for `/models/` (backward compat with existing configs) |
+| `/app/app/model_config.json` | `app/model_config.json` | Model configuration (read-only) |
+| `/data/db/` | `DATA_DB_DIR` | Shared image directory with WBIA/Wildbook (optional) |
 
-```json
-{
-    "model_id": "efficientnet-classifier",
-    "model_type": "efficientnetv2",
-    "checkpoint_path": "/path/to/checkpoint.pt",
-    "img_size": 512,
-    "threshold": 0.5
-}
+#### Running without GPU
+
+To run on CPU (e.g. for testing), set `DEVICE=cpu` in `.env` and remove the `deploy.resources.reservations.devices` block from `docker-compose.yml`, or use:
+
+```bash
+DEVICE=cpu docker compose up --build
 ```
 
-**Configuration Parameters**:
-- `checkpoint_path` (required): Path or URL to the model checkpoint
-- `img_size`: Input image size for preprocessing (default: 512)
-- `threshold`: Classification confidence threshold (default: 0.5)
+#### Connecting to Wildbook
 
-### Supported Classes
+If Wildbook and ml-service run on the same host, create a shared Docker network so Wildbook can reach ml-service by container name:
 
-The current model supports the following classes:
-- `back` (index: 0)
-- `down` (index: 1) 
-- `front` (index: 2)
-- `left` (index: 3)
-- `right` (index: 4)
-- `up` (index: 5)
-
-### Error Handling
-
-The endpoint returns appropriate HTTP status codes:
-
-- `200`: Success
-- `400`: Bad request (invalid bbox format, file not found, non-EfficientNet model)
-- `404`: Model not found
-- `500`: Internal server error
-
-**Common Error Responses**:
-
-```json
-{
-    "detail": {
-        "error": "Model 'invalid_model' not found.",
-        "available_models": ["efficientnet-classifier", "miewid_v3"]
-    }
-}
+```bash
+docker network create shared_net
 ```
 
-```json
-{
-    "detail": "Bounding box must contain exactly 4 values: [x, y, width, height]"
-}
+Then add to `docker-compose.yml`:
+
+```yaml
+services:
+  ml-service:
+    networks:
+      - shared_net
+
+networks:
+  shared_net:
+    external: true
 ```
 
-```json
-{
-    "detail": "Model 'miewid_v3' is not an EfficientNet model. Only EfficientNet models support classification."
-}
+Wildbook can then call `http://ml-service:6050/api/engine/detect/cnn/`.
+
+### Local Development
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 ```
 
-### Performance Considerations
+Start the server:
 
-- The service limits concurrent classifications to prevent out-of-memory errors
-- Large images or high resolution inputs may take longer to process
-- Consider using appropriate bounding boxes to focus on regions of interest
-- URL-based images are downloaded and cached temporarily during processing
+```bash
+# Development (auto-reload on code changes)
+python3 -m app.main --device cuda --host 0.0.0.0 --port 6050 --reload
+
+# Production
+python3 -m app.main --device cuda --host 0.0.0.0 --port 6050 --workers 1
+```
+
+Or with uvicorn directly:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 6050
+```
+
+### Command Line Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--device` | `cuda` | PyTorch device: `cuda`, `cpu`, or `mps` |
+| `--host` | `0.0.0.0` | Bind address |
+| `--port` | `8888` | Listen port |
+| `--workers` | `1` | Uvicorn worker count (use 1 for GPU to avoid VRAM contention) |
+| `--reload` | off | Auto-reload on code changes (development only) |
