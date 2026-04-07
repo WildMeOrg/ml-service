@@ -194,12 +194,13 @@ async def run_pipeline(
                 # YOLO already returns bbox in [x, y, width, height] format, no conversion needed
                 x, y, width, height = bbox_coords
                 bbox_list = [int(x), int(y), int(width), int(height)]
-                
+                theta = float(bbox_prediction.get('theta', 0.0))
+
                 # Validate bbox coordinates
                 if width <= 0 or height <= 0:
                     logger.warning(f"Skipping bbox {i}: invalid dimensions width={width}, height={height}")
                     continue
-                
+
                 # Run orientation, classification, and extraction in parallel
                 tasks = []
                 task_names = []
@@ -208,7 +209,7 @@ async def run_pipeline(
                     classify_model.predict,
                     image_bytes=image_bytes,
                     bbox=bbox_list,
-                    theta=0.0
+                    theta=theta
                 )
                 tasks.append(classify_task)
                 task_names.append('classify')
@@ -217,7 +218,7 @@ async def run_pipeline(
                     extract_model.extract_embeddings,
                     image_bytes=image_bytes,
                     bbox=tuple(bbox_list),
-                    theta=0.0
+                    theta=theta
                 )
                 tasks.append(extract_task)
                 task_names.append('extract')
@@ -227,7 +228,7 @@ async def run_pipeline(
                         orientation_model.predict,
                         image_bytes=image_bytes,
                         bbox=bbox_list,
-                        theta=0.0
+                        theta=theta
                     )
                     tasks.append(orientation_task)
                     task_names.append('orientation')
@@ -284,6 +285,7 @@ async def run_pipeline(
                 # Create clean pipeline result entry
                 bbox_result = {
                     'bbox': bbox_coords,
+                    'theta': theta,
                     'bbox_score': bbox_prediction.get('score'),
                     'detection_class': bbox_prediction.get('class'),
                     'detection_class_id': bbox_prediction.get('class_id'),

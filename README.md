@@ -205,6 +205,7 @@ When `orientation_model_id` is provided, each result includes an `orientation` f
     "pipeline_results": [
         {
             "bbox": [68.0, 134.6, 71.5, 130.7],
+            "theta": 0.0,
             "bbox_score": 0.91,
             "detection_class": "elephant+head",
             "classification": {"class": "elephant:left", "probability": 0.99, "class_id": 2},
@@ -230,6 +231,7 @@ When `orientation_model_id` is provided, each result includes an `orientation` f
     "pipeline_results": [
         {
             "bbox": [68.0, 134.6, 71.5, 130.7],
+            "theta": 0.0,
             "bbox_score": 0.9054,
             "detection_class": "dog",
             "detection_class_id": 16,
