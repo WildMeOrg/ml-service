@@ -66,8 +66,6 @@ def validate_img_parameters(bbox, theta):
     for x in bbox:
         if x < 0:
             raise HTTPException(status_code=400, detail="Bounding box values should be positive")
-    if theta < 0:
-        raise HTTPException(status_code=400, detail="Theta should be greater than 0")
 
 def validate_vis_parameters(body):
     """Checks if body parameters related to a specific visualization algorithm are valid."""
