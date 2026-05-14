@@ -131,7 +131,24 @@ async def run_pipeline(
             
             # Step 1: Run prediction to get bboxes
             logger.info(f"Running prediction with model {pipeline_request.predict_model_id}")
-            
+
+            # Resolve extract-model version once for the response. The
+            # Wildbook v2 contract requires embedding_model_id +
+            # embedding_model_version on every result so consumers can
+            # match against persisted embeddings without consulting a
+            # second config source. Empty / None / "None" version values
+            # are treated as missing and fall back to "1" so the response
+            # never carries a literally-broken version string.
+            extract_model_info = handler.get_model_info(pipeline_request.extract_model_id)
+            extract_model_version = "1"
+            if extract_model_info and isinstance(extract_model_info, dict):
+                extract_cfg = extract_model_info.get('config') or {}
+                raw_version = extract_cfg.get('version')
+                if raw_version is not None:
+                    version_str = str(raw_version).strip()
+                    if version_str and version_str.lower() != 'none':
+                        extract_model_version = version_str
+
             # Get model info for default parameters
             model_info = handler.get_model_info(pipeline_request.predict_model_id)
             
@@ -244,8 +261,18 @@ async def run_pipeline(
                     logger.warning(f"Classification failed for bbox {i}: {classify_result}")
                     classify_result = {}
                 if isinstance(embeddings, Exception):
-                    logger.warning(f"Extraction failed for bbox {i}: {embeddings}")
-                    embeddings = None
+                    # Embedding is required by the Wildbook v2 response
+                    # contract (every result must carry a non-empty
+                    # `embedding` array). A null/missing embedding would
+                    # make the entire response invalid for v2 consumers,
+                    # so fail the request rather than emit a poisoned
+                    # success body. Classification/orientation can still
+                    # soft-fail because they are optional in the contract.
+                    logger.error(f"Extraction failed for bbox {i}: {embeddings}")
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"Embedding extraction failed for bbox {i}: {embeddings}"
+                    )
                 if isinstance(orientation_result, Exception):
                     logger.warning(f"Orientation failed for bbox {i}: {orientation_result}")
                     orientation_result = None
@@ -282,6 +309,17 @@ async def run_pipeline(
                             'class_id': preds[0].get('index')
                         }
 
+                # Flatten the embedding to a 1D list. MiewID returns a
+                # [1, D] tensor per crop; .tolist() gives [[d1, d2, ...]].
+                # Wildbook v2 expects a flat array of doubles directly on
+                # the result entry.
+                flat_embedding = None
+                if embeddings_list is not None:
+                    if embeddings_list and isinstance(embeddings_list[0], list):
+                        flat_embedding = embeddings_list[0]
+                    else:
+                        flat_embedding = embeddings_list
+
                 # Create clean pipeline result entry
                 bbox_result = {
                     'bbox': bbox_coords,
@@ -290,8 +328,14 @@ async def run_pipeline(
                     'detection_class': bbox_prediction.get('class'),
                     'detection_class_id': bbox_prediction.get('class_id'),
                     'classification': top_classification,
-                    'embedding': embeddings_list,
-                    'embedding_shape': embeddings_shape
+                    'embedding': flat_embedding,
+                    'embedding_shape': embeddings_shape,
+                    # Wildbook v2 contract: embedding_model_id +
+                    # embedding_model_version must live on each result so
+                    # the persisted Embedding row's (method, version) pair
+                    # matches what the matching code looks up later.
+                    'embedding_model_id': pipeline_request.extract_model_id,
+                    'embedding_model_version': extract_model_version,
                 }
                 if top_orientation is not None:
                     bbox_result['orientation'] = top_orientation
@@ -305,8 +349,16 @@ async def run_pipeline(
             elif 'predictions' in predict_result:
                 total_predictions = len(predict_result.get('predictions', []))
             
-            # Prepare final response
+            # Prepare final response.
+            #
+            # Wildbook v2 contract:
+            #   - top-level `success: True` (validated by MlServiceClient)
+            #   - top-level `results` array (renamed from pipeline_results)
+            # Both are required by validatePipelineResponse in MlServiceClient.
+            # `pipeline_results` is kept as an alias for one release so any
+            # in-flight non-Wildbook callers (test scripts, etc.) don't break.
             final_result = {
+                'success': True,
                 'image_uri': sanitize_uri_for_response(pipeline_request.image_uri),
                 'models_used': {
                     'predict_model_id': pipeline_request.predict_model_id,
@@ -318,6 +370,7 @@ async def run_pipeline(
                 'bbox_score_threshold': pipeline_request.bbox_score_threshold,
                 'total_predictions': total_predictions,
                 'filtered_predictions': len(filtered_bboxes),
+                'results': pipeline_results,
                 'pipeline_results': pipeline_results,
                 'original_predict': predict_result,
                 'original_classify': original_classify_results,
