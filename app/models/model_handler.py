@@ -27,6 +27,10 @@ MODEL_REGISTRY = {
         'module': 'app.models.densenet_orientation',
         'class': 'DenseNetOrientationModel'
     },
+    'densenet-classifier': {
+        'module': 'app.models.densenet_classifier',
+        'class': 'DenseNetClassifierModel'
+    },
     'lightnet': {
         'module': 'app.models.lightnet_model',
         'class': 'LightNetModel'
