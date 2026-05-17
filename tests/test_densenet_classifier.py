@@ -273,3 +273,54 @@ def test_predict_single_member_no_implicit_softmax_wrap():
 
     result = m.predict(b"fakebytes")
     assert abs(result["probability"] - 0.9866) < 1e-3, result
+
+
+# ---------------------------------------------------------------------------
+# Blocker regression tests
+# ---------------------------------------------------------------------------
+
+def _fake_densenet_state_model_prefix(num_classes: int, classes=None) -> dict:
+    """Like _fake_densenet_state but with 'model.' key prefix — the real-world
+    variant where a training harness wraps the backbone in a top-level 'model'
+    attribute, producing keys like 'model.classifier.weight'."""
+    feat_dim = 1920
+    state = OrderedDict()
+    state["model.classifier.weight"] = torch.zeros(num_classes, feat_dim)
+    state["model.classifier.bias"] = torch.zeros(num_classes)
+    return {"state": state, "classes": classes} if classes else {"state": state}
+
+
+def test_strip_module_prefix_handles_model_prefix():
+    """Regression (Blocker 1): _strip_module_prefix must strip 'model.' prefix
+    so that 'model.classifier.weight' → 'classifier.weight'.  Prior to fix,
+    only 'module.' was stripped, meaning a model.-prefixed checkpoint would
+    produce a randomly-initialised backbone with strict=False."""
+    from app.models.densenet_classifier import DenseNetClassifierModel
+
+    fake = _fake_densenet_state_model_prefix(3, classes=["a", "b", "c"])
+    with patch("app.models.densenet_classifier.get_checkpoint_path",
+               side_effect=lambda p: p), \
+         patch("torch.load", return_value=fake):
+        m = DenseNetClassifierModel()
+        m.load(model_id="t", checkpoint_path="/fake/0.weights", device="cpu")
+        # num_classes must have been detected from the model.-prefixed key
+        assert len(m.models) == 1
+        assert m.label_map == {0: "a", 1: "b", 2: "c"}
+
+
+def test_get_model_info_is_json_serializable():
+    """Regression (Blocker 2): get_model_info() must be JSON-serializable so
+    /predict/models doesn't 500 once a densenet-classifier is loaded."""
+    import json
+    from app.models.densenet_classifier import DenseNetClassifierModel
+
+    fake = _fake_densenet_state(3, classes=["a", "b", "c"])
+    with patch("app.models.densenet_classifier.get_checkpoint_path",
+               side_effect=lambda p: p), \
+         patch("torch.load", return_value=fake):
+        m = DenseNetClassifierModel()
+        m.load(model_id="t", checkpoint_path="/fake/0.weights", device="cpu")
+        info = m.get_model_info()
+        # Must round-trip through JSON without raising.
+        json.dumps(info)
+        assert info["device"] == "cpu"  # str representation, not torch.device

@@ -180,7 +180,7 @@ class DenseNetClassifierModel(BaseModel):
     def get_model_info(self) -> Dict[str, Any]:
         return {
             "model_type": "densenet-classifier",
-            "device": self.device,
+            "device": str(self.device),
             "img_size": self.img_size,
             "num_classes": len(self.label_map),
             "label_map": self.label_map,
@@ -234,9 +234,17 @@ def _state_dict_of(checkpoint):
 
 
 def _strip_module_prefix(state_dict):
+    """Strip 'module.' and 'model.' prefixes from DataParallel-wrapped checkpoints.
+
+    Matches the stripping logic in DenseNetOrientationModel.load() so that
+    checkpoints whose keys are prefixed with either 'module.' (nn.DataParallel)
+    or 'model.' (some training harnesses) map correctly onto bare backbone keys.
+    Both prefixes are stripped unconditionally, in the same order as the
+    orientation loader (replace module. first, then model.).
+    """
     cleaned = OrderedDict()
     for k, v in state_dict.items():
-        cleaned[k.replace("module.", "")] = v
+        cleaned[k.replace("module.", "").replace("model.", "")] = v
     return cleaned
 
 
