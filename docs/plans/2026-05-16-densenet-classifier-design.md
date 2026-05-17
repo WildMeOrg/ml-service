@@ -70,18 +70,35 @@ Loader behavior:
 - Exactly one of `checkpoint_path` / `checkpoint_paths` must be provided.
   `checkpoint_path` is normalized internally into a single-element
   `checkpoint_paths` list.
-- Each checkpoint is downloaded (if URL) and loaded via `torch.load`.
+- Optional `ensemble_indices: list[int]` config selects a subset of
+  `checkpoint_paths` to actually load (for real-time fallback parity with
+  WBIA's single-member usage). Default: load all configured paths.
+- Each selected checkpoint is downloaded (if URL) and loaded via
+  `torch.load`.
 - Architecture is detected from the first checkpoint's state-dict keys
   (HRNet-W32 vs DenseNet201), reusing the logic from
   `densenet_orientation.py:120-130`.
 - `num_classes` is derived from the first checkpoint's classifier weight
-  shape. **All subsequent checkpoints must match `num_classes`** — error
-  at load if mismatched.
-- `label_map` resolves in order: explicit config arg, checkpoint `classes`
-  field (WBIA format), generic `class_{i}` fallback. (Same precedence as
-  the orientation model.)
+  shape. **All subsequent checkpoints must match `num_classes` AND, if
+  the checkpoint provides a `classes` list, must match the first
+  checkpoint's class names in the same order.** Averaging probabilities
+  by index is only valid when index → class is identical across members;
+  mismatched order would corrupt the averaged probabilities silently.
+  Error at load on either mismatch.
+- An explicit config `label_map` overrides whatever class names the
+  checkpoints carry. When `label_map` is set, the loader still validates
+  that every checkpoint has the same `num_classes`, but no longer cross-
+  checks `classes` lists.
+- **The classifier head is NOT wrapped in `nn.Softmax` at load time.**
+  Models output raw logits. The ensemble-averaging step in `predict()` is
+  the single softmax site, so we never double-softmax. (This differs
+  intentionally from `DenseNetOrientationModel.load()` line 131, which
+  appends Softmax during load. The orientation model is single-checkpoint
+  and applies softmax inside the model graph; for an ensemble we must
+  softmax outside so the average is mathematically meaningful.)
 - All loaded `nn.Module` instances are stored as `self.models` (list);
-  `self.compound_labels` carries the flag.
+  `self.compound_labels` carries the flag; `self.sentinel_prefixes`
+  carries the configurable suppression list (default `["species"]`).
 
 **Inference:**
 
@@ -92,6 +109,8 @@ def predict(self, image_bytes, bbox=None, theta=0.0):
     summed = None
     with torch.no_grad():
         for m in self.models:
+            # Models are loaded WITHOUT a Softmax tail (see loader note).
+            # We softmax each member's raw logits here, then sum.
             probs = torch.softmax(m(inputs), dim=-1)
             summed = probs if summed is None else summed + probs
     avg = summed / len(self.models)
@@ -99,17 +118,27 @@ def predict(self, image_bytes, bbox=None, theta=0.0):
 ```
 
 `_format_output(avg)` builds the result dict. Top-K (K=3 by default to
-mirror EfficientNet) `predictions` list is always included. For each
-prediction:
+mirror EfficientNet) `predictions` list is always included. **Every entry
+in `predictions` carries its own parsed `species` and `viewpoint`**, not
+just the top-1 — `wbia_compat_router.py:308` and other downstream
+consumers may inspect runner-ups.
 
-- `label`, `probability`, `index` populated as usual.
-- If `self.compound_labels` AND `":"` in label:
-  - Split once: `prefix, suffix = label.split(":", 1)`.
-  - If `prefix == "species"` (the literal sentinel namespace used by some
-    deployed efficientnet checkpoints): set `species = None`, `viewpoint =
-    suffix`.
-  - Else: `species = prefix`, `viewpoint = suffix`.
-- Else (no compound): `species = None`, `viewpoint = label`.
+Parsing rules (single source of truth, factored into a shared helper
+`parse_class_label(label, compound_labels, sentinel_prefixes)`):
+
+| Input | `compound_labels` | Output `(species, viewpoint)` |
+|---|---|---|
+| `"salamander_fire_adult:up"` | `True`  | `("salamander_fire_adult", "up")` |
+| `"species:left"` (sentinel)   | `True`  | `(None, "left")` |
+| `"up"` (no colon)             | `True`  | `(None, "up")` |
+| `"up"`                        | `False` | `(None, "up")` |
+| `"salamander_fire_adult:up"`  | `False` | **load-time error**: colon-bearing label encountered with `compound_labels: False` is a config mistake — fail-fast at load with a clear message, do not silently emit `(None, None)`. |
+
+The helper lives in a small new module (e.g. `app/utils/label_parsing.py`)
+and is also imported by `EfficientNetModel`'s compound-parsing path, so
+the sentinel suppression applies uniformly — addressing the gap where
+EfficientNet today produces literal species `"species"` from `"species:up"`-
+style labels.
 
 Top-1's `species` and `viewpoint` are also surfaced at the top level of
 the returned dict for the router's convenience:
@@ -121,7 +150,10 @@ return {
   'class_id': top_idx,
   'species': top_species,        # may be None
   'viewpoint': top_viewpoint,    # may be None
-  'predictions': [{label, probability, index, species, viewpoint}, ...],
+  'predictions': [
+    {'label': ..., 'probability': ..., 'index': ..., 'species': ..., 'viewpoint': ...},
+    ...  # every entry parsed, not just top-1
+  ],
 }
 ```
 
@@ -211,9 +243,18 @@ v2-contract fields (`success`, `results`, `embedding_model_id`,
         "/datasets/labeler.salamander_fire.v2/labeler.2.weights"
     ],
     "img_size": 224,
-    "compound_labels": true
+    "compound_labels": true,
+    "sentinel_prefixes": ["species"]
 }
 ```
+
+`sentinel_prefixes` is optional; defaults to `["species"]`. Set it to a
+broader list if your deployment has other placeholder namespaces; set it
+to `[]` to disable sentinel suppression entirely.
+
+`ensemble_indices: [0]` (optional) would load only `labeler.0.weights` for
+a single-member real-time fallback — matches WBIA's behavior when
+configured for a single ensemble member.
 
 A viewpoint-only DenseNet (most species) would simply omit `compound_labels`
 and use either a single `checkpoint_path` or an ensemble list.
@@ -232,8 +273,18 @@ and use either a single `checkpoint_path` or an ensemble list.
 - `checkpoint_path` AND `checkpoint_paths` both set, OR neither set →
   ValueError at load time.
 - Ensemble members with mismatched `num_classes` → ValueError at load time.
+- Ensemble members with matching `num_classes` but mismatched `classes`
+  ordering → ValueError at load time (averaging would corrupt
+  probabilities silently if allowed).
 - `compound_labels: true` but no label contains `":"` → load-time WARN log;
-  predict still works (returns viewpoint = full label, species = None).
+  predict still works (every label becomes viewpoint-only with
+  `species = None`).
+- `compound_labels: false` but at least one label contains `":"` → load-
+  time ValueError. This is a config mistake — either the operator forgot
+  the flag, or the checkpoint was misconfigured. Fail fast with a clear
+  message rather than silently emit `(None, None)`.
+- `ensemble_indices` references an index out of range → ValueError at
+  load time.
 - Inference failure on any single ensemble member → entire predict raises
   (consistent with how the existing extract path treats embedding failures
   after the v2 contract fix in commit `3fbed82`).
@@ -244,36 +295,64 @@ and use either a single `checkpoint_path` or an ensemble list.
 
 Three layers; first two are fast and require no real checkpoint files.
 
-**Layer 1 — pure-function helpers (`test_densenet_classifier.py`):**
+**Layer 1 — pure-function helpers (`test_label_parsing.py`):**
 
-- `_parse_compound_label("salamander_fire_adult:up", compound=True)`
+- `parse_class_label("salamander_fire_adult:up", compound_labels=True)`
   → `("salamander_fire_adult", "up")`
-- `_parse_compound_label("species:left", compound=True)` → `(None, "left")`
-- `_parse_compound_label("up", compound=True)` → `(None, "up")`
-- `_parse_compound_label("salamander_fire_adult:up", compound=False)`
-  → `(None, None)` (raw label preserved separately)
-- Sentinel namespace list (currently just `"species"`) is centralized in
-  one constant so it can grow without touching the router.
+- `parse_class_label("species:left", compound_labels=True)` →
+  `(None, "left")` (default sentinel suppression)
+- `parse_class_label("species:left", compound_labels=True,
+  sentinel_prefixes=[])` → `("species", "left")` (suppression disabled)
+- `parse_class_label("species:left", compound_labels=True,
+  sentinel_prefixes=["species", "viewpoint"])` → `(None, "left")` (custom
+  sentinel list)
+- `parse_class_label("up", compound_labels=True)` → `(None, "up")`
+- `parse_class_label("up", compound_labels=False)` → `(None, "up")`
+- `parse_class_label("salamander_fire_adult:up", compound_labels=False)`
+  → **raises `ValueError`** (config mistake; fail fast)
 
-**Layer 2 — loader / ensemble (mocked torch.load):**
+**Layer 2 — loader / ensemble (mocked `torch.load`):**
 
-- Loading 3 ensemble checkpoints with matching `num_classes` produces
-  `len(self.models) == 3`.
+- Loading 3 ensemble checkpoints with matching `num_classes` AND matching
+  `classes` order produces `len(self.models) == 3`.
 - Loading 2 checkpoints with mismatched classifier weight shapes raises
   ValueError.
-- Single `checkpoint_path` path normalizes to length-1 list.
-- Predict averages softmax across N members (test with deterministic
-  mock state-dicts that produce predictable logits).
+- Loading 2 checkpoints with matching `num_classes` but different
+  `classes` order (e.g., `[A, B, C]` vs `[A, C, B]`) raises ValueError.
+- Explicit `label_map` overrides checkpoint `classes` and skips the
+  cross-checkpoint class-order check (still requires matching
+  `num_classes`).
+- Single `checkpoint_path` normalizes to a length-1 list internally.
+- `ensemble_indices: [0]` loads only the first checkpoint.
+- `ensemble_indices: [5]` against a 3-element `checkpoint_paths` raises
+  ValueError.
+- Predict averages softmax across N members with a deterministic mock
+  state-dict pair: model A always predicts class 0 with logits
+  `[5, 0, 0]`, model B always predicts class 2 with logits `[0, 0, 5]`.
+  Averaged softmax should put class 0 ≈ class 2 (both peaked) > class 1,
+  with class 0 ≈ class 2 numerically equal. (Confirms equal-weight
+  averaging.)
+- Predict on a single-member ensemble produces identical results to the
+  same model used standalone (no implicit Softmax wrap mid-load).
+- Predict with `compound_labels=True` against a `salamander_fire_v2`-shaped
+  mock label list: every entry in `predictions[*]` has both `species` and
+  `viewpoint` parsed.
 
 **Layer 3 — FastAPI router integration (`TestClient` + monkeypatched
 ModelHandler):**
 
 - `classify_model_id` → densenet-classifier (compound) → response per-result
-  has top-level `iaClass` and `viewpoint`.
-- `classify_model_id` → densenet-classifier (non-compound) → response has
-  top-level `viewpoint` only, no `iaClass`.
-- `classify_model_id` → existing efficientnet-classifier → existing
-  behavior preserved (no `iaClass`/`viewpoint` on result).
+  has top-level `iaClass` and `viewpoint`; AND every entry in
+  `classification.predictions` (if exposed) has parsed `species`/`viewpoint`.
+- `classify_model_id` → densenet-classifier (non-compound, all colon-free
+  labels) → response has top-level `viewpoint` only, no `iaClass`.
+- `classify_model_id` → existing efficientnet-classifier (no
+  `parse_compound_labels`) → existing behavior preserved (no
+  `iaClass`/`viewpoint` on result).
+- `classify_model_id` → existing efficientnet-classifier WITH
+  `parse_compound_labels=True` and `species:up`-style labels → result
+  shows top-level `viewpoint` only (sentinel suppression now applies
+  uniformly via the shared helper). Regression coverage for finding #5.
 - `classify_model_id` → densenet-orientation → 400 (rejected; orient lives
   in a different slot).
 
@@ -293,17 +372,42 @@ Following the workflow already established on the Wildbook v2 branch:
 3. **Post-commit verify** — If code review surfaces a follow-up fix,
    re-review after the fix.
 
-## Open questions for Codex
+## Resolved questions (Codex design review, 2026-05-16)
 
-1. Is `DenseNetClassifierModel` truly enough of a separate concept to justify
-   a new module, or should it derive from `DenseNetOrientationModel` (share
-   90% of the load/preprocess code)?
-2. The sentinel namespace `"species"` — is one literal sufficient, or
-   should the suppression list be configurable per-model?
-3. Ensemble support: should `_format_output` expose per-member predictions
-   (top-K from each model) alongside the averaged top-K, or is the averaged
-   view sufficient for all consumers?
-4. Response-shape change: is adding `iaClass` and `viewpoint` at the top
-   level (rather than nested under `classification`) acceptable, given the
-   existing /pipeline/ response already has flat fields like `bbox`,
-   `theta`, `embedding`, etc.?
+Original design v1 was reviewed and the following decisions were locked in
+based on Codex feedback. Each is now reflected in the sections above.
+
+1. **Module structure**: new sibling `DenseNetClassifierModel`, not
+   inheritance from `DenseNetOrientationModel`. The orientation class
+   bakes in orientation response shape and softmax-on-load behavior;
+   subclassing would couple two different contracts. DRY via small shared
+   helpers later if needed.
+2. **Sentinel handling**: configurable per-model via `sentinel_prefixes`
+   (default `["species"]`). Sentinel suppression is implemented in a
+   shared `parse_class_label` helper used by BOTH DenseNet-classifier AND
+   EfficientNet, so the existing EfficientNet `"species:up"` literal-
+   species bug is fixed in the same change.
+3. **Per-prediction parsing**: every entry in `predictions[*]` carries its
+   own `species` and `viewpoint`, not just top-1. `/pipeline/` promotes
+   top-1 to top-level `iaClass`/`viewpoint`. `wbia_compat_router` and
+   future consumers that inspect runner-ups get parsed fields too.
+4. **Ensemble shape**: load all configured checkpoints by default. Optional
+   `ensemble_indices: list[int]` selects a subset (parity with WBIA's
+   single-member usage as a real-time fallback).
+5. **Softmax ownership**: models load WITHOUT a Softmax tail. Softmax is
+   applied exactly once during ensemble averaging in `predict()`. This
+   intentionally differs from `DenseNetOrientationModel.load()`'s in-graph
+   Softmax wrap — averaging post-softmax is mathematically correct only
+   when each member is softmaxed independently, which is what we do.
+6. **Label-order validation**: load-time check that every ensemble member
+   has the same `classes` list in the same order (when `classes` is
+   present). Averaging by index demands index→class agreement; mismatched
+   order would corrupt averaged probabilities silently. Explicit
+   `label_map` config override bypasses the cross-checkpoint class check
+   (still requires matching `num_classes`).
+7. **`compound_labels: false` + colon-bearing label**: load-time
+   `ValueError` rather than silent `(None, None)`. Fail fast on config
+   mistakes.
+8. **Response-shape change**: keep `classification.class` as the raw
+   label; add parsed `iaClass`/`viewpoint` at top level. No mutation of
+   the existing fields.
