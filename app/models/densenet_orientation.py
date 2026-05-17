@@ -151,6 +151,57 @@ class DenseNetOrientationModel(BaseModel):
             logger.error(f"Error loading orientation model: {str(e)}")
             raise
 
+    @staticmethod
+    def _preprocess_tensor(
+        image_bytes: bytes,
+        bbox: Optional[List[int]],
+        theta: float,
+        img_size: int,
+        device,
+    ) -> "torch.Tensor":
+        """Decode, crop, rotate, and normalise image bytes into a model-ready
+        float tensor of shape (1, 3, img_size, img_size) on *device*.
+
+        Extracted as a staticmethod so that sibling classifiers (e.g.
+        DenseNetClassifierModel) can reuse identical preprocessing without
+        inheriting from this class.
+        """
+        transforms = Compose([
+            Resize(img_size, img_size),
+            Normalize(mean=[0.485, 0.456, 0.406],
+                      std=[0.229, 0.224, 0.225], max_pixel_value=255.0),
+            ToTensorV2()
+        ])
+
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        if bbox is not None:
+            x, y, w, h = bbox
+            img_h, img_w = image.shape[:2]
+            x1 = max(0, int(x))
+            y1 = max(0, int(y))
+            x2 = min(img_w, int(x + w))
+            y2 = min(img_h, int(y + h))
+            if x2 > x1 and y2 > y1:
+                image = image[y1:y2, x1:x2]
+            else:
+                logger.warning(
+                    f"Invalid crop bbox [{x},{y},{w},{h}] for image "
+                    f"{img_w}x{img_h}, using full image"
+                )
+
+        if theta != 0.0:
+            angle_degrees = np.degrees(theta)
+            h, w = image.shape[:2]
+            center = (w // 2, h // 2)
+            rotation_matrix = cv2.getRotationMatrix2D(center, angle_degrees, 1.0)
+            image = cv2.warpAffine(image, rotation_matrix, (w, h))
+
+        augmented = transforms(image=image)
+        return augmented["image"].unsqueeze(0).to(device)
+
     def predict(self, image_bytes: bytes, bbox: Optional[List[int]] = None,
                 theta: float = 0.0, **kwargs) -> Dict[str, Any]:
         """Run orientation classification on the image.
@@ -164,36 +215,9 @@ class DenseNetOrientationModel(BaseModel):
             Dictionary with orientation predictions
         """
         try:
-            # Decode image
-            nparr = np.frombuffer(image_bytes, np.uint8)
-            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-            # Apply bounding box
-            if bbox is not None:
-                x, y, w, h = bbox
-                img_h, img_w = image.shape[:2]
-                # Clamp to image bounds
-                x1 = max(0, int(x))
-                y1 = max(0, int(y))
-                x2 = min(img_w, int(x + w))
-                y2 = min(img_h, int(y + h))
-                if x2 > x1 and y2 > y1:
-                    image = image[y1:y2, x1:x2]
-                else:
-                    logger.warning(f"Invalid crop bbox [{x},{y},{w},{h}] for image {img_w}x{img_h}, using full image")
-
-            # Apply rotation
-            if theta != 0.0:
-                angle_degrees = np.degrees(theta)
-                h, w = image.shape[:2]
-                center = (w // 2, h // 2)
-                rotation_matrix = cv2.getRotationMatrix2D(center, angle_degrees, 1.0)
-                image = cv2.warpAffine(image, rotation_matrix, (w, h))
-
-            # Transform
-            augmented = self.transforms(image=image)
-            tensor = augmented['image'].unsqueeze(0).to(self.device)
+            tensor = self._preprocess_tensor(
+                image_bytes, bbox, theta, self.img_size, self.device
+            )
 
             # Inference
             with torch.no_grad():
