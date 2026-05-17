@@ -51,7 +51,6 @@ class DenseNetOrientationModel(BaseModel):
         self.device = None
         self.img_size = 224
         self.label_map = None
-        self.transforms = None
         self.model_id = None
         self.architecture = None
 
@@ -136,14 +135,6 @@ class DenseNetOrientationModel(BaseModel):
 
             self.model.to(self.device)
             self.model.eval()
-
-            # Setup transforms
-            self.transforms = Compose([
-                Resize(self.img_size, self.img_size),
-                Normalize(mean=[0.485, 0.456, 0.406],
-                         std=[0.229, 0.224, 0.225], max_pixel_value=255.0),
-                ToTensorV2()
-            ])
 
             logger.info(f"Loaded {self.architecture} orientation model '{model_id}' with {num_classes} classes")
 

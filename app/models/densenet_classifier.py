@@ -32,7 +32,8 @@ class DenseNetClassifierModel(BaseModel):
         self.sentinel_prefixes: List[str] = ["species"]
         self.architecture: str = "densenet201"
         self.img_size: int = 224
-        self.device: str = "cpu"
+        self.device: torch.device = torch.device("cpu")
+        self.model_id: str = ""
 
     def load(self, model_path: str = "", device: str = "cpu",
              model_id: str = "",
@@ -44,7 +45,8 @@ class DenseNetClassifierModel(BaseModel):
              sentinel_prefixes: Optional[List[str]] = None,
              ensemble_indices: Optional[List[int]] = None,
              **kwargs) -> None:
-        self.device = device
+        self.device = torch.device(device)
+        self.model_id = model_id
         self.img_size = img_size
         self.compound_labels = bool(compound_labels)
         if sentinel_prefixes is not None:
@@ -79,12 +81,14 @@ class DenseNetClassifierModel(BaseModel):
             checkpoints.append(ck)
 
         # --- Determine num_classes and arch from the first checkpoint ---
-        first_state = _state_dict_of(checkpoints[0])
+        # Strip prefix once here; pass cleaned state so _detect_arch_and_num_classes
+        # does not need to strip again internally.
+        first_state = _strip_module_prefix(_state_dict_of(checkpoints[0]))
         num_classes, self.architecture = _detect_arch_and_num_classes(first_state)
 
         # --- Validate every member matches num_classes ---
         for i, ck in enumerate(checkpoints[1:], start=1):
-            n_i, _ = _detect_arch_and_num_classes(_state_dict_of(ck))
+            n_i, _ = _detect_arch_and_num_classes(_strip_module_prefix(_state_dict_of(ck)))
             if n_i != num_classes:
                 raise ValueError(
                     f"Ensemble checkpoint {i} has num_classes={n_i}, "
@@ -162,7 +166,8 @@ class DenseNetClassifierModel(BaseModel):
 
     def predict(self, image_bytes: bytes,
                 bbox: Optional[List[int]] = None,
-                theta: float = 0.0) -> Dict[str, Any]:
+                theta: float = 0.0,
+                **kwargs) -> Dict[str, Any]:
         inputs = self._preprocess(image_bytes, bbox, theta)
         summed = None
         with torch.no_grad():
@@ -214,6 +219,7 @@ class DenseNetClassifierModel(BaseModel):
 
         top = predictions[0]
         return {
+            "model_id": self.model_id,
             "class": top["label"],
             "probability": top["probability"],
             "class_id": top["index"],
@@ -234,9 +240,14 @@ def _strip_module_prefix(state_dict):
     return cleaned
 
 
-def _detect_arch_and_num_classes(state):
-    cleaned = _strip_module_prefix(state)
-    keys = set(cleaned.keys())
+def _detect_arch_and_num_classes(cleaned_state):
+    """Detect architecture and num_classes from a *pre-stripped* state dict.
+
+    Callers must pass a state dict that has already had module prefixes
+    removed (via ``_strip_module_prefix``) — this function does NOT strip
+    internally to avoid stripping the same state twice.
+    """
+    keys = set(cleaned_state.keys())
     # Check DenseNet first — denseblock/denselayer keys are unique to DenseNet
     if any("denseblock" in k or "denselayer" in k for k in keys):
         arch = "densenet201"
@@ -247,7 +258,7 @@ def _detect_arch_and_num_classes(state):
         # Fallback: infer from classifier feature dim
         for k in keys:
             if "classifier.weight" in k:
-                n_features = cleaned[k].shape[1]
+                n_features = cleaned_state[k].shape[1]
                 if n_features == 2048:
                     arch = "hrnet_w32"
                     break
@@ -257,10 +268,10 @@ def _detect_arch_and_num_classes(state):
         else:
             arch = "densenet201"
 
-    classifier_keys = [k for k in cleaned if "classifier.weight" in k]
+    classifier_keys = [k for k in cleaned_state if "classifier.weight" in k]
     if not classifier_keys:
         raise ValueError("No classifier.weight key in checkpoint state-dict")
-    n = cleaned[classifier_keys[-1]].shape[0]
+    n = cleaned_state[classifier_keys[-1]].shape[0]
     return n, arch
 
 
