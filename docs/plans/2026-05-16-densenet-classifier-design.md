@@ -309,7 +309,8 @@ and use either a single `checkpoint_path` or an ensemble list.
 
 | Path | Effect |
 |---|---|
-| Existing EfficientNet `classify_model_id` calls | Unchanged (isinstance check now accepts a tuple). |
+| Existing EfficientNet `classify_model_id` calls (no `parse_compound_labels`) | Unchanged (isinstance check now accepts a tuple). |
+| Existing EfficientNet calls WITH `parse_compound_labels=True` | Sentinel suppression now applied via shared helper; per-prediction shape unchanged; top-level `iaClass`/`viewpoint` newly emitted by router. See "Incidental changes to EfficientNet". |
 | Existing `orientation_model_id` calls with `densenet-orientation` | Untouched. |
 | Wildbook v2 `MlServiceProcessor.persistDetections` | Already reads `result.optString("iaClass", ...)` / `viewpoint`. With this change these fields appear on responses that use a compound DenseNet classifier; otherwise still absent (and `optString` defaults to null). |
 | Legacy Wildbook (pre-v2) consumers | Unaffected; they don't look at these fields. |
