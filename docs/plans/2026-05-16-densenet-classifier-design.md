@@ -38,13 +38,30 @@ fields without code changes.
 
 - Migrating existing `densenet-orientation` users. They stay on that model
   type, loaded via `orientation_model_id`, emitting into `orientation.label`.
-- A symmetric tweak to EfficientNet so it can also surface
-  `species`/`viewpoint`. The router accepts whatever shape the classify
-  model returns; EfficientNet enhancement is a follow-up if desired.
+- **EfficientNet without `parse_compound_labels` is unchanged.** Its
+  existing predict path keeps producing the same per-prediction dicts.
 - A pure-continuous-theta orientation predictor. ml-service does not have
   one today; out of scope here.
 - Wildbook-side changes. The v2 contract already reads the right top-level
   fields with `optString(..., null)` fallbacks.
+
+## Incidental changes to EfficientNet
+
+EfficientNet's existing `parse_compound_labels=True` path (`efficientnet.py:246`)
+is delegated to the new shared `parse_class_label` helper. Effects:
+
+- Per-prediction `species` and `viewpoint` fields continue to appear on
+  each entry of `predictions[*]`, same shape as before.
+- Sentinel suppression now applies (the deployed `"species:up"`-style
+  classifier no longer leaks a literal species `"species"` — `species`
+  becomes `None`, `viewpoint` stays correct).
+- Router promotion of top-1 `species`/`viewpoint` to result-level
+  `iaClass`/`viewpoint` now works for EfficientNet too (because the
+  router reads from `predictions[0]`, single source of truth across both
+  model types). No model-type branch in the router.
+
+These are deliberate, additive, and covered by the Layer 3 EfficientNet
+regression test.
 
 ## Design
 
@@ -86,11 +103,17 @@ Loader behavior:
 - `num_classes` is derived from the first checkpoint's classifier weight
   shape. **All subsequent checkpoints must match `num_classes` exactly.**
 - **When no explicit `label_map` is provided**, EVERY checkpoint must
-  carry a `classes` list (WBIA format), and all of them must match the
-  first checkpoint's `classes` exactly (same length, same names, same
-  order). Mixed "some have classes, some don't" is a ValueError at load
-  time — averaging by index demands index→class agreement across the
-  whole ensemble.
+  carry a `classes` list (WBIA format), AND `len(classes) == num_classes`
+  (derived from the classifier weight shape), AND all checkpoints must
+  match the first checkpoint's `classes` exactly (same length, same
+  names, same order). Mixed "some have classes, some don't" is a
+  ValueError at load time. A stale `classes` list shorter or longer than
+  `num_classes` is also a ValueError — averaging by index demands every
+  emitted label-index lookup succeed; a stale `classes` list of length
+  `n != num_classes` would KeyError silently at predict time or worse,
+  silently mislabel valid predictions. (EfficientNet documents the same
+  risk at `efficientnet.py:104` but only truncates the label_map — for
+  the ensemble loader we prefer fail-fast.)
 - **When an explicit config `label_map` is provided**, it overrides
   whatever class names the checkpoints carry. The loader validates:
   - `num_classes` matches across every member,
@@ -372,6 +395,14 @@ Three layers; first two are fast and require no real checkpoint files.
 - **`label_map` validation**: explicit `label_map={"0": "x", "1": "y"}`
   on a 3-class checkpoint raises ValueError (missing index 2). Stringly-
   keyed JSON values are coerced to int before validation.
+- **Stale `classes` list (no explicit `label_map`)**: checkpoint with
+  classifier weight shape `(3, 1920)` AND `classes = ['a', 'b']` (length
+  2) raises ValueError. Same for length 4. Symmetric coverage of
+  shorter-than and longer-than `num_classes`.
+- **Checkpoint with no `classes` field AND no explicit `label_map`**:
+  raises ValueError (`classes` is required for index→label resolution).
+- **Mixed ensemble**: first checkpoint has `classes`, second has none →
+  ValueError.
 
 **Layer 3 — FastAPI router integration (`TestClient` + monkeypatched
 ModelHandler):**
