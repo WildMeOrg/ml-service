@@ -110,6 +110,57 @@ def test_pipeline_classify_densenet_classifier_pure_viewpoint_omits_iaclass():
     assert "iaClass" not in r
 
 
+def test_pipeline_classify_efficientnet_compound_labels_emits_top_level_iaclass_and_viewpoint():
+    """After Task 2, EfficientNet.predict() emits species/viewpoint on
+    each prediction entry when parse_compound_labels=True. This test
+    confirms the router promotes those to top-level iaClass/viewpoint —
+    same shape as the DenseNet path.
+
+    Closes the loop between Task 2 (EfficientNet shared-helper delegation)
+    and Task 5 (router promotion)."""
+    from app.models.efficientnet import EfficientNetModel
+    from app.models.miewid import MiewidModel
+    from app.models.yolo_ultralytics import YOLOUltralyticsModel
+    import numpy as np
+
+    pm = MagicMock(spec=YOLOUltralyticsModel)
+    pm.predict.return_value = {
+        "predictions": [{
+            "bbox": [0, 0, 10, 10],
+            "theta": 0.0,
+            "score": 0.9,
+            "class": "detection",
+            "class_id": 0
+        }]
+    }
+    cm = MagicMock(spec=EfficientNetModel)
+    cm.predict.return_value = {
+        "class": "whale_shark:left",
+        "probability": 0.88,
+        "class_id": 0,
+        "predictions": [{
+            "label": "whale_shark:left", "probability": 0.88,
+            "index": 0,
+            "species": "whale_shark", "viewpoint": "left",
+        }],
+    }
+    em = MagicMock(spec=MiewidModel)
+    em.extract_embeddings.return_value = np.array([[0.1] * 2152])
+
+    client = _make_app_with_models(pm, cm, em)
+    resp = client.post("/pipeline/", json={
+        "predict_model_id": "p", "classify_model_id": "c",
+        "extract_model_id": "e",
+        "image_uri": "data:image/png;base64,iVBORw0KGgo=",
+    })
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    r = body["results"][0]
+    assert r["iaClass"] == "whale_shark"
+    assert r["viewpoint"] == "left"
+    assert r["classification"]["class"] == "whale_shark:left"
+
+
 def test_pipeline_classify_densenet_orientation_rejected_with_400():
     from app.models.densenet_orientation import DenseNetOrientationModel
     from app.models.miewid import MiewidModel

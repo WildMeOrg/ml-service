@@ -23,7 +23,7 @@ pipeline_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PIPELINES)
 class PipelineRequest(BaseModel):
     """Request model for pipeline endpoint."""
     predict_model_id: str = Field(..., description="ID of the model to use for prediction (bbox detection)")
-    classify_model_id: str = Field(..., description="ID of the EfficientNet model to use for classification")
+    classify_model_id: str = Field(..., description="ID of the classification model (EfficientNet or DenseNet-classifier)")
     extract_model_id: str = Field(..., description="ID of the MiewID model to use for embeddings extraction")
     orientation_model_id: Optional[str] = Field(None, description="ID of the DenseNet orientation model (optional)")
     image_uri: str = Field(..., description="URI of the image to process (URL or file path)")
