@@ -6,6 +6,7 @@ import asyncio
 from pydantic import BaseModel, Field
 from app.models.model_handler import ModelHandler
 from app.models.efficientnet import EfficientNetModel
+from app.models.densenet_classifier import DenseNetClassifierModel
 from app.models.miewid import MiewidModel
 from app.models.densenet_orientation import DenseNetOrientationModel
 from app.utils.image_uri import resolve_image_uri, sanitize_uri_for_response, sanitize_uri_for_logging
@@ -90,10 +91,11 @@ async def run_pipeline(
                 )
             
             # Validate model types
-            if not isinstance(classify_model, EfficientNetModel):
+            if not isinstance(classify_model, (EfficientNetModel, DenseNetClassifierModel)):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Model '{pipeline_request.classify_model_id}' is not an EfficientNet model. Only EfficientNet models support classification."
+                    detail=f"Model '{pipeline_request.classify_model_id}' must be "
+                           f"EfficientNet or DenseNet-classifier for the classify slot."
                 )
             
             if not isinstance(extract_model, MiewidModel):
@@ -290,6 +292,8 @@ async def run_pipeline(
 
                 # Extract the top classification result
                 top_classification = None
+                top_species = None
+                top_viewpoint = None
                 if isinstance(classify_result, dict) and 'predictions' in classify_result and classify_result['predictions']:
                     top_class = classify_result['predictions'][0]
                     top_classification = {
@@ -297,6 +301,8 @@ async def run_pipeline(
                         'probability': top_class.get('probability'),
                         'class_id': top_class.get('index')
                     }
+                    top_species = top_class.get('species')
+                    top_viewpoint = top_class.get('viewpoint')
 
                 # Extract orientation top prediction
                 top_orientation = None
@@ -339,7 +345,11 @@ async def run_pipeline(
                 }
                 if top_orientation is not None:
                     bbox_result['orientation'] = top_orientation
-                
+                if top_species is not None:
+                    bbox_result['iaClass'] = top_species
+                if top_viewpoint is not None:
+                    bbox_result['viewpoint'] = top_viewpoint
+
                 pipeline_results.append(bbox_result)
             
             # Calculate total predictions based on format
