@@ -13,6 +13,7 @@ import io
 from PIL import Image
 from .base_model import BaseModel
 from ..utils.checkpoint_utils import get_checkpoint_path
+from ..utils.label_parsing import parse_class_label
 
 logger = logging.getLogger(__name__)
 
@@ -243,10 +244,14 @@ class EfficientNetModel(BaseModel):
                         'index': int(i),
                         'probability': float(probs[i])
                     }
-                    if self.parse_compound_labels and ':' in label:
-                        parts = label.split(':', 1)
-                        entry['species'] = parts[0]
-                        entry['viewpoint'] = parts[1]
+                    if self.parse_compound_labels:
+                        species, viewpoint = parse_class_label(
+                            label,
+                            compound_labels=True,
+                            sentinel_prefixes=getattr(self, 'sentinel_prefixes', None),
+                        )
+                        entry['species'] = species
+                        entry['viewpoint'] = viewpoint
                     results.append(entry)
 
                 results.sort(key=lambda x: x['probability'], reverse=True)
