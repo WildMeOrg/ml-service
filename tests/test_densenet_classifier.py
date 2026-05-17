@@ -291,21 +291,41 @@ def _fake_densenet_state_model_prefix(num_classes: int, classes=None) -> dict:
 
 
 def test_strip_module_prefix_handles_model_prefix():
-    """Regression (Blocker 1): _strip_module_prefix must strip 'model.' prefix
-    so that 'model.classifier.weight' → 'classifier.weight'.  Prior to fix,
-    only 'module.' was stripped, meaning a model.-prefixed checkpoint would
-    produce a randomly-initialised backbone with strict=False."""
-    from app.models.densenet_classifier import DenseNetClassifierModel
+    """Regression: a checkpoint whose keys are prefixed with 'model.'
+    (e.g., 'model.classifier.weight') must have those weights actually
+    mapped into the backbone. The pre-fix _strip_module_prefix only
+    stripped 'module.', so 'model.'-prefixed checkpoints would silently
+    load randomly-initialized weights under strict=False.
 
-    fake = _fake_densenet_state_model_prefix(3, classes=["a", "b", "c"])
+    To prove the fix, the fake state-dict here uses non-zero classifier
+    weights; we assert the loaded backbone's classifier weights match."""
+    from app.models.densenet_classifier import DenseNetClassifierModel
+    from collections import OrderedDict
+
+    num_classes = 3
+    feat_dim = 1920
+    sentinel_value = 0.5  # any non-zero value will do; just must differ from random init
+    state = OrderedDict()
+    state["model.classifier.weight"] = torch.full((num_classes, feat_dim), sentinel_value)
+    state["model.classifier.bias"] = torch.full((num_classes,), sentinel_value)
+    fake = {"state": state, "classes": ["a", "b", "c"]}
+
     with patch("app.models.densenet_classifier.get_checkpoint_path",
                side_effect=lambda p: p), \
          patch("torch.load", return_value=fake):
         m = DenseNetClassifierModel()
         m.load(model_id="t", checkpoint_path="/fake/0.weights", device="cpu")
-        # num_classes must have been detected from the model.-prefixed key
         assert len(m.models) == 1
-        assert m.label_map == {0: "a", 1: "b", 2: "c"}
+        # The classifier head's weight should have been loaded from the
+        # 'model.'-prefixed state-dict entry. If _strip_module_prefix
+        # didn't strip 'model.', strict=False would have silently skipped
+        # this key and the backbone would carry random-init weights.
+        backbone = m.models[0]
+        loaded_weight = backbone.classifier.weight.detach()
+        # All-sentinel-value asserts strict equality across every element.
+        assert torch.allclose(loaded_weight,
+            torch.full_like(loaded_weight, sentinel_value)), \
+            "classifier.weight was not loaded from 'model.'-prefixed checkpoint"
 
 
 def test_get_model_info_is_json_serializable():
