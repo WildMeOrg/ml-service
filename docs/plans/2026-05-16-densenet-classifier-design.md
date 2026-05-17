@@ -54,7 +54,9 @@ fields without code changes.
 structure with three additions: ensemble loading, compound-label parsing,
 and a different output shape suited for the classify slot.
 
-**Load signature:**
+**Load signature** (must accept every key the model_config.json example
+uses, because `ModelHandler.load_model` passes config kwargs directly into
+`load()` at `model_handler.py:74`):
 
 ```python
 def load(self, model_path: str = "", device: str = 'cpu', model_id: str = "",
@@ -62,7 +64,10 @@ def load(self, model_path: str = "", device: str = 'cpu', model_id: str = "",
          checkpoint_paths: list = None,
          img_size: int = 224,
          label_map: dict = None,
-         compound_labels: bool = False):
+         compound_labels: bool = False,
+         sentinel_prefixes: list = None,    # default ["species"] in body
+         ensemble_indices: list = None,     # default: load all
+         **kwargs):                          # tolerate forward-compatible config keys
 ```
 
 Loader behavior:
@@ -79,16 +84,22 @@ Loader behavior:
   (HRNet-W32 vs DenseNet201), reusing the logic from
   `densenet_orientation.py:120-130`.
 - `num_classes` is derived from the first checkpoint's classifier weight
-  shape. **All subsequent checkpoints must match `num_classes` AND, if
-  the checkpoint provides a `classes` list, must match the first
-  checkpoint's class names in the same order.** Averaging probabilities
-  by index is only valid when index → class is identical across members;
-  mismatched order would corrupt the averaged probabilities silently.
-  Error at load on either mismatch.
-- An explicit config `label_map` overrides whatever class names the
-  checkpoints carry. When `label_map` is set, the loader still validates
-  that every checkpoint has the same `num_classes`, but no longer cross-
-  checks `classes` lists.
+  shape. **All subsequent checkpoints must match `num_classes` exactly.**
+- **When no explicit `label_map` is provided**, EVERY checkpoint must
+  carry a `classes` list (WBIA format), and all of them must match the
+  first checkpoint's `classes` exactly (same length, same names, same
+  order). Mixed "some have classes, some don't" is a ValueError at load
+  time — averaging by index demands index→class agreement across the
+  whole ensemble.
+- **When an explicit config `label_map` is provided**, it overrides
+  whatever class names the checkpoints carry. The loader validates:
+  - `num_classes` matches across every member,
+  - `label_map` keys cover exactly `{0, 1, ..., num_classes - 1}` —
+    no missing indices, no extras. Stringly-keyed JSON config values
+    are coerced to int before this check.
+  - The checkpoints' own `classes` lists, if any, are NOT cross-checked
+    when `label_map` is explicit. Operator's choice has been to
+    intentionally rebrand.
 - **The classifier head is NOT wrapped in `nn.Softmax` at load time.**
   Models output raw logits. The ensemble-averaging step in `predict()` is
   the single softmax site, so we never double-softmax. (This differs
@@ -140,22 +151,29 @@ the sentinel suppression applies uniformly — addressing the gap where
 EfficientNet today produces literal species `"species"` from `"species:up"`-
 style labels.
 
-Top-1's `species` and `viewpoint` are also surfaced at the top level of
-the returned dict for the router's convenience:
+Top-level `class` / `probability` / `class_id` are also surfaced for
+direct-call ergonomics (e.g. `/classify/` or `wbia_compat_router`), but
+the router promotes `iaClass`/`viewpoint` from `predictions[0]`, not from
+the top level of this dict. Single source of truth = each `predictions[*]`
+entry.
 
 ```python
 return {
   'class': top_label,
   'probability': top_prob,
   'class_id': top_idx,
-  'species': top_species,        # may be None
-  'viewpoint': top_viewpoint,    # may be None
   'predictions': [
     {'label': ..., 'probability': ..., 'index': ..., 'species': ..., 'viewpoint': ...},
     ...  # every entry parsed, not just top-1
   ],
 }
 ```
+
+EfficientNet's existing `predict()` already puts parsed `species`/`viewpoint`
+on each `predictions[*]` entry when `parse_compound_labels=True`
+(`efficientnet.py:246`), so once the shared `parse_class_label` helper is
+in use, the router gets uniform behavior across both model types without
+the router needing model-type branches.
 
 ### Registry: `app/models/model_handler.py`
 
@@ -199,8 +217,13 @@ if isinstance(classify_result, dict) and 'predictions' in classify_result \
         'probability': top_class.get('probability'),
         'class_id':    top_class.get('index'),
     }
-    top_species   = classify_result.get('species')
-    top_viewpoint = classify_result.get('viewpoint')
+    # Read parsed fields from the top-1 prediction. Single source of
+    # truth: both DenseNetClassifier and EfficientNet (existing
+    # parse_compound_labels path) put parsed `species`/`viewpoint` on
+    # each entry of `predictions[*]`. The router does not need to know
+    # which model type produced the result.
+    top_species   = top_class.get('species')
+    top_viewpoint = top_class.get('viewpoint')
 ```
 
 **(3) Add to `bbox_result` (~line 285-298):**
@@ -329,21 +352,36 @@ Three layers; first two are fast and require no real checkpoint files.
 - Predict averages softmax across N members with a deterministic mock
   state-dict pair: model A always predicts class 0 with logits
   `[5, 0, 0]`, model B always predicts class 2 with logits `[0, 0, 5]`.
-  Averaged softmax should put class 0 ≈ class 2 (both peaked) > class 1,
-  with class 0 ≈ class 2 numerically equal. (Confirms equal-weight
-  averaging.)
+  **Assert numeric probabilities, not just ranking** (ranking alone would
+  not catch an accidental double-softmax):
+  - softmax of `[5, 0, 0]` ≈ `[0.9866, 0.0067, 0.0067]`
+  - softmax of `[0, 0, 5]` ≈ `[0.0067, 0.0067, 0.9866]`
+  - averaged ≈ `[0.4967, 0.0067, 0.4967]`
+  - assert each component within ±1e-3 of the expected value.
 - Predict on a single-member ensemble produces identical results to the
-  same model used standalone (no implicit Softmax wrap mid-load).
+  same model used standalone (no implicit Softmax wrap mid-load). Assert
+  that for raw logits `[5, 0, 0]` the returned top probability is
+  `0.9866 ± 1e-3`, not `softmax(softmax([5,0,0]))[0]`.
 - Predict with `compound_labels=True` against a `salamander_fire_v2`-shaped
   mock label list: every entry in `predictions[*]` has both `species` and
   `viewpoint` parsed.
+- **Load with `compound_labels=False` and a colon-bearing label list (e.g.
+  `['salamander_fire_adult:up']`) raises ValueError at load time** (not
+  at first predict). Layer-1 covers the parser-function case; this layer
+  covers the loader-validation path.
+- **`label_map` validation**: explicit `label_map={"0": "x", "1": "y"}`
+  on a 3-class checkpoint raises ValueError (missing index 2). Stringly-
+  keyed JSON values are coerced to int before validation.
 
 **Layer 3 — FastAPI router integration (`TestClient` + monkeypatched
 ModelHandler):**
 
 - `classify_model_id` → densenet-classifier (compound) → response per-result
-  has top-level `iaClass` and `viewpoint`; AND every entry in
-  `classification.predictions` (if exposed) has parsed `species`/`viewpoint`.
+  has top-level `iaClass` and `viewpoint`. Per-prediction parsing is
+  asserted via `original_classify[i]['predictions'][*]['species'/'viewpoint']`
+  (the per-bbox classify result block emitted in `/pipeline/` response),
+  not via `result.classification.predictions` (`result.classification` is
+  top-1 only).
 - `classify_model_id` → densenet-classifier (non-compound, all colon-free
   labels) → response has top-level `viewpoint` only, no `iaClass`.
 - `classify_model_id` → existing efficientnet-classifier (no
@@ -353,6 +391,7 @@ ModelHandler):**
   `parse_compound_labels=True` and `species:up`-style labels → result
   shows top-level `viewpoint` only (sentinel suppression now applies
   uniformly via the shared helper). Regression coverage for finding #5.
+  Assertion uses `result['viewpoint']` directly; `iaClass` MUST be absent.
 - `classify_model_id` → densenet-orientation → 400 (rejected; orient lives
   in a different slot).
 
