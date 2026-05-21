@@ -6,7 +6,11 @@ from typing import Dict, Any, List, Optional, Tuple
 import timm
 import torch
 import torch.nn as nn
-import torchvision.transforms as transforms
+import albumentations
+from albumentations.pytorch import ToTensorV2
+# torchvision import removed: preprocessing now uses albumentations to match
+# wbia-plugin-miew-id's training/inference pipeline. See the comment on
+# self.preprocess below for details.
 from PIL import Image
 import numpy as np
 import io
@@ -48,6 +52,13 @@ class MiewIdNet(nn.Module):
 
 
 class MiewidModel(BaseModel):
+    # Input shape the MiewID v3/v4 architecture expects. Also the shape used
+    # at training time by wbia-plugin-miew-id (see
+    # wbia_miew_id/datasets/transforms.py:get_valid_transforms). Kept as a
+    # class-level constant so the preprocessing config and any future
+    # model_info reporting stay in sync.
+    IMAGE_SIZE = (440, 440)
+
     def __init__(self):
         self.model = None
         self.model_info = {}
@@ -74,11 +85,21 @@ class MiewidModel(BaseModel):
             self.use_checkpoint = False
             self._load_from_huggingface(device, **kwargs)
 
-        # Initialize preprocessing transforms
-        self.preprocess = transforms.Compose([
-            transforms.Resize((440, 440)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        # Initialize preprocessing transforms.
+        # Matches wbia-plugin-miew-id's get_valid_transforms exactly so
+        # embeddings extracted here agree numerically with embeddings
+        # extracted by the legacy WBIA MiewID pipeline for the same input
+        # image+bbox. albumentations 1.3.1's Normalize defaults are ImageNet
+        # mean/std with max_pixel_value=255.0, equivalent to torchvision's
+        # ToTensor + Normalize(mean,std) chain modulo the bilinear resize
+        # implementation (PIL vs cv2.INTER_LINEAR) — and the model was
+        # trained against cv2 bilinear, so albumentations is the correct
+        # match. Bumping to torchvision was a ~3° angular drift per
+        # embedding, large enough to reshuffle top-N matches.
+        self.preprocess = albumentations.Compose([
+            albumentations.Resize(*self.IMAGE_SIZE),
+            albumentations.Normalize(),
+            ToTensorV2(),
         ])
 
         self.model_info = {
@@ -195,8 +216,12 @@ class MiewidModel(BaseModel):
                 else:
                     processed_image = image
             
-            # Apply preprocessing transforms
-            input_tensor = self.preprocess(processed_image)
+            # Apply preprocessing transforms. albumentations takes numpy HWC
+            # RGB; processed_image is a PIL.Image with mode='RGB' (forced by
+            # the .convert('RGB') call where image is opened above), so
+            # np.array(...) gives the expected shape and dtype.
+            augmented = self.preprocess(image=np.array(processed_image))
+            input_tensor = augmented["image"]
             input_batch = input_tensor.unsqueeze(0).to(self.device)
             
             # Extract embeddings
