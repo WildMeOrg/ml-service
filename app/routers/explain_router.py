@@ -3,16 +3,19 @@ import base64
 import logging
 from pathlib import Path
 
+import albumentations
 import cv2
 import httpx
 import numpy as np
 import torch
 import torchvision.transforms as transforms
+from albumentations.pytorch import ToTensorV2
 from PIL import Image
 from fastapi import APIRouter, HTTPException, Request, Depends
 from pydantic import BaseModel
 from pairx import explain
 
+from app.models.miewid import MiewidModel
 from app.models.model_handler import ModelHandler
 from app.utils.helpers import get_chip_from_img
 
@@ -34,16 +37,21 @@ async def get_model_handler(request: Request) -> ModelHandler:
 
 def preprocess(image, model):
     """Runs preprocessing on an image based on the model to be used."""
-    image = Image.fromarray(image.astype("uint8"))
     if model.lower().startswith("miewid"):
-        transform = transforms.Compose([
-            transforms.Resize((440, 440)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        # Match wbia-plugin-miew-id's training/inference transforms (and
+        # MiewidModel.preprocess) so PairX visualizations operate on the
+        # same tensor representation as embedding extraction. albumentations
+        # takes a numpy HWC uint8 image; the caller passes a numpy image
+        # already, so no PIL round-trip is needed.
+        transform = albumentations.Compose([
+            albumentations.Resize(*MiewidModel.IMAGE_SIZE),
+            albumentations.Normalize(),
+            ToTensorV2(),
         ])
+        augmented = transform(image=image.astype("uint8"))
+        return augmented["image"]
     else:
-         raise HTTPException(status_code=400, detail="Unsupported model")
-    return transform(image)
+        raise HTTPException(status_code=400, detail="Unsupported model")
 
 def extend_bb_list(img_list, bb_list):
     """Extends a list a bounding boxes to the length of a list of images.
