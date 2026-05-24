@@ -121,7 +121,13 @@ async def process_image(uri, bbox, theta, crop_bbox, model, device):
     transformed_image = preprocess(chip, model)
     if len(transformed_image.shape) == 3:
             transformed_image = transformed_image.unsqueeze(0)
-    if crop_bbox:
+    # PairX overlays heatmaps/keypoints in tensor-coordinate space directly
+    # onto the numpy display image, so the display must show the same content
+    # as the tensor — i.e., the cropped chip whenever a real bbox was given.
+    # Otherwise relevance pixels land at the right location within the chip
+    # but on top of the wrong (full-frame) display image.
+    has_bbox = len(bbox) == 4 and bbox[2] > 0 and bbox[3] > 0
+    if crop_bbox or has_bbox:
         image = chip
     img_size = tuple(transformed_image.shape[-2:])
     image = np.array(transforms.Resize(img_size)(Image.fromarray(image)))
