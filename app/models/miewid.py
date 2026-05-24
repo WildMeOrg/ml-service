@@ -14,8 +14,8 @@ from albumentations.pytorch import ToTensorV2
 from PIL import Image
 import numpy as np
 import io
-import math
 from app.utils.checkpoint_utils import get_checkpoint_path
+from app.utils.helpers import get_chip_from_img
 
 logger = logging.getLogger(__name__)
 
@@ -164,63 +164,38 @@ class MiewidModel(BaseModel):
     def predict(self, **kwargs):
         raise HTTPException(status_code=400, detail=f"MiewID should not be used for prediction")
 
-    def crop_and_rotate_image(self, image: Image.Image, bbox: Tuple[int, int, int, int], theta: float = 0.0) -> Image.Image:
-        """
-        Crop and rotate an image based on bounding box and rotation angle.
-        
-        Args:
-            image: PIL Image
-            bbox: Tuple of (x, y, width, height)
-            theta: Rotation angle in radians
-            
-        Returns:
-            Cropped and rotated PIL Image
-        """
-        x, y, w, h = bbox
-        
-        # Crop the image
-        cropped = image.crop((x, y, x + w, y + h))
-        
-        # Rotate if theta is provided
-        if theta != 0.0:
-            # Convert radians to degrees
-            angle_degrees = math.degrees(theta)
-            cropped = cropped.rotate(-angle_degrees, expand=True)
-        
-        return cropped
-
     def extract_embeddings(self, image_bytes: bytes, bbox: Optional[Tuple[int, int, int, int]] = None, theta: float = 0.0) -> np.ndarray:
         """
         Extract embeddings from an image using optional bounding box and rotation.
-        
+
         Args:
             image_bytes: Image data as bytes
             bbox: Optional tuple of (x, y, width, height). If None, uses full image
             theta: Rotation angle in radians
-            
+
         Returns:
             Numpy array containing the embeddings
         """
         try:
-            # Load image from bytes
-            image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
-            
-            # Process the image (crop and rotate if bbox provided, otherwise just rotate)
+            # Load image as RGB HWC numpy. We use get_chip_from_img (the same
+            # helper wbia-plugin-miew-id uses at training time) so the chip
+            # fed to the model matches the training-time convention exactly.
+            # The previous PIL crop-then-rotate(-theta) produced a different
+            # chip whenever theta != 0, silently degrading embeddings for
+            # every rotated annotation.
+            image_np = np.array(Image.open(io.BytesIO(image_bytes)).convert('RGB'))
+
             if bbox is not None:
-                processed_image = self.crop_and_rotate_image(image, bbox, theta)
+                processed_np = get_chip_from_img(image_np, list(bbox), float(theta))
+            elif theta != 0.0:
+                # No bbox but rotation requested: rotate the full image using
+                # the same canonical helper by passing a full-frame bbox.
+                h, w = image_np.shape[:2]
+                processed_np = get_chip_from_img(image_np, [0, 0, w, h], float(theta))
             else:
-                # Use full image, only apply rotation if needed
-                if theta != 0.0:
-                    angle_degrees = math.degrees(theta)
-                    processed_image = image.rotate(-angle_degrees, expand=True)
-                else:
-                    processed_image = image
-            
-            # Apply preprocessing transforms. albumentations takes numpy HWC
-            # RGB; processed_image is a PIL.Image with mode='RGB' (forced by
-            # the .convert('RGB') call where image is opened above), so
-            # np.array(...) gives the expected shape and dtype.
-            augmented = self.preprocess(image=np.array(processed_image))
+                processed_np = image_np
+
+            augmented = self.preprocess(image=processed_np)
             input_tensor = augmented["image"]
             input_batch = input_tensor.unsqueeze(0).to(self.device)
             
