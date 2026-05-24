@@ -73,6 +73,16 @@ def crop_rect(img, rect):
 
 def get_chip_from_img(img, bbox, theta):
     x1,y1,w,h = bbox
+
+    # Degenerate zero-size bbox falls back to the original image. The
+    # theta=0 path below already handles this implicitly via the empty
+    # numpy slice + min(shape) check, but the rotated path would hand
+    # cv2.getRectSubPix a size of (0, 0), which returns None and then
+    # crashes the .shape check. Bail out before either path runs.
+    if w <= 0 or h <= 0:
+        logger.warning(f'Using original image. Zero-size bbox: {bbox}')
+        return img
+
     x2 = x1 + w
     y2 = y1 + h
     xm = (x1 + x2) // 2
@@ -85,7 +95,7 @@ def get_chip_from_img(img, bbox, theta):
     else:
         cropped_image = crop_rect(img, ((xm, ym), (x2-x1, y2-y1), theta))[0]
 
-    if min(cropped_image.shape) < 1:
+    if cropped_image is None or min(cropped_image.shape) < 1:
         # Use original image
         logger.warning(f'Using original image. Invalid parameters - theta: {theta}, bbox: {bbox}')
         cropped_image = img

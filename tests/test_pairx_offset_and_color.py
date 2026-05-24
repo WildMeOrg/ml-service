@@ -271,6 +271,60 @@ def test_extract_embeddings_uses_canonical_chip_helper():
     np.testing.assert_array_equal(captured["chip"], expected_chip)
 
 
+def test_get_chip_from_img_survives_out_of_frame_and_zero_size():
+    """Direct helper test: out-of-frame, zero-size, and oversized bboxes
+    must not crash, regardless of theta. This pins behavior for every
+    caller (process_image AND extract_embeddings AND any future caller),
+    not just the explain router. cv2.getRectSubPix with size=(0,0) used
+    to return None and crash the .shape check; the helper now bails out
+    on zero-size up front."""
+    import numpy as np
+    from app.utils.helpers import get_chip_from_img
+
+    img = np.full((1000, 1000, 3), 128, dtype=np.uint8)
+
+    cases = [
+        # (bbox, theta) — every one of these used to be a crash risk
+        # or actively crashes pre-fix.
+        ([950, 0, 100, 100], 0.0),
+        ([950, 0, 100, 100], 0.4),
+        ([1050, 0, 100, 100], 0.0),
+        ([1050, 0, 100, 100], 0.4),
+        ([5000, 5000, 100, 100], 0.4),
+        ([500, 500, 0, 0], 0.4),   # zero-size at non-sentinel location + rotation
+        ([0, 0, 0, 0], 0.4),       # sentinel zero-size + rotation
+        ([0, 0, 5000, 5000], 0.4),  # bbox larger than image + rotation
+    ]
+    for bbox, theta in cases:
+        chip = get_chip_from_img(img.copy(), list(bbox), theta)
+        assert chip is not None, f"get_chip_from_img returned None for {bbox}, theta={theta}"
+        assert chip.ndim == 3 and chip.shape[2] == 3, (
+            f"unexpected shape {chip.shape} for {bbox}, theta={theta}"
+        )
+        assert min(chip.shape) >= 1
+
+
+def test_extract_embeddings_handles_zero_size_bbox_with_rotation():
+    """/extract/ and /pipeline/ paths call get_chip_from_img directly,
+    so the helper-level zero-size guard must protect them too. Pre-fix,
+    a zero-size bbox + non-trivial theta crashed with a 500 because
+    cv2.getRectSubPix returned None."""
+    from app.models.miewid import MiewidModel
+
+    img_rgb = np.full((400, 400, 3), 90, dtype=np.uint8)
+
+    model = MiewidModel.__new__(MiewidModel)
+    model.device = "cpu"
+    model.preprocess = lambda image: {"image": torch.zeros(3, 4, 4)}
+    model.model = MagicMock(return_value=torch.tensor([[0.5]]))
+
+    # Zero-size at a non-sentinel position with meaningful rotation —
+    # the case that crashed extract_embeddings until the helper guard
+    # landed.
+    out = model.extract_embeddings(_png_bytes(img_rgb), bbox=(200, 200, 0, 0), theta=0.4)
+    np.testing.assert_array_equal(out, np.array([[0.5]]))
+
+
 def test_extract_embeddings_no_bbox_with_theta_uses_full_frame_helper():
     """bbox=None + theta != 0 must rotate the whole image through the
     canonical get_chip_from_img helper (the same code path
