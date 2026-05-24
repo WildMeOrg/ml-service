@@ -214,7 +214,10 @@ def run_pairx(imgs1_transformed, imgs2_transformed, imgs1, imgs2, model, layer_k
         elif visualization_type == "only_colors":
             pairx_img = pairx_img[pairx_height:]
 
-        pairx_img = cv2.cvtColor(pairx_img, cv2.COLOR_BGR2RGB)
+        # pairx.explain() returns RGB (the JET colormap is converted to RGB
+        # in display_image_with_heatmap, and matplotlib's mcolors.to_rgb is
+        # used for the line/circle colors). The single RGB→BGR conversion
+        # happens immediately before cv2.imencode in read_items().
         toReturn.append(pairx_img)
     return toReturn
 
