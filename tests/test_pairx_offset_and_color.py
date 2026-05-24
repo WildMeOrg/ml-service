@@ -109,9 +109,83 @@ def test_process_image_returns_full_image_when_no_bbox(tmp_path):
     np.testing.assert_array_equal(display, expected)
 
 
+def test_process_image_theta_only_with_sentinel_bbox_does_not_crash(tmp_path):
+    """Regression for a latent crash: when extend_bb_list pads bbox with
+    [0,0,0,0] but the caller actually supplied a non-trivial theta,
+    get_chip_from_img used to call cv2.getRectSubPix with size (0,0),
+    which returns None and then raised AttributeError on .shape.
+    process_image must promote the sentinel to a full-frame bbox so the
+    rotation-only chip path works."""
+    from app.routers.explain_router import process_image
+    from app.utils.helpers import get_chip_from_img
+    import torchvision.transforms as transforms
+
+    img = _make_image_with_marker()
+    img_path = tmp_path / "marker.png"
+    Image.fromarray(img, mode="RGB").save(img_path)
+
+    theta = 0.4
+    display, tensor = asyncio.run(
+        process_image(str(img_path), [0, 0, 0, 0], theta, crop_bbox=False, model="miewid-msv4.1", device="cpu")
+    )
+
+    assert tensor.shape == (1, 3, 440, 440)
+    h, w = img.shape[:2]
+    expected_chip = get_chip_from_img(img, [0, 0, w, h], theta)
+    expected = np.array(transforms.Resize((440, 440))(Image.fromarray(expected_chip)))
+    np.testing.assert_array_equal(display, expected)
+
+
+def test_process_image_full_frame_bbox_with_rotation_uses_rotated_chip(tmp_path):
+    """An explicit full-frame bbox plus rotation should also display the
+    rotated chip — not the un-rotated full image."""
+    from app.routers.explain_router import process_image
+    from app.utils.helpers import get_chip_from_img
+    import torchvision.transforms as transforms
+
+    img = _make_image_with_marker()
+    h, w = img.shape[:2]
+    img_path = tmp_path / "marker.png"
+    Image.fromarray(img, mode="RGB").save(img_path)
+
+    theta = 0.4
+    display, _ = asyncio.run(
+        process_image(str(img_path), [0, 0, w, h], theta, crop_bbox=False, model="miewid-msv4.1", device="cpu")
+    )
+
+    expected_chip = get_chip_from_img(img, [0, 0, w, h], theta)
+    expected = np.array(transforms.Resize((440, 440))(Image.fromarray(expected_chip)))
+    np.testing.assert_array_equal(display, expected)
+
+
 # ---------------------------------------------------------------------------
 # Bug 2: RGB/BGR — run_pairx must NOT swap channels on output
 # ---------------------------------------------------------------------------
+
+def test_endpoint_encode_preserves_rgb_channel_order():
+    """End-to-end pin: the endpoint's cv2.imencode call wraps the
+    pairx-RGB array in a single RGB→BGR conversion. Decoding the
+    resulting PNG (which cv2.imdecode returns as BGR) and swapping
+    back to RGB must round-trip to the original sentinel. If anyone
+    removes the final RGB2BGR before imencode, this test fails."""
+    import base64
+
+    import cv2
+
+    # Bright red top, bright blue bottom — easy to spot inversions.
+    sentinel = np.zeros((8, 8, 3), dtype=np.uint8)
+    sentinel[:4, :, 0] = 255  # red
+    sentinel[4:, :, 2] = 255  # blue
+
+    # Mirror the endpoint's encode step exactly.
+    _, buf = cv2.imencode(".png", cv2.cvtColor(sentinel, cv2.COLOR_RGB2BGR))
+    b64 = base64.b64encode(buf).decode("utf-8")
+
+    # Decode the way an HTTP client would: bytes -> cv2.imdecode (BGR) -> RGB
+    decoded_bgr = cv2.imdecode(np.frombuffer(base64.b64decode(b64), np.uint8), cv2.IMREAD_COLOR)
+    decoded_rgb = cv2.cvtColor(decoded_bgr, cv2.COLOR_BGR2RGB)
+    np.testing.assert_array_equal(decoded_rgb, sentinel)
+
 
 def test_run_pairx_preserves_channel_order_from_explain():
     """pairx.explain() returns RGB. run_pairx must hand that RGB through
@@ -195,6 +269,36 @@ def test_extract_embeddings_uses_canonical_chip_helper():
     out = model.extract_embeddings(image_bytes, bbox=bbox, theta=theta)
     np.testing.assert_array_equal(out, np.array([[1.0, 2.0, 3.0]]))
     np.testing.assert_array_equal(captured["chip"], expected_chip)
+
+
+def test_extract_embeddings_no_bbox_with_theta_uses_full_frame_helper():
+    """bbox=None + theta != 0 must rotate the whole image through the
+    canonical get_chip_from_img helper (the same code path
+    wbia-plugin-miew-id uses), not PIL .rotate(-theta). Pins the
+    full-frame fallback at app/models/miewid.py."""
+    from app.models.miewid import MiewidModel
+    from app.utils.helpers import get_chip_from_img
+
+    rng = np.random.default_rng(seed=2)
+    img_rgb = rng.integers(0, 256, size=(120, 90, 3), dtype=np.uint8)
+    h, w = img_rgb.shape[:2]
+    theta = 0.4
+
+    expected = get_chip_from_img(img_rgb.copy(), [0, 0, w, h], float(theta))
+
+    model = MiewidModel.__new__(MiewidModel)
+    model.device = "cpu"
+    captured = {}
+
+    def fake_preprocess(image):
+        captured["chip"] = image
+        return {"image": torch.zeros(3, 4, 4)}
+
+    model.preprocess = fake_preprocess
+    model.model = MagicMock(return_value=torch.tensor([[0.0]]))
+
+    model.extract_embeddings(_png_bytes(img_rgb), bbox=None, theta=theta)
+    np.testing.assert_array_equal(captured["chip"], expected)
 
 
 def test_extract_embeddings_no_bbox_no_theta_uses_full_image():

@@ -117,17 +117,28 @@ async def process_image(uri, bbox, theta, crop_bbox, model, device):
 
     validate_img_parameters(bbox, theta)
 
+    # extend_bb_list pads missing bboxes with [0, 0, 0, 0]. When the
+    # caller wants a rotation-only chip (no bbox, theta != 0), that
+    # sentinel combined with non-trivial theta makes crop_rect call
+    # cv2.getRectSubPix with size (0, 0), which returns None and crashes
+    # get_chip_from_img. Promote to a full-frame bbox so the canonical
+    # helper rotates the whole image safely.
+    has_bbox = len(bbox) == 4 and bbox[2] > 0 and bbox[3] > 0
+    if not has_bbox and abs(float(theta)) >= 0.1:
+        h, w = image.shape[:2]
+        bbox = [0, 0, w, h]
+
     chip = get_chip_from_img(image, bbox, theta)
     transformed_image = preprocess(chip, model)
     if len(transformed_image.shape) == 3:
             transformed_image = transformed_image.unsqueeze(0)
     # PairX overlays heatmaps/keypoints in tensor-coordinate space directly
     # onto the numpy display image, so the display must show the same content
-    # as the tensor — i.e., the cropped chip whenever a real bbox was given.
-    # Otherwise relevance pixels land at the right location within the chip
-    # but on top of the wrong (full-frame) display image.
-    has_bbox = len(bbox) == 4 and bbox[2] > 0 and bbox[3] > 0
-    if crop_bbox or has_bbox:
+    # as the tensor — i.e., the cropped chip whenever a real bbox was given
+    # or a meaningful rotation was applied. Otherwise relevance pixels land
+    # at the right location within the chip but on top of the wrong
+    # (full-frame, un-rotated) display image.
+    if crop_bbox or has_bbox or abs(float(theta)) >= 0.1:
         image = chip
     img_size = tuple(transformed_image.shape[-2:])
     image = np.array(transforms.Resize(img_size)(Image.fromarray(image)))
