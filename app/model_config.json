@@ -3,7 +3,7 @@
 	{
 		"model_id": "msv3",
 		"model_type": "yolo-ultralytics",
-		"model_path": "/datasets/detect.yolov11.msv3.pt",
+		"model_path": "${MODEL_BASE}/detect.yolov11.msv3.pt",
 		"imgsz": 640,
 		"conf": 0.5
 	},
@@ -18,19 +18,19 @@
 	    "model_id": "miewid-msv4.1",
 	    "model_type": "miewid",
 	    "imgsz": 440,
-	    "checkpoint_path": "/datasets/miew_id.msv4_1_main.bin",
+	    "checkpoint_path": "${MODEL_BASE}/miew_id.msv4_1_main.bin",
 	    "version": 4.1
 	},
 	{
 	    "model_id": "miewid-trout",
 	    "model_type": "miewid",
 	    "imgsz": 440,
-	    "checkpoint_path": "/datasets/miewid_trout.bin"
+	    "checkpoint_path": "${MODEL_BASE}/miewid_trout.bin"
 	},
 	{
 	    "model_id": "efficientnet-classifier",
 	    "model_type": "efficientnetv2",
-	    "checkpoint_path": "/datasets/vplabeler-msv3.pt",
+	    "checkpoint_path": "${MODEL_BASE}/vplabeler-msv3.pt",
 	    "img_size": 512,
 	    "threshold": 0.5
 	}

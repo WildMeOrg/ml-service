@@ -27,16 +27,19 @@ app = FastAPI()
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='FastAPI Model Serving Application')
-parser.add_argument('--device', type=str, default='cuda', 
+# Defaults read from the environment so the same image runs unmodified across
+# providers (Cloud Run injects PORT; RunPod/VM set DEVICE etc.). Explicit CLI
+# flags still override these defaults.
+parser.add_argument('--device', type=str, default=os.getenv('DEVICE', 'cuda'),
                    help='Device to run the models on (e.g., cpu, cuda, mps)')
-parser.add_argument('--host', type=str, default='0.0.0.0', 
+parser.add_argument('--host', type=str, default=os.getenv('HOST', '0.0.0.0'),
                    help='Host to run the server on')
-parser.add_argument('--port', type=int, default=8888, 
+parser.add_argument('--port', type=int, default=int(os.getenv('PORT', '6050')),
                    help='Port to run the server on')
-parser.add_argument('--reload', action='store_true', 
+parser.add_argument('--reload', action='store_true',
                    help='Enable auto-reload')
-parser.add_argument('--workers', type=int, default=1, 
-                   help='Number of worker processes')
+parser.add_argument('--workers', type=int, default=int(os.getenv('WORKERS', '1')),
+                   help='Number of worker processes (keep at 1 per GPU; scale via replicas)')
 args = parser.parse_args()
 
 if __name__ == "__main__":
@@ -60,10 +63,14 @@ async def startup_event():
     app.state.device = args.device
 
     try:
-        # Load model configuration
+        # Load model configuration. ${MODEL_BASE} in the config is expanded from
+        # the environment so the same config points at any model store —
+        # /datasets (VM mount), a provider volume, or an https:// object-store
+        # URL (URLs are fetched + cached by checkpoint_utils at load time).
+        os.environ.setdefault('MODEL_BASE', '/datasets')
         config_path = os.path.join(os.path.dirname(__file__), 'model_config.json')
         with open(config_path, 'r') as f:
-            config = json.load(f)
+            config = json.loads(os.path.expandvars(f.read()))
 
         logger.info(f"Loading models on device: {args.device}")
 

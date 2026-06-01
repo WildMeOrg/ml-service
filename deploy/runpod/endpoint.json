@@ -1,0 +1,42 @@
+{
+  "_comment": "RunPod Serverless endpoint config for the ML detector service. Use an HTTP 'Load Balancing' serverless endpoint so RunPod routes plain HTTP straight to the container on $PORT — the SAME image and HTTP interface as Cloud Run and the VM (no RunPod-specific handler code, which keeps you provider-independent). The classic queue-based serverless model would require a runpod.serverless handler wrapper and is intentionally avoided here.",
+
+  "name": "ml-detector",
+  "endpointType": "load_balancer",
+
+  "image": "YOUR_REGISTRY/ml-detector:latest",
+  "containerPort": 6050,
+
+  "env": {
+    "PORT": "6050",
+    "DEVICE": "cuda",
+    "WORKERS": "1",
+    "_MODEL_BASE_comment": "Point at a network volume mount (e.g. /runpod-volume/models) OR an https:// object-store prefix. URLs are fetched + cached at startup by checkpoint_utils.",
+    "MODEL_BASE": "/runpod-volume/models"
+  },
+
+  "networkVolume": {
+    "_comment": "Attach a Network Volume holding the model weights; it mounts at /runpod-volume. Omit if MODEL_BASE is an https:// URL instead.",
+    "mountPath": "/runpod-volume"
+  },
+
+  "scaling": {
+    "_comment": "activeWorkers >= 1 keeps a GPU warm (your 'always fast' mode); FlashBoot keeps recently-idle workers hot. Set activeWorkers 0 for true scale-to-zero (cheapest, cold-start on first hit).",
+    "activeWorkers": 1,
+    "maxWorkers": 10,
+    "_concurrency_comment": "Concurrency per worker should match MAX_CONCURRENT_PREDICTIONS (2) in predict_router.py / pipeline_router.py.",
+    "concurrencyPerWorker": 2,
+    "idleTimeoutSeconds": 30
+  },
+
+  "gpu": {
+    "_comment": "Pick by VRAM needed for 5 resident models; L4 / A5000 / A40 are cost-effective. Detection+ID does not need an H100.",
+    "types": ["NVIDIA L4", "NVIDIA RTX A5000", "NVIDIA A40"]
+  },
+
+  "healthcheck": {
+    "_comment": "Reuse the container's existing /health endpoint (GPU + torch + models-loaded checks).",
+    "path": "/health",
+    "port": 6050
+  }
+}

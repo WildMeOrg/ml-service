@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from PIL import Image
 from ultralytics import YOLO
 from .base_model import BaseModel
+from ..utils.checkpoint_utils import get_checkpoint_path
 import logging
 
 logger = logging.getLogger(__name__)
@@ -24,8 +25,11 @@ class YOLOUltralyticsModel(BaseModel):
                 - imgsz: Default image size for inference
                 - conf: Default confidence threshold
         """
-        logger.info(f"Loading YOLO model from {model_path} on device {device}")
-        self.model = YOLO(model_path)
+        # Resolve URLs (and validate local paths) the same way the other model
+        # types do, so the detector weight can live in any object store.
+        local_model_path = get_checkpoint_path(model_path)
+        logger.info(f"Loading YOLO model from {local_model_path} on device {device}")
+        self.model = YOLO(local_model_path)
         self.model.to(device)
         
         # Store model info

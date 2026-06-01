@@ -1,0 +1,50 @@
+# Cloud Run service for the ML detector service (NVIDIA L4, scale-to-zero capable).
+#
+# Deploy:   gcloud run services replace deploy/cloudrun/service.yaml --region=us-central1
+# Or use:   deploy/cloudrun/deploy.sh  (imperative equivalent)
+#
+# Portability note: this runs the SAME image as RunPod / the VM. The only
+# Cloud-Run-specific surface is this file. The container reads PORT from the
+# environment (Cloud Run injects it) and pulls models from ${MODEL_BASE}.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: ml-detector
+  labels:
+    cloud.googleapis.com/location: us-central1
+spec:
+  template:
+    metadata:
+      annotations:
+        # --- Warm baseline + autoscale (your chosen "always fast" mode) ---
+        autoscaling.knative.dev/minScale: "1"     # keep 1 GPU warm; set "0" for true scale-to-zero
+        autoscaling.knative.dev/maxScale: "10"     # burst ceiling across GPUs
+        run.googleapis.com/cpu-throttling: "false" # don't throttle between requests (model stays resident)
+        run.googleapis.com/startup-cpu-boost: "true"
+    spec:
+      # Match the in-process semaphore (MAX_CONCURRENT_PREDICTIONS = 2).
+      # Cloud Run routes the 3rd concurrent request to another instance.
+      containerConcurrency: 2
+      timeoutSeconds: 300          # /pipeline runs long (detect -> classify -> extract -> orient)
+      containers:
+        - image: REGION-docker.pkg.dev/PROJECT_ID/ml-service/ml-detector:latest
+          ports:
+            - containerPort: 6050  # must equal the PORT env below
+          env:
+            - name: PORT
+              value: "6050"
+            - name: DEVICE
+              value: "cuda"
+            - name: WORKERS
+              value: "1"           # one worker per GPU; scale via instances, not workers
+            - name: MODEL_BASE
+              # Object-store prefix; weights are fetched + cached at startup.
+              # Use a GCS bucket fronted by https, or mount a GCS volume (below).
+              value: "https://storage.googleapis.com/YOUR_BUCKET/models"
+          resources:
+            limits:
+              cpu: "8"             # L4 requires >=4 CPU; 8 recommended
+              memory: 32Gi         # >=16Gi required; 32Gi recommended for 5 resident models
+              nvidia.com/gpu: "1"
+      nodeSelector:
+        run.googleapis.com/accelerator: nvidia-l4
