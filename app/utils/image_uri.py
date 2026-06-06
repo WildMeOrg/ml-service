@@ -1,10 +1,24 @@
 """Utilities for resolving image URIs to bytes."""
 
 import base64
+from io import BytesIO
 from pathlib import Path
 from typing import Tuple
 
 import httpx
+from PIL import Image, UnidentifiedImageError
+
+
+class ImageDecodeError(ValueError):
+    """Raised when image bytes cannot be decoded into a usable image.
+
+    Subclasses ValueError so callers that already map ValueError from image
+    resolution to an HTTP 400 treat an undecodable image the same way — a
+    client/input error, not a server (5xx) error. This matters because
+    consumers (e.g. Wildbook) retry 5xx responses as transient, but a corrupt
+    image is a permanent failure: it must be reported as a 4xx so it is marked
+    terminal rather than retried indefinitely.
+    """
 
 
 def is_data_uri(uri: str) -> bool:
@@ -59,3 +73,29 @@ async def resolve_image_uri(uri: str) -> bytes:
             raise ValueError(f"File not found: {uri}")
         with open(file_path, "rb") as f:
             return f.read()
+
+
+def validate_decodable(image_bytes: bytes) -> None:
+    """Confirm image_bytes decode into a usable image, else raise ImageDecodeError.
+
+    A header-only check (Image.verify) is insufficient: corrupt JPEGs often have
+    a valid header but a broken entropy-coded scan stream that only fails during
+    a full pixel load (e.g. "broken data stream when reading image file" /
+    "Unsupported marker type 0xNN"). We therefore fully load() the image.
+
+    Catches:
+        - UnidentifiedImageError: not a recognizable image at all.
+        - OSError: broken/truncated scan stream surfaced during load().
+        - Image.DecompressionBombError: pathologically large image rejected by
+          Pillow's bomb guard. It is not an OSError, so it must be listed
+          explicitly or it would escape to the routers' generic 500 handler.
+          Like the others it is a permanent, non-retryable bad input.
+
+    Raises:
+        ImageDecodeError (a ValueError): if the bytes cannot be decoded.
+    """
+    try:
+        img = Image.open(BytesIO(image_bytes))
+        img.load()
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as e:
+        raise ImageDecodeError(f"unprocessable image: cannot decode ({e})")

@@ -9,7 +9,7 @@ from app.models.efficientnet import EfficientNetModel
 from app.models.densenet_classifier import DenseNetClassifierModel
 from app.models.miewid import MiewidModel
 from app.models.densenet_orientation import DenseNetOrientationModel
-from app.utils.image_uri import resolve_image_uri, sanitize_uri_for_response, sanitize_uri_for_logging
+from app.utils.image_uri import resolve_image_uri, sanitize_uri_for_response, sanitize_uri_for_logging, validate_decodable
 from fastapi.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
@@ -125,6 +125,9 @@ async def run_pipeline(
             # Resolve image bytes from URI (URL, data URI, or local path)
             try:
                 image_bytes = await resolve_image_uri(pipeline_request.image_uri)
+                # Reject undecodable/corrupt images as a 4xx (client error) so
+                # callers treat them as a permanent failure, not a retryable 5xx.
+                validate_decodable(image_bytes)
             except ValueError as e:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
