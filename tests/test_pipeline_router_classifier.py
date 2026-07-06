@@ -1,9 +1,20 @@
 """Layer-3 integration tests for the new classify-slot model type."""
+import base64
+import io
 from unittest.mock import MagicMock
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from PIL import Image
 from app.routers import pipeline_router
+
+
+def _png_data_uri() -> str:
+    """A real, fully decodable PNG — validate_decodable() now runs a full
+    load() on every request, so header-only magic bytes get rejected with 400."""
+    buf = io.BytesIO()
+    Image.new("RGB", (16, 16), (100, 100, 100)).save(buf, "png")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
 def _make_app_with_models(predict_model, classify_model, extract_model):
@@ -63,7 +74,7 @@ def test_pipeline_classify_densenet_classifier_emits_top_level_iaclass_and_viewp
         "predict_model_id": "p",
         "classify_model_id": "c",
         "extract_model_id": "e",
-        "image_uri": "data:image/png;base64,iVBORw0KGgo=",
+        "image_uri": _png_data_uri(),
     })
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -102,7 +113,7 @@ def test_pipeline_classify_densenet_classifier_pure_viewpoint_omits_iaclass():
     resp = client.post("/pipeline/", json={
         "predict_model_id": "p", "classify_model_id": "c",
         "extract_model_id": "e",
-        "image_uri": "data:image/png;base64,iVBORw0KGgo=",
+        "image_uri": _png_data_uri(),
     })
     body = resp.json()
     r = body["results"][0]
@@ -151,7 +162,7 @@ def test_pipeline_classify_efficientnet_compound_labels_emits_top_level_iaclass_
     resp = client.post("/pipeline/", json={
         "predict_model_id": "p", "classify_model_id": "c",
         "extract_model_id": "e",
-        "image_uri": "data:image/png;base64,iVBORw0KGgo=",
+        "image_uri": _png_data_uri(),
     })
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -159,6 +170,42 @@ def test_pipeline_classify_efficientnet_compound_labels_emits_top_level_iaclass_
     assert r["iaClass"] == "whale_shark"
     assert r["viewpoint"] == "left"
     assert r["classification"]["class"] == "whale_shark:left"
+
+
+def _make_pipeline_models():
+    from app.models.densenet_classifier import DenseNetClassifierModel
+    from app.models.miewid import MiewidModel
+    from app.models.yolo_ultralytics import YOLOUltralyticsModel
+
+    pm = MagicMock(spec=YOLOUltralyticsModel)
+    cm = MagicMock(spec=DenseNetClassifierModel)
+    em = MagicMock(spec=MiewidModel)
+    return pm, cm, em
+
+
+@pytest.mark.parametrize("payload,label", [
+    # mp4 (ISO BMFF ftyp) — the production sharkbook failure
+    (bytes.fromhex("00000018667479706d70343200000000") + b"\x00" * 64, "video"),
+    # GIF — PIL-loadable but cv2.imdecode returns None in every cv2 model
+    (None, "gif"),
+])
+def test_pipeline_rejects_undecodable_media_with_400_before_predict(payload, label):
+    if payload is None:
+        buf = io.BytesIO()
+        Image.new("P", (32, 32)).save(buf, "gif")
+        payload = buf.getvalue()
+    pm, cm, em = _make_pipeline_models()
+    client = _make_app_with_models(pm, cm, em)
+    uri = "data:application/octet-stream;base64," + base64.b64encode(payload).decode()
+    resp = client.post("/pipeline/", json={
+        "predict_model_id": "p", "classify_model_id": "c",
+        "extract_model_id": "e", "image_uri": uri,
+    })
+    assert resp.status_code == 400, resp.text
+    # Rejection must happen at validation — no model may ever see the bytes.
+    pm.predict.assert_not_called()
+    cm.predict.assert_not_called()
+    em.extract_embeddings.assert_not_called()
 
 
 def test_pipeline_classify_densenet_orientation_rejected_with_400():
@@ -173,6 +220,6 @@ def test_pipeline_classify_densenet_orientation_rejected_with_400():
     client = _make_app_with_models(pm, cm, em)
     resp = client.post("/pipeline/", json={
         "predict_model_id": "p", "classify_model_id": "c",
-        "extract_model_id": "e", "image_uri": "data:image/png;base64,iVBORw0KGgo=",
+        "extract_model_id": "e", "image_uri": _png_data_uri(),
     })
     assert resp.status_code == 400
