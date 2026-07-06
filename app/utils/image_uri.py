@@ -5,7 +5,9 @@ from io import BytesIO
 from pathlib import Path
 from typing import Tuple
 
+import cv2
 import httpx
+import numpy as np
 from PIL import Image, UnidentifiedImageError
 
 
@@ -84,7 +86,12 @@ def _looks_like_video(data: bytes) -> bool:
     caller an actionable 400 detail instead.
     """
     if len(data) >= 12 and data[4:8] == b'ftyp':
-        return True  # ISO BMFF: mp4, mov, 3gp, m4v
+        # ISO BMFF covers video (mp4, mov, 3gp, m4v) but also still-image
+        # brands (AVIF, HEIC, CR3). Only claim "video" when the major brand
+        # is not a known still-image one, so an undecodable AVIF/HEIC gets
+        # the generic cannot-decode message instead of a misleading one.
+        still_image_brands = {b'avif', b'avis', b'heic', b'heix', b'mif1', b'msf1', b'crx '}
+        return data[8:12] not in still_image_brands
     if data.startswith(b'\x1a\x45\xdf\xa3'):
         return True  # Matroska / WebM (EBML)
     if data.startswith(b'RIFF') and data[8:12] == b'AVI ':
@@ -94,6 +101,10 @@ def _looks_like_video(data: bytes) -> bool:
 
 def validate_decodable(image_bytes: bytes) -> None:
     """Confirm image_bytes decode into a usable image, else raise ImageDecodeError.
+
+    "Usable" means decodable by BOTH Pillow and cv2.imdecode — the inference
+    models are split across the two stacks, and each stack accepts formats the
+    other rejects.
 
     A header-only check (Image.verify) is insufficient: corrupt JPEGs often have
     a valid header but a broken entropy-coded scan stream that only fails during
@@ -121,3 +132,14 @@ def validate_decodable(image_bytes: bytes) -> None:
                 "only still images are supported"
             )
         raise ImageDecodeError(f"unprocessable image: cannot decode ({e})")
+
+    # Pillow decoding alone is not enough: several models (EfficientNet,
+    # DenseNet, LightNet) decode with cv2.imdecode, which returns None for
+    # formats Pillow accepts (GIF, ICO, ...) and would then crash in
+    # cv2.cvtColor with the same !_src.empty() 500 this validation exists to
+    # prevent. Require the bytes to be decodable by both stacks.
+    if cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR) is None:
+        raise ImageDecodeError(
+            f"unprocessable image: format {img.format or 'unknown'} is not "
+            "supported by the inference decoder; use JPEG, PNG, or WebP"
+        )

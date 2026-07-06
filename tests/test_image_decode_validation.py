@@ -96,6 +96,36 @@ def test_avi_bytes_raise_image_decode_error_with_video_hint():
         validate_decodable(avi)
 
 
+def _gif_bytes() -> bytes:
+    """A valid GIF: PIL loads it fine, but cv2.imdecode returns None, which
+    crashes every cv2-backed model (EfficientNet/DenseNet/LightNet) with the
+    same cvtColor !_src.empty() 500 the video fix targets."""
+    buf = io.BytesIO()
+    Image.new("P", (32, 32)).save(buf, "gif")
+    return buf.getvalue()
+
+
+def test_gif_pil_loadable_but_cv2_undecodable_raises_image_decode_error():
+    with pytest.raises(ImageDecodeError):
+        validate_decodable(_gif_bytes())
+
+
+def test_ico_pil_loadable_but_cv2_undecodable_raises_image_decode_error():
+    buf = io.BytesIO()
+    Image.new("RGB", (32, 32)).save(buf, "ico")
+    with pytest.raises(ImageDecodeError):
+        validate_decodable(buf.getvalue())
+
+
+def test_avif_brand_is_not_reported_as_video():
+    # AVIF is ISO-BMFF (has an ftyp box) but is a still image; if Pillow can't
+    # decode it the 400 must not mislabel it a video.
+    avif = bytes.fromhex("0000001c667479706176696600000000") + b"\x00" * 64
+    with pytest.raises(ImageDecodeError) as exc_info:
+        validate_decodable(avif)
+    assert "video" not in str(exc_info.value)
+
+
 def test_decompression_bomb_raises_image_decode_error():
     # A decompression bomb raises PIL's DecompressionBombError, which is NOT an
     # OSError; verify it is still mapped to ImageDecodeError. Force the guard by
