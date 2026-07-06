@@ -75,6 +75,23 @@ async def resolve_image_uri(uri: str) -> bytes:
             return f.read()
 
 
+def _looks_like_video(data: bytes) -> bool:
+    """Heuristically detect common video container signatures.
+
+    Wildbook sometimes dispatches video MediaAssets (mp4/mov from sharkbook
+    etc.) to the image-only endpoints. PIL rejects them with a generic
+    "cannot identify image file", so we sniff the container magic to give the
+    caller an actionable 400 detail instead.
+    """
+    if len(data) >= 12 and data[4:8] == b'ftyp':
+        return True  # ISO BMFF: mp4, mov, 3gp, m4v
+    if data.startswith(b'\x1a\x45\xdf\xa3'):
+        return True  # Matroska / WebM (EBML)
+    if data.startswith(b'RIFF') and data[8:12] == b'AVI ':
+        return True  # AVI
+    return False
+
+
 def validate_decodable(image_bytes: bytes) -> None:
     """Confirm image_bytes decode into a usable image, else raise ImageDecodeError.
 
@@ -98,4 +115,9 @@ def validate_decodable(image_bytes: bytes) -> None:
         img = Image.open(BytesIO(image_bytes))
         img.load()
     except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as e:
+        if _looks_like_video(image_bytes):
+            raise ImageDecodeError(
+                "unprocessable media: file is a video (mp4/mov/webm/avi); "
+                "only still images are supported"
+            )
         raise ImageDecodeError(f"unprocessable image: cannot decode ({e})")

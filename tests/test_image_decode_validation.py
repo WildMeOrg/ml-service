@@ -70,6 +70,32 @@ def test_truncated_jpeg_raises_image_decode_error():
         validate_decodable(truncated)
 
 
+def _mp4_bytes() -> bytes:
+    """Minimal ISO BMFF (mp4/mov) prefix: size + 'ftyp' box at offset 4.
+
+    Reproduces the production failure class where Wildbook dispatches a video
+    MediaAsset (e.g. sharkbook .mp4) to the image-only pipeline.
+    """
+    return bytes.fromhex("00000018667479706d70343200000000") + b"\x00" * 64
+
+
+def test_video_bytes_raise_image_decode_error_with_video_hint():
+    with pytest.raises(ImageDecodeError, match="video"):
+        validate_decodable(_mp4_bytes())
+
+
+def test_webm_bytes_raise_image_decode_error_with_video_hint():
+    ebml = b"\x1a\x45\xdf\xa3" + b"\x00" * 64  # Matroska/WebM EBML magic
+    with pytest.raises(ImageDecodeError, match="video"):
+        validate_decodable(ebml)
+
+
+def test_avi_bytes_raise_image_decode_error_with_video_hint():
+    avi = b"RIFF" + b"\x24\x00\x00\x00" + b"AVI " + b"\x00" * 64
+    with pytest.raises(ImageDecodeError, match="video"):
+        validate_decodable(avi)
+
+
 def test_decompression_bomb_raises_image_decode_error():
     # A decompression bomb raises PIL's DecompressionBombError, which is NOT an
     # OSError; verify it is still mapped to ImageDecodeError. Force the guard by
