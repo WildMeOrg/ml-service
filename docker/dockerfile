@@ -37,9 +37,20 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 COPY app/ app/
 COPY vendor/ vendor/
 
+# The app reads these as argparse defaults (app/main.py). Providers that
+# inject their own PORT (e.g. Cloud Run) override the image default, and the
+# server follows — no hardcoded CMD flags to fight.
+ENV PORT=6050
+ENV HOST=0.0.0.0
+
 EXPOSE 6050
 
+# Mirror app/main.py's _int_env: a non-numeric or out-of-range PORT makes
+# the server fall back to 8888, so the probe must follow it or a healthy
+# server gets killed.
 HEALTHCHECK --interval=30s --timeout=15s --start-period=90s --retries=3 \
-    CMD curl -f http://localhost:6050/health || exit 1
+    CMD case "${PORT}" in ''|*[!0-9]*) p=8888;; *) p="${PORT}";; esac; \
+        { [ "${p}" -ge 1 ] && [ "${p}" -le 65535 ]; } || p=8888; \
+        curl -f "http://localhost:${p}/health" || exit 1
 
-CMD ["python3", "-m", "app.main", "--host", "0.0.0.0", "--port", "6050"]
+CMD ["python3", "-m", "app.main"]
