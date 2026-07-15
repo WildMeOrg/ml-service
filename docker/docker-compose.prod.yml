@@ -17,7 +17,11 @@ services:
       - ultralytics_config:/root/.config/Ultralytics
     environment:
       - PYTHONPATH=/app
-    command: python3 -m app.main --host 0.0.0.0 --port 6050 --device ${DEVICE:-cuda} --workers ${WORKERS:-4}
+    # One worker per GPU: extra workers each load a full copy of all models
+    # into the same GPU's VRAM (OOM risk). For more throughput, add a separately
+    # named service with distinct GPU_ID, container name, and host port rather
+    # than raising WORKERS.
+    command: python3 -m app.main --host 0.0.0.0 --port 6050 --device ${DEVICE:-cuda} --workers ${WORKERS:-1}
     deploy:
       resources:
         reservations:
