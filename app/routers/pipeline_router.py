@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from app.models.model_handler import ModelHandler
 from app.models.efficientnet import EfficientNetModel
 from app.models.densenet_classifier import DenseNetClassifierModel
+from app.models.densenet_wilddog_cascade import DenseNetWildDogCascadeModel
 from app.models.miewid import MiewidModel
 from app.models.densenet_orientation import DenseNetOrientationModel
 from app.utils.image_uri import resolve_image_uri, sanitize_uri_for_response, sanitize_uri_for_logging
@@ -91,11 +92,13 @@ async def run_pipeline(
                 )
             
             # Validate model types
-            if not isinstance(classify_model, (EfficientNetModel, DenseNetClassifierModel)):
+            if not isinstance(classify_model, (EfficientNetModel, DenseNetClassifierModel,
+                                              DenseNetWildDogCascadeModel)):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Model '{pipeline_request.classify_model_id}' must be "
-                           f"EfficientNet or DenseNet-classifier for the classify slot."
+                           f"EfficientNet, DenseNet-classifier or DenseNet-wilddog-cascade "
+                           f"for the classify slot."
                 )
             
             if not isinstance(extract_model, MiewidModel):
