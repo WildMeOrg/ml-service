@@ -31,6 +31,10 @@ MODEL_REGISTRY = {
         'module': 'app.models.densenet_classifier',
         'class': 'DenseNetClassifierModel'
     },
+    'densenet-wilddog-cascade': {
+        'module': 'app.models.densenet_wilddog_cascade',
+        'class': 'DenseNetWildDogCascadeModel'
+    },
     'lightnet': {
         'module': 'app.models.lightnet_model',
         'class': 'LightNetModel'
