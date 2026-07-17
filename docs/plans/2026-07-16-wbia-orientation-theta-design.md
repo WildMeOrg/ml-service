@@ -363,18 +363,43 @@ put — bumping it on a service shared by five installs is out of scope here —
 it is part of this contract, because imageio's decoding is not reproducible from
 the imageio pin alone.
 
+▲▲▲▲▲▲▲ **Corrected AGAIN — the deployment stack is not `requirements.txt` alone.**
+Revision 6 pinned `scikit-image==0.26.0` (from a dev machine's Python 3.12) and
+recorded `torch==2.10.0+cu128`. Both are wrong for the container, and the image
+build proved it:
+
+    ERROR: Ignored the following versions that require a different python version:
+           ... 0.26.0 Requires-Python >=3.11
+    ERROR: No matching distribution found for scikit-image==0.26.0
+
+`docker/dockerfile` is `FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04` → **Python
+3.10**, and it pins **`torch==2.1.2` / `torchvision==0.16.2`** itself — torch is
+absent from `requirements.txt` entirely. The real contract is
+**requirements.txt + dockerfile + the base image's Python**.
+
 ```
-scikit-image==0.26.0      # NEW: resize(order=3, anti_aliasing=True)
-imageio==2.37.3           # NEW: decode
+scikit-image==0.25.2      # NEW. 0.26+ requires Python >=3.11; the image is 3.10
+imageio==2.37.3           # NEW (py3.10-compatible)
 Pillow==10.1.0            # pre-existing; imageio's JPEG/PNG backend
 numpy==1.26.3             # pre-existing
-timm==1.0.19              # pre-existing; equivalence re-verified on THIS version
-torch==2.10.0+cu128
+timm==1.0.19              # pre-existing
+torch==2.1.2              # from docker/dockerfile, NOT requirements.txt
+torchvision==0.16.2       # from docker/dockerfile
+python 3.10               # from the base image
 ```
 
+▲▲▲▲▲▲▲ **The gate must run INSIDE THE BUILT IMAGE, not on the host's Python.**
+Every version of this design so far claimed the preflight validates the deployment
+stack while it was actually executed in a Python 3.12 venv with torch 2.10 — so it
+has never once run on the stack that ships. That is the same "measured the
+convenient artifact" error the rest of this document exists to correct, and no
+amount of review catches it: eight review rounds did not, and a seven-second
+`docker compose build` did. `scripts/preflight/README.md` specifies the container
+invocation.
+
 The gate, its input manifest, and the reference runner live in
-`scripts/preflight/` and are release-blocking on the host. Re-run on ANY bump to
-these lines.
+`scripts/preflight/` and are release-blocking. Re-run on ANY bump to the lines
+above — including the dockerfile's torch and the base image's Python.
 
 Both scikit-image and imageio are **new dependencies on a service shared by 5
 installs** — which is itself why the host preflight above is mandatory. Re-run the
@@ -455,6 +480,38 @@ h and `1,3` for v); 3-way mean; `+90°`; float32 cast; degenerate-crop fallback;
 hand-computed theta (`[0.5,0.5,1.0,0.5,0.1]` → `arctan2(0,0.5)+90° = 90°`); no
 `label`/`probability` key ever emitted; rejected from the classify slot; NaN theta
 → fail-closed, not 0.0.
+
+## Precondition for any FUTURE amphibian-reptile migration
+
+`orientation-fire-salamander` was removed from the registry rather than ported,
+because **no install references it**: amphibian-reptile has no `_mlservice_conf`
+at all — it is still entirely on legacy WBIA, where its `_detect_conf` says
+
+```json
+"orienter_algo": "plugin:orientation",
+"orienter_model_tag": "salamander_fire_v2"
+```
+
+i.e. it uses WBIA's own orientation plugin, which reads those 5 outputs as
+coordinates and derives theta **correctly**. The ml-service entry had been
+eager-loaded on every startup since it was added, referenced by nobody, and would
+have emitted garbage viewpoints (#33) if anything had pointed at it.
+
+The irony is instructive: **the salamander install still has correct theta
+precisely because it never migrated.** Sharkbook migrated and lost it.
+
+**So when amphibian-reptile is upgraded to the v2 ml-service, it MUST get a
+`salamander_fire_v2-theta` entry (`wbia-orientation`,
+`/datasets/orientation.salamander_fire_adult.v2.pth`) and an
+`orientation_model_id` on `Salamandra.salamandra` / `Salamandra.infraimmaculata`.**
+Without it that install walks into exactly Sharkbook's regression: its detector
+(`salamander_fire_v2`) is **lightnet**, which never emits thetas, so theta would
+silently drop to 0 and MiewID would start embedding tilted salamanders.
+
+`Bombina.variegata` (yellow-bellied toad) has the same shape —
+`orienter_algo: plugin:orientation`, `orienter_model_tag: yellow_bellied_toad_v0`
+— and would need the same treatment, but that checkpoint is not in the registry at
+all today.
 
 ## Backfill pathway (separate PR)
 
