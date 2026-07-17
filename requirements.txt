@@ -15,7 +15,11 @@ opencv-python==4.8.1.78
 # is already pinned above (Pillow==10.1.0) -- that pin is part of this contract.
 # Re-run the host preflight fidelity gate on ANY bump to scikit-image, imageio,
 # Pillow, or timm.
-scikit-image==0.26.0
+# NB pinned for the CONTAINER's Python 3.10 (nvidia/cuda:12.1.1-runtime-ubuntu22.04),
+# not a dev machine's newer Python: scikit-image 0.26+ requires >=3.11 and will not
+# resolve in the image. torch/torchvision are pinned in docker/dockerfile (2.1.2 /
+# 0.16.2) and are part of this fidelity contract too.
+scikit-image==0.25.2
 imageio==2.37.3
 aiofiles==23.2.1
 python-jose==3.3.0
