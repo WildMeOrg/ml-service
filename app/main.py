@@ -25,18 +25,39 @@ logger = logging.getLogger(__name__)
 # Create FastAPI app
 app = FastAPI()
 
-# Parse command line arguments
+def _int_env(name: str, fallback: int, minimum: int = 1, maximum: int = None) -> int:
+    """Integer from the environment, tolerating provider-injected junk.
+
+    Some platforms set unusable values (e.g. Kubernetes service-link vars
+    like PORT=tcp://10.0.0.1:80); a config oddity must not crash startup.
+    Bare ASCII digits within [minimum, maximum] only — exactly what the
+    image healthcheck's shell validation accepts, so server and probe never
+    disagree about the port.
+    """
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return fallback
+    if (not (value.isascii() and value.isdecimal())
+            or int(value) < minimum
+            or (maximum is not None and int(value) > maximum)):
+        logger.warning(f"Ignoring invalid {name}={value!r}; using {fallback}")
+        return fallback
+    return int(value)
+
+# Parse command line arguments. Defaults come from the environment so the
+# same image runs unmodified across providers (Cloud Run injects PORT;
+# RunPod/VMs set DEVICE etc.). Explicit CLI flags still override.
 parser = argparse.ArgumentParser(description='FastAPI Model Serving Application')
-parser.add_argument('--device', type=str, default='cuda', 
+parser.add_argument('--device', type=str, default=os.getenv('DEVICE', 'cuda'),
                    help='Device to run the models on (e.g., cpu, cuda, mps)')
-parser.add_argument('--host', type=str, default='0.0.0.0', 
+parser.add_argument('--host', type=str, default=os.getenv('HOST', '0.0.0.0'),
                    help='Host to run the server on')
-parser.add_argument('--port', type=int, default=8888, 
+parser.add_argument('--port', type=int, default=_int_env('PORT', 8888, maximum=65535),
                    help='Port to run the server on')
-parser.add_argument('--reload', action='store_true', 
+parser.add_argument('--reload', action='store_true',
                    help='Enable auto-reload')
-parser.add_argument('--workers', type=int, default=1, 
-                   help='Number of worker processes')
+parser.add_argument('--workers', type=int, default=_int_env('WORKERS', 1),
+                   help='Number of worker processes (keep at 1 per GPU)')
 args = parser.parse_args()
 
 if __name__ == "__main__":

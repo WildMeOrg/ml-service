@@ -685,10 +685,21 @@ uvicorn app.main:app --host 0.0.0.0 --port 6050
 
 ### Command Line Options
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--device` | `cuda` | PyTorch device: `cuda`, `cpu`, or `mps` |
-| `--host` | `0.0.0.0` | Bind address |
-| `--port` | `8888` | Listen port |
-| `--workers` | `1` | Uvicorn worker count (use 1 for GPU to avoid VRAM contention) |
-| `--reload` | off | Auto-reload on code changes (development only) |
+Each flag's default comes from an environment variable when set, so the same
+container image runs unmodified across providers (Cloud Run injects `PORT`,
+RunPod/VMs set `DEVICE`, etc.). An explicit CLI flag always beats the
+environment. The Docker image sets `PORT=6050` and `HOST=0.0.0.0`, so
+container behavior is unchanged unless the platform injects its own values.
+
+| Flag | Env var | Default | Description |
+|------|---------|---------|-------------|
+| `--device` | `DEVICE` | `cuda` | PyTorch device: `cuda`, `cpu`, or `mps` |
+| `--host` | `HOST` | `0.0.0.0` | Bind address |
+| `--port` | `PORT` | `8888` (bare) / `6050` (image) | Listen port |
+| `--workers` | `WORKERS` | `1` | Uvicorn worker count (use 1 for GPU to avoid VRAM contention) |
+| `--reload` | — | off | Auto-reload on code changes (development only) |
+
+Malformed integer values (e.g. a Kubernetes service-link `PORT=tcp://...`)
+are ignored with a warning rather than crashing startup; the image health
+check applies the same fallback so it always probes the port the server
+actually bound.
