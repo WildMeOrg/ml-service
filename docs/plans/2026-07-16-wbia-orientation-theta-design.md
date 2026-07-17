@@ -349,15 +349,32 @@ against**, record them here, and re-run the gate on any bump:
 
 ▲▲▲ Resolved and recorded (placeholders were not pins):
 
+▲▲▲▲▲▲ **Corrected to the ACTUAL production stack.** Revision 5 recorded the
+versions from a convenience venv (`--system-site-packages`, so it inherited
+pillow 12.1.1 / numpy 1.26.4 / timm 1.0.25) — which are NOT what `requirements.txt`
+pins. The gate had therefore proven fidelity for a stack production does not
+install: the same "measured the convenient artifact" error this whole change
+exists to correct. Both gates were **re-run against the real pins** and produce
+identical numbers (timm 1.0.19 equivalence 5.960e-08; fidelity theta 7.726e-07,
+coords 1.192e-07).
+
+Only `scikit-image` and `imageio` are NEW. `Pillow` was already pinned and stays
+put — bumping it on a service shared by five installs is out of scope here — but
+it is part of this contract, because imageio's decoding is not reproducible from
+the imageio pin alone.
+
 ```
-scikit-image==0.26.0      # resize(order=3, anti_aliasing=True)
-imageio==2.37.3           # decode; backend below is part of the contract
-pillow==12.1.1            # imageio's JPEG/PNG backend -- decoding is NOT
-                          # reproducible from the imageio pin alone
-numpy==1.26.4
-torch==2.10.0+cu128       # the tested stack; equivalence + gate are
-timm==1.0.25              # only valid against these
+scikit-image==0.26.0      # NEW: resize(order=3, anti_aliasing=True)
+imageio==2.37.3           # NEW: decode
+Pillow==10.1.0            # pre-existing; imageio's JPEG/PNG backend
+numpy==1.26.3             # pre-existing
+timm==1.0.19              # pre-existing; equivalence re-verified on THIS version
+torch==2.10.0+cu128
 ```
+
+The gate, its input manifest, and the reference runner live in
+`scripts/preflight/` and are release-blocking on the host. Re-run on ANY bump to
+these lines.
 
 Both scikit-image and imageio are **new dependencies on a service shared by 5
 installs** — which is itself why the host preflight above is mandatory. Re-run the

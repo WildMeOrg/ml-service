@@ -233,3 +233,72 @@ def test_unknown_orientation_model_type_is_rejected():
     om = MagicMock(spec=MiewidModel)              # not an orientation model at all
     r = _client(pm, cm, em, om).post("/pipeline/", json=_payload(orientation_model_id="o"))
     assert r.status_code == 400
+
+
+# --------------------------------- request-level validation (review round 2)
+
+def test_malformed_second_result_stops_consumers_for_the_first_bbox_too():
+    """Checking only the COUNT and dereferencing rows lazily inside the loop would
+    let bbox 0 run classify/extract before bbox 1's bad row failed the request.
+    Request-level fail-closed must mean NO consumer runs."""
+    pm, cm, em = _models(n_bboxes=2)
+    om = _orientation([0.1, 0.2])
+    om.predict_batch.return_value = [
+        {"model_id": "o", "theta": 0.1, "coords_normalized": [0.5] * 5,
+         "effective_bbox": [10, 10, 50, 50]},
+        {"model_id": "o", "theta": float("nan"), "coords_normalized": [0.5] * 5,
+         "effective_bbox": [20, 20, 50, 50]},        # malformed row 2
+    ]
+    r = _client(pm, cm, em, om).post("/pipeline/", json=_payload(orientation_model_id="o"))
+    assert r.status_code == 500
+    cm.predict.assert_not_called()
+    em.extract_embeddings.assert_not_called()
+
+
+@pytest.mark.parametrize("bad_row", [
+    {"model_id": "o", "coords_normalized": [0.5] * 5, "effective_bbox": [1, 1, 2, 2]},   # no theta
+    {"model_id": "o", "theta": "x", "coords_normalized": [0.5] * 5, "effective_bbox": [1, 1, 2, 2]},
+    {"model_id": "o", "theta": 0.1, "coords_normalized": [0.5] * 5},                     # no effective_bbox
+    {"model_id": "o", "theta": 0.1, "coords_normalized": [0.5] * 5, "effective_bbox": [1, 1]},
+    {"model_id": "o", "theta": 0.1, "coords_normalized": [0.5] * 5, "effective_bbox": [1.5, 1, 2, 2]},
+    "not-an-object",
+])
+def test_malformed_orientation_rows_fail_the_request(bad_row):
+    pm, cm, em = _models()
+    om = _orientation([0.1])
+    om.predict_batch.return_value = [bad_row]
+    r = _client(pm, cm, em, om).post("/pipeline/", json=_payload(orientation_model_id="o"))
+    assert r.status_code == 500
+    cm.predict.assert_not_called()
+
+
+def test_detector_bbox_is_retained_as_an_audit_field():
+    """effective_bbox becomes the persisted bbox, so what the detector actually
+    said must stay recoverable."""
+    pm, cm, em = _models()
+    om = _orientation([0.5], [[0, 0, 640, 480]])
+    r = _client(pm, cm, em, om).post("/pipeline/", json=_payload(orientation_model_id="o"))
+    assert r.status_code == 200, r.text
+    res = r.json()["results"][0]
+    assert res["bbox"] == [0, 0, 640, 480]          # what theta describes
+    assert res["detector_bbox"] == [10, 10, 50, 50]  # what the detector proposed
+
+
+def test_fractional_degenerate_bbox_is_skipped_on_the_non_regressor_path():
+    """width=0.5 passes `width <= 0` but int(0.5) == 0 — consumers would have got
+    a degenerate box. The guard must run AFTER integerization."""
+    from app.models.densenet_classifier import DenseNetClassifierModel
+    from app.models.miewid import MiewidModel
+    from app.models.yolo_ultralytics import YOLOUltralyticsModel
+    pm = MagicMock(spec=YOLOUltralyticsModel)
+    pm.predict.return_value = {"predictions": [
+        {"bbox": [10, 10, 0.5, 50], "theta": 0.0, "score": 0.9,
+         "class": "x", "class_id": 0}]}
+    cm = MagicMock(spec=DenseNetClassifierModel)
+    cm.predict.return_value = {"predictions": []}
+    em = MagicMock(spec=MiewidModel)
+    em.extract_embeddings.return_value = np.zeros((1, 2152))
+    r = _client(pm, cm, em).post("/pipeline/", json=_payload())
+    assert r.status_code == 200, r.text
+    assert r.json()["results"] == []
+    cm.predict.assert_not_called()
