@@ -481,6 +481,38 @@ hand-computed theta (`[0.5,0.5,1.0,0.5,0.1]` → `arctan2(0,0.5)+90° = 90°`); 
 `label`/`probability` key ever emitted; rejected from the classify slot; NaN theta
 → fail-closed, not 0.0.
 
+## Precondition for any FUTURE amphibian-reptile migration
+
+`orientation-fire-salamander` was removed from the registry rather than ported,
+because **no install references it**: amphibian-reptile has no `_mlservice_conf`
+at all — it is still entirely on legacy WBIA, where its `_detect_conf` says
+
+```json
+"orienter_algo": "plugin:orientation",
+"orienter_model_tag": "salamander_fire_v2"
+```
+
+i.e. it uses WBIA's own orientation plugin, which reads those 5 outputs as
+coordinates and derives theta **correctly**. The ml-service entry had been
+eager-loaded on every startup since it was added, referenced by nobody, and would
+have emitted garbage viewpoints (#33) if anything had pointed at it.
+
+The irony is instructive: **the salamander install still has correct theta
+precisely because it never migrated.** Sharkbook migrated and lost it.
+
+**So when amphibian-reptile is upgraded to the v2 ml-service, it MUST get a
+`salamander_fire_v2-theta` entry (`wbia-orientation`,
+`/datasets/orientation.salamander_fire_adult.v2.pth`) and an
+`orientation_model_id` on `Salamandra.salamandra` / `Salamandra.infraimmaculata`.**
+Without it that install walks into exactly Sharkbook's regression: its detector
+(`salamander_fire_v2`) is **lightnet**, which never emits thetas, so theta would
+silently drop to 0 and MiewID would start embedding tilted salamanders.
+
+`Bombina.variegata` (yellow-bellied toad) has the same shape —
+`orienter_algo: plugin:orientation`, `orienter_model_tag: yellow_bellied_toad_v0`
+— and would need the same treatment, but that checkpoint is not in the registry at
+all today.
+
 ## Backfill pathway (separate PR)
 
 For the ~315 affected annotations, theta must be recomputed **and embeddings
