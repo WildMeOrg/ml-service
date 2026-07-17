@@ -8,6 +8,16 @@
 # These are mounted into the container at /models/ — use /models/ paths in model_config.json
 MODELS_DIR=/data0/user/models
 
+# The model registry this deployment loads.
+#
+# MUST live OUTSIDE the git checkout. The repo's app/model_config.json is a small
+# development stub; a real deployment's registry is a different, much larger file.
+# If it is kept inside the checkout, `git checkout` / `reset --hard` / `stash` / a
+# pull that touches that path will silently replace the live registry with the
+# stub, and the service will fail to start on the next restart -- taking down every
+# install that shares it. Put it next to the weights it references.
+MODEL_CONFIG=/data0/user/model_config.json
+
 # Optional ----------------------------------------------------------------
 
 # GPU device ID (default: 0)
