@@ -26,6 +26,7 @@ compares this implementation against the reference live.
 import io
 import logging
 import math
+import numbers
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -116,7 +117,11 @@ def resolve_bbox(bbox: Sequence[float], width: int, height: int) -> List[int]:
             f"bbox must be [x, y, w, h]; got {len(bbox)} value(s)."
         )
     for v in bbox:
-        if v is None or not isinstance(v, (int, float)) or not math.isfinite(float(v)):
+        # numbers.Real, not (int, float): detectors hand us np.float32/np.int64,
+        # which are Real but NOT instances of the builtins. bool is excluded --
+        # it is an int subclass and a bbox coordinate of True is a bug, not a 1.
+        if isinstance(v, bool) or not isinstance(v, numbers.Real) \
+                or not math.isfinite(float(v)):
             raise OrientationInferenceError(
                 f"bbox contains a non-finite or non-numeric value: {bbox!r}"
             )
@@ -129,6 +134,27 @@ def resolve_bbox(bbox: Sequence[float], width: int, height: int) -> List[int]:
     x_start, x_stop, _ = slice(x, x + w).indices(width)
     y_start, y_stop, _ = slice(y, y + h).indices(height)
     return [x_start, y_start, max(0, x_stop - x_start), max(0, y_stop - y_start)]
+
+
+def _validate_coords(coords: Sequence[float], model_id: str) -> None:
+    """All five outputs must be finite before theta is derived.
+
+    Checking only the derived theta is insufficient: theta reads indices 0-3, so
+    a NaN in `w` (index 4) yields a *finite* theta and would be emitted inside
+    coords_normalized. Any non-finite output means the model result is malformed
+    and the request must fail (design: malformed/non-finite -> fail-closed).
+    """
+    if len(coords) != NUM_OUTPUTS:
+        raise OrientationInferenceError(
+            f"wbia-orientation '{model_id}': expected {NUM_OUTPUTS} outputs, "
+            f"got {len(coords)}."
+        )
+    bad = [i for i, c in enumerate(coords) if not math.isfinite(float(c))]
+    if bad:
+        raise OrientationInferenceError(
+            f"wbia-orientation '{model_id}': non-finite model output at "
+            f"index/indices {bad}: {coords}"
+        )
 
 
 def compute_theta(coords: Sequence[float]) -> float:
@@ -242,6 +268,15 @@ class WbiaOrientationModel(BaseModel):
                 bbox: Optional[Sequence[float]] = None,
                 theta: float = 0.0,
                 **kwargs) -> Dict[str, Any]:
+        # bbox is required. Defaulting a missing bbox to the full frame would
+        # silently change the region theta describes -- safe-looking, and exactly
+        # the class of silent default this model type exists to remove. A caller
+        # wanting full-frame must say so: bbox=[0, 0, width, height].
+        if bbox is None:
+            raise OrientationInferenceError(
+                f"wbia-orientation '{self.model_id}': bbox is required; pass "
+                f"[0, 0, width, height] explicitly for full-frame."
+            )
         # The reference regressor consumes the AXIS-ALIGNED bbox and infers the
         # rotation itself. Handing it a crop that a detector already rotated would
         # double-rotate. Harmless for lightnet (always 0.0) but wrong for an OBB
@@ -252,7 +287,7 @@ class WbiaOrientationModel(BaseModel):
                 f"derives theta itself; it must not be given a pre-rotated crop "
                 f"(got theta={theta})."
             )
-        return self.predict_batch(image_bytes, [bbox] if bbox is not None else [None])[0]
+        return self.predict_batch(image_bytes, [bbox])[0]
 
     def predict_batch(self, image_bytes: bytes,
                       bboxes: Sequence[Optional[Sequence[float]]]) -> List[Dict[str, Any]]:
@@ -273,15 +308,40 @@ class WbiaOrientationModel(BaseModel):
         image = _canonicalize_rgb(np.asarray(decoded))
         height, width = image.shape[:2]
 
-        results: List[Dict[str, Any]] = []
+        if not bboxes:
+            return []
+
+        # Resolve every bbox first, in input order, so a malformed one fails the
+        # whole call before any inference runs.
+        effs: List[List[int]] = []
         for bbox in bboxes:
-            src = [0, 0, width, height] if bbox is None else list(bbox)
-            eff = resolve_bbox(src, width, height)
+            if bbox is None:
+                raise OrientationInferenceError(
+                    f"wbia-orientation '{self.model_id}': bbox is required; pass "
+                    f"[0, 0, width, height] explicitly for full-frame."
+                )
+            eff = resolve_bbox(list(bbox), width, height)
             if min(eff[2], eff[3]) < 1:
                 eff = [0, 0, width, height]   # reference full-frame fallback
+            effs.append(eff)
 
-            x = self._preprocess(image, eff).to(self.device)
-            coords = self._forward_tta(x)[0].tolist()
+        # Batch: one stacked tensor -> 3 forwards TOTAL (base/hflip/vflip) for the
+        # whole image, rather than 3 per bbox. Order is preserved by construction
+        # (crops are stacked in input order and split back by index), which is
+        # load-bearing: a misaligned row would attach one bbox's theta to
+        # another's crop.
+        batch = torch.cat([self._preprocess(image, e) for e in effs], dim=0)
+        out = self._forward_tta(batch.to(self.device))
+        if out.shape != (len(effs), NUM_OUTPUTS):
+            raise OrientationInferenceError(
+                f"wbia-orientation '{self.model_id}': model returned "
+                f"{tuple(out.shape)}, expected {(len(effs), NUM_OUTPUTS)}."
+            )
+
+        results: List[Dict[str, Any]] = []
+        for eff, row in zip(effs, out):
+            coords = row.tolist()
+            _validate_coords(coords, self.model_id)   # ALL five, not just theta
             th = compute_theta(coords)
             if not math.isfinite(th):
                 # Fail rather than default: 0.0 is a legitimate prediction, so a

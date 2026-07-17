@@ -45,7 +45,9 @@ def _model(coords=(0.5, 0.5, 1.0, 0.5, 0.1), hflip=False, vflip=False):
         c = min(max(c, eps), 1 - eps)
         return math.log(c / (1 - c))
     logits = torch.tensor([[_logit(c) for c in coords]])
-    m.model = MagicMock(return_value=logits)
+    # Size the output to the incoming batch: predict_batch stacks all crops into
+    # ONE tensor, so a fixed (1,5) would fail the shape contract.
+    m.model = MagicMock(side_effect=lambda x, *a, **k: logits.repeat(x.shape[0], 1))
     return m
 
 
@@ -223,9 +225,16 @@ def test_degenerate_bbox_falls_back_to_full_frame_in_effective_bbox():
     assert r["effective_bbox"] == [0, 0, 400, 300]
 
 
-def test_none_bbox_means_full_frame():
+def test_none_bbox_is_rejected_not_defaulted_to_full_frame():
+    """Defaulting a missing bbox to the full frame would silently change the
+    region theta describes — the same class of safe-looking default this model
+    type exists to remove."""
+    from app.models.wbia_orientation import OrientationInferenceError
     m = _model()
-    assert m.predict_batch(RGB, [None])[0]["effective_bbox"] == [0, 0, 400, 300]
+    with pytest.raises(OrientationInferenceError, match="bbox is required"):
+        m.predict_batch(RGB, [None])
+    with pytest.raises(OrientationInferenceError, match="bbox is required"):
+        m.predict(RGB)
 
 
 # --------------------------------------------------------------- fail-closed
@@ -235,8 +244,9 @@ def test_non_finite_theta_raises_rather_than_defaulting_to_zero():
     prediction, so a sentinel could not be told apart from a real answer."""
     from app.models.wbia_orientation import OrientationInferenceError
     m = _model()
-    m.model = MagicMock(return_value=torch.tensor([[float("nan")] * 5]))
-    with pytest.raises(OrientationInferenceError, match="non-finite theta"):
+    m.model = MagicMock(side_effect=lambda x, *a, **k:
+                        torch.tensor([[float("nan")] * 5]).repeat(x.shape[0], 1))
+    with pytest.raises(OrientationInferenceError, match="non-finite"):
         m.predict_batch(RGB, [[10, 10, 100, 100]])
 
 
@@ -259,14 +269,14 @@ def test_predict_rejects_a_pre_rotated_crop():
 def test_unloaded_model_raises():
     from app.models.wbia_orientation import WbiaOrientationModel, OrientationInferenceError
     with pytest.raises(OrientationInferenceError, match="not loaded"):
-        WbiaOrientationModel().predict_batch(RGB, [None])
+        WbiaOrientationModel().predict_batch(RGB, [[0, 0, 10, 10]])
 
 
 def test_undecodable_bytes_raise():
     from app.models.wbia_orientation import OrientationInferenceError
     m = _model()
     with pytest.raises(OrientationInferenceError, match="could not decode"):
-        m.predict_batch(b"not an image", [None])
+        m.predict_batch(b"not an image", [[0, 0, 10, 10]])
 
 
 # ------------------------------------------------- RGB canonicalization
@@ -304,6 +314,123 @@ def test_grayscale_image_end_to_end():
     assert math.isfinite(m.predict_batch(gray, [[10, 10, 100, 100]])[0]["theta"])
 
 
+# ------------------------------- coverage added after implementation review
+
+def test_nan_in_w_is_rejected_even_though_theta_stays_finite():
+    """theta reads indices 0-3, so a NaN in w (index 4) yields a FINITE theta and
+    would sail out inside coords_normalized. All five outputs must be checked."""
+    from app.models.wbia_orientation import OrientationInferenceError
+    m = _model()
+    m.model = MagicMock(side_effect=lambda x, *a, **k:
+                        torch.tensor([[0.0, 0.0, 0.0, 0.0, float("nan")]]).repeat(x.shape[0], 1))
+    with pytest.raises(OrientationInferenceError, match="non-finite model output"):
+        m.predict_batch(RGB, [[10, 10, 100, 100]])
+
+
+@pytest.mark.parametrize("idx", [0, 1, 2, 3, 4])
+def test_non_finite_at_any_coord_index_is_rejected(idx):
+    """NaN, not inf: these are pre-sigmoid logits and sigmoid(inf) == 1.0, which
+    is perfectly finite. Only NaN propagates through the head."""
+    from app.models.wbia_orientation import OrientationInferenceError
+    m = _model()
+    vals = [0.0] * 5
+    vals[idx] = float("nan")
+    m.model = MagicMock(side_effect=lambda x, *a, **k:
+                        torch.tensor([vals]).repeat(x.shape[0], 1))
+    with pytest.raises(OrientationInferenceError, match="non-finite"):
+        m.predict_batch(RGB, [[10, 10, 100, 100]])
+
+
+def test_numpy_scalar_bboxes_are_accepted():
+    """Detectors hand us np.float32/np.int64 — Real, but not int/float instances."""
+    from app.models.wbia_orientation import resolve_bbox
+    assert resolve_bbox([np.int64(10), np.int64(10), np.int64(50), np.int64(50)],
+                        400, 300) == [10, 10, 50, 50]
+    assert resolve_bbox([np.float32(10.9), np.float32(10.0),
+                         np.float32(50.0), np.float32(50.0)], 400, 300) == [10, 10, 50, 50]
+
+
+def test_bool_bbox_values_are_rejected():
+    """bool is an int subclass; a coordinate of True is a bug, not a 1."""
+    from app.models.wbia_orientation import resolve_bbox, OrientationInferenceError
+    with pytest.raises(OrientationInferenceError, match="non-numeric"):
+        resolve_bbox([True, 0, 10, 10], 400, 300)
+
+
+@pytest.mark.parametrize("bbox", [
+    [10.7, 10.2, 50.9, 50.9],
+    [-0.9, -0.9, 500.5, 400.5],
+    [379.6, 10.1, 50.8, 50.2],
+])
+def test_fractional_bboxes_agree_with_actual_numpy_slice(bbox):
+    """Fractional w/h too — grounded against NumPy after the same int() rule."""
+    from app.models.wbia_orientation import resolve_bbox
+    img = np.zeros((300, 400, 3))
+    x, y, w, h = (int(v) for v in bbox)
+    actual = img[y:y + h, x:x + w]
+    eff = resolve_bbox(bbox, 400, 300)
+    assert (eff[2], eff[3]) == (actual.shape[1], actual.shape[0])
+
+
+def test_predict_batch_runs_three_forwards_for_the_whole_image_not_per_bbox():
+    """Batched: 3 TTA forwards TOTAL for N bboxes, not 3N."""
+    m = _model(hflip=True, vflip=True)
+    m.model.reset_mock()
+    m.predict_batch(RGB, [[10, 10, 100, 100], [50, 50, 60, 60], [0, 0, 400, 300]])
+    assert m.model.call_count == 3, "expected base+hflip+vflip on ONE stacked batch"
+
+
+def test_batched_rows_stay_aligned_with_their_bboxes():
+    """A misaligned row would attach one bbox's theta to another's crop."""
+    from app.models.wbia_orientation import WbiaOrientationModel, compute_theta
+    m = WbiaOrientationModel()
+    m.model_id, m.device, m.imsize = "t", "cpu", (224, 224)
+    m.hflip = m.vflip = False
+    rows = torch.tensor([[0.5, 0.5, 1.0, 0.5, 0.1],      # -> 90 deg
+                         [0.5, 0.5, 0.5, 0.0, 0.1],      # -> 0 deg
+                         [0.5, 0.5, 0.0, 0.5, 0.1]])     # -> 270 deg
+    logits = torch.log(rows.clamp(1e-9, 1 - 1e-9) / (1 - rows.clamp(1e-9, 1 - 1e-9)))
+    m.model = MagicMock(side_effect=lambda x, *a, **k: logits)
+    out = m.predict_batch(RGB, [[0, 0, 100, 100], [10, 10, 50, 50], [20, 20, 30, 30]])
+    for r, expected in zip(out, rows.tolist()):
+        assert r["theta"] == pytest.approx(compute_theta(expected), abs=1e-6)
+
+
+def test_empty_bbox_list_returns_empty_without_inference():
+    m = _model()
+    m.model.reset_mock()
+    assert m.predict_batch(RGB, []) == []
+    assert m.model.call_count == 0
+
+
+def test_preprocess_produces_the_reference_tensor_shape_and_dtype():
+    """Pins the preprocessing contract the mocked backbone cannot: 224x224,
+    float32 (the reference's .float() after skimage's float64), 3 channels."""
+    m = _model()
+    img = np.random.RandomState(2).rand(300, 400, 3)
+    x = m._preprocess(img, [10, 10, 100, 100])
+    assert x.shape == (1, 3, 224, 224)
+    assert x.dtype == torch.float32
+
+
+def test_preprocess_normalizes_with_imagenet_statistics():
+    """A constant image maps to (value-mean)/std per channel — catches a dropped
+    or altered Normalize."""
+    m = _model()
+    img = np.full((300, 400, 3), 0.485, dtype=np.float64)
+    x = m._preprocess(img, [0, 0, 400, 300])
+    assert x[0, 0].mean().item() == pytest.approx(0.0, abs=1e-4)
+
+
+def test_preprocess_degenerate_crop_uses_the_full_image():
+    """animal_wbia.py:25-28 — and the result must differ from a real crop."""
+    m = _model()
+    img = np.random.RandomState(3).rand(300, 400, 3)
+    full = m._preprocess(img, [0, 0, 400, 300])
+    degenerate = m._preprocess(img, [0, 0, 0, 0])       # empty -> full image
+    assert torch.allclose(full, degenerate)
+
+
 # ----------------------------------------------------------------- loading
 
 def test_registered_in_model_registry():
@@ -321,6 +448,12 @@ def test_load_requires_a_checkpoint():
     from app.models.wbia_orientation import WbiaOrientationModel
     with pytest.raises(ValueError, match="checkpoint_path is required"):
         WbiaOrientationModel().load(model_id="t")
+
+
+def test_sigmoid_of_inf_is_finite_so_only_nan_survives_the_head():
+    """Documents why the NaN tests use NaN: an inf logit saturates to 1.0."""
+    assert torch.sigmoid(torch.tensor([float("inf")])).item() == 1.0
+    assert math.isnan(torch.sigmoid(torch.tensor([float("nan")])).item())
 
 
 def test_load_uses_strict_state_dict():

@@ -10,13 +10,13 @@ transformers==4.52.4
 opencv-python==4.8.1.78
 # wbia-orientation (app/models/wbia_orientation.py) must reproduce the reference
 # preprocessing exactly -- its output IS an angle, so a resize/decode mismatch is
-# angular error. skimage's anti_aliasing Gaussian prefilter on downscale has no
-# cv2 equivalent. Pillow is pinned because imageio's decoding is not reproducible
-# from the imageio pin alone. Re-run the host preflight fidelity gate on ANY bump
-# to these three.
+# angular error, and skimage's anti_aliasing Gaussian prefilter on downscale has
+# no cv2 equivalent. imageio's decoding also depends on its Pillow backend, which
+# is already pinned above (Pillow==10.1.0) -- that pin is part of this contract.
+# Re-run the host preflight fidelity gate on ANY bump to scikit-image, imageio,
+# Pillow, or timm.
 scikit-image==0.26.0
 imageio==2.37.3
-pillow==12.1.1
 aiofiles==23.2.1
 python-jose==3.3.0
 passlib==1.7.4
