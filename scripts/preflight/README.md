@@ -27,12 +27,33 @@ Compared per sample: circular theta error, elementwise `coords_normalized`,
 `effective_bbox` exact equality, and `predict_batch` count/order. Theta alone can
 pass while coordinates are wrong.
 
-## Running it
+## Running it — INSIDE THE BUILT IMAGE
+
+Run it in the container, **not** on the host's Python. The image is the stack that
+ships; a host venv is not. Earlier revisions of this gate ran on Python 3.12 with
+torch 2.10 while the image is **Python 3.10 with torch 2.1.2** — so the gate
+"passed" for a stack that does not exist in production, and only `docker compose
+build` caught it (`scikit-image==0.26.0` requires Python >=3.11 and cannot install
+in the image at all).
 
 ```bash
-python scripts/preflight/run_gate.py --manifest scripts/preflight/manifest.json \
-                                     --fixtures /path/to/fixtures
+docker compose -f docker/docker-compose.prod.yml build
+
+docker run --rm --gpus all \
+  -v "$MODELS_DIR:/datasets:ro" \
+  -v "$PWD/scripts/preflight:/app/scripts/preflight:ro" \
+  -v "$PWD/fixtures:/fixtures:ro" \
+  -v /path/to/wbia-plugin-orientation:/reference:ro \
+  ml-service \
+  python3 scripts/preflight/run_gate.py \
+      --manifest scripts/preflight/manifest.json \
+      --fixtures /fixtures
 ```
+
+`reference_runner.py` needs the `wbia-plugin-orientation` checkout mounted (it
+loads the plugin's config and `cls_hrnet` via importlib) plus `yacs`. Neither is a
+runtime dependency of ml-service, which is another reason this is a preflight and
+not CI.
 
 Emits an artifact recording reference outputs, port outputs, and the full
 environment. **Re-run on any bump to `scikit-image`, `imageio`, `Pillow`, `timm`,
@@ -50,7 +71,16 @@ Matches `requirements.txt`, not a convenience venv — an earlier run validated
 `10.1.0 / 1.26.3 / 1.0.19`, i.e. it proved fidelity for a stack production does
 not install.
 
+The stack that actually ships is **requirements.txt + dockerfile + the base
+image's Python** — not requirements.txt alone:
+
 ```
-Pillow==10.1.0     scikit-image==0.26.0    torch==2.10.0+cu128
-numpy==1.26.3      imageio==2.37.3         timm==1.0.19
+python 3.10              # base image: nvidia/cuda:12.1.1-runtime-ubuntu22.04
+torch==2.1.2             # docker/dockerfile (NOT in requirements.txt)
+torchvision==0.16.2      # docker/dockerfile
+Pillow==10.1.0           numpy==1.26.3        timm==1.0.19
+scikit-image==0.25.2     imageio==2.37.3
 ```
+
+`scikit-image` is capped at 0.25.2 because 0.26+ requires Python >=3.11. Pinning a
+newer version from a dev machine's Python breaks the image build outright.
