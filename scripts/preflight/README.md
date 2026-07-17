@@ -37,7 +37,10 @@ build` caught it (`scikit-image==0.26.0` requires Python >=3.11 and cannot insta
 in the image at all).
 
 ```bash
-docker compose -f docker/docker-compose.prod.yml build
+# Tag the image explicitly.  Compose otherwise chooses a project-derived tag
+# (for example `docker-ml-service`), while the run command below uses
+# `ml-service`.
+docker build -t ml-service -f docker/dockerfile .
 
 docker run --rm --gpus all \
   -v "$MODELS_DIR:/datasets:ro" \
