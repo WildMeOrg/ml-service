@@ -1,4 +1,5 @@
 import logging
+import math
 from fastapi import APIRouter, HTTPException, Request, status, Depends
 from typing import Dict, Any, List, Optional
 import httpx
@@ -10,6 +11,7 @@ from app.models.densenet_classifier import DenseNetClassifierModel
 from app.models.densenet_wilddog_cascade import DenseNetWildDogCascadeModel
 from app.models.miewid import MiewidModel
 from app.models.densenet_orientation import DenseNetOrientationModel
+from app.models.wbia_orientation import WbiaOrientationModel, OrientationInferenceError
 from app.utils.image_uri import resolve_image_uri, sanitize_uri_for_response, sanitize_uri_for_logging
 from fastapi.concurrency import run_in_threadpool
 
@@ -119,10 +121,15 @@ async def run_pipeline(
                             "available_models": available_models
                         }
                     )
-                if not isinstance(orientation_model, DenseNetOrientationModel):
+                # Two orientation kinds, dispatched on type:
+                #   DenseNetOrientationModel -> a viewpoint LABEL (legacy)
+                #   WbiaOrientationModel     -> THETA (the rotation regressor)
+                if not isinstance(orientation_model,
+                                  (DenseNetOrientationModel, WbiaOrientationModel)):
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"Model '{pipeline_request.orientation_model_id}' is not a DenseNet orientation model."
+                        detail=f"Model '{pipeline_request.orientation_model_id}' is not a "
+                               f"DenseNet orientation or wbia-orientation model."
                     )
             
             # Resolve image bytes from URI (URL, data URI, or local path)
@@ -202,6 +209,71 @@ async def run_pipeline(
             
             logger.info(f"Found {len(filtered_bboxes)} bboxes above threshold {pipeline_request.bbox_score_threshold}")
             
+            # Step 2b: orientation FIRST, batched, when a theta regressor is
+            # configured. theta must be known before the crop is embedded, so this
+            # cannot run alongside classify/extract in the gather below. One
+            # predict_batch per image = 3 TTA forwards total, not 3 per bbox.
+            #
+            # FAIL-CLOSED, at REQUEST level: if orientation fails for ANY bbox we
+            # return 500 and emit nothing. Falling back to the detector's theta
+            # (lightnet always gives 0.0) would embed an unrotated crop -- exactly
+            # the regression this model type exists to repair. A *predicted* 0.0 is
+            # valid; a *missing* one is not, so it must not be defaulted. Partial
+            # success is also rejected: silently dropping a detection is how
+            # annotations go missing.
+            theta_regressor = isinstance(orientation_model, WbiaOrientationModel)
+            wbia_orientation_results = None
+            if theta_regressor and filtered_bboxes:
+                ori_bboxes = [bp.get('bbox', []) for bp in filtered_bboxes]
+                try:
+                    wbia_orientation_results = await run_in_threadpool(
+                        orientation_model.predict_batch,
+                        image_bytes=image_bytes,
+                        bboxes=ori_bboxes,
+                    )
+                except OrientationInferenceError as e:
+                    logger.error(f"Orientation failed; failing the request: {e}")
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"Orientation model "
+                               f"'{pipeline_request.orientation_model_id}' could not "
+                               f"produce a trustworthy theta: {e}"
+                    )
+                # Ordered 1:1 is load-bearing -- a misaligned row would attach one
+                # bbox's theta to another's crop.
+                if len(wbia_orientation_results) != len(filtered_bboxes):
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"Orientation returned "
+                               f"{len(wbia_orientation_results)} result(s) for "
+                               f"{len(filtered_bboxes)} bbox(es)."
+                    )
+                # Validate EVERY row here, not lazily inside the consumer loop.
+                # Checking only the count and then dereferencing per-bbox would let
+                # a malformed row N run classify/extract for rows 0..N-1 before the
+                # request failed -- request-level fail-closed must mean no consumer
+                # runs at all.
+                for idx, ori in enumerate(wbia_orientation_results):
+                    if not isinstance(ori, dict):
+                        raise HTTPException(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail=f"Orientation result {idx} is not an object.")
+                    th_val = ori.get('theta')
+                    if not isinstance(th_val, (int, float)) or isinstance(th_val, bool) \
+                            or not math.isfinite(float(th_val)):
+                        raise HTTPException(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail=f"Orientation result {idx} has a non-finite or "
+                                   f"missing theta: {th_val!r}")
+                    eb = ori.get('effective_bbox')
+                    if (not isinstance(eb, (list, tuple)) or len(eb) != 4
+                            or not all(isinstance(v, int) and not isinstance(v, bool)
+                                       for v in eb)):
+                        raise HTTPException(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail=f"Orientation result {idx} has a malformed "
+                                   f"effective_bbox: {eb!r}")
+
             # Step 3: Run classification and extraction for each filtered bbox
             pipeline_results = []
             original_classify_results = []
@@ -217,10 +289,28 @@ async def run_pipeline(
                 x, y, width, height = bbox_coords
                 bbox_list = [int(x), int(y), int(width), int(height)]
                 theta = float(bbox_prediction.get('theta', 0.0))
+                theta_source = 'detector'
+                detector_bbox = list(bbox_coords)   # audit: what the detector said
 
-                # Validate bbox coordinates
-                if width <= 0 or height <= 0:
-                    logger.warning(f"Skipping bbox {i}: invalid dimensions width={width}, height={height}")
+                if wbia_orientation_results is not None:
+                    ori = wbia_orientation_results[i]
+                    theta = float(ori['theta'])
+                    theta_source = 'orientation'
+                    # effective_bbox is the slice orientation ACTUALLY used (NumPy
+                    # slicing does not clamp, and a degenerate crop falls back to
+                    # the full frame). classify, extract and the emitted result
+                    # must all use it, or theta describes a region other than the
+                    # crop it rotates.
+                    bbox_list = list(ori['effective_bbox'])
+                    bbox_coords = bbox_list
+                elif bbox_list[2] <= 0 or bbox_list[3] <= 0:
+                    # Guard AFTER integerization: a raw width of 0.5 passes
+                    # `width <= 0` but int(0.5) == 0, so consumers would receive a
+                    # degenerate box. Only skip when orientation is NOT resolving
+                    # bboxes for us -- its degenerate-crop fallback needs to see these.
+                    logger.warning(f"Skipping bbox {i}: invalid dimensions "
+                                   f"width={width}, height={height} "
+                                   f"(integerized to {bbox_list[2]}x{bbox_list[3]})")
                     continue
 
                 # Run orientation, classification, and extraction in parallel
@@ -245,7 +335,7 @@ async def run_pipeline(
                 tasks.append(extract_task)
                 task_names.append('extract')
 
-                if orientation_model:
+                if orientation_model and not theta_regressor:
                     orientation_task = run_in_threadpool(
                         orientation_model.predict,
                         image_bytes=image_bytes,
@@ -332,7 +422,9 @@ async def run_pipeline(
                 # Create clean pipeline result entry
                 bbox_result = {
                     'bbox': bbox_coords,
+                    'detector_bbox': detector_bbox,
                     'theta': theta,
+                    'theta_source': theta_source,
                     'bbox_score': bbox_prediction.get('score'),
                     'detection_class': bbox_prediction.get('class'),
                     'detection_class_id': bbox_prediction.get('class_id'),

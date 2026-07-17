@@ -1,0 +1,40 @@
+{
+  "_note": "INPUT manifest for the wbia-orientation fidelity gate. It carries inputs and identity, NOT expected answers: the gate executes the pinned reference and the port LIVE and compares them to each other. Frozen expected thetas would only pin one implementation's output and would rot on any dependency bump.",
+  "reference_source": {
+    "repo": "wbia-plugin-orientation",
+    "path": "/mnt/c/wbia-plugin-orientation",
+    "_note": "record the commit hash of the reference checkout used for the gate run"
+  },
+  "thresholds": {
+    "theta_circular_max_rad": 1e-5,
+    "theta_circular_mean_rad": 1e-6,
+    "coords_elementwise_max": 1e-6,
+    "coords_elementwise_mean": 1e-7,
+    "effective_bbox": "exact",
+    "predict_batch": "exact count and order"
+  },
+  "checkpoints": [
+    {"model_id": "whaleshark_v3-theta",
+     "path": "/datasets/orientation.whaleshark.v3.pth",
+     "sha256": "<record at preflight>"},
+    {"model_id": "leopard_shark_v0-theta",
+     "path": "/datasets/orientation.leopard_shark.v0.pth",
+     "sha256": "<record at preflight>"},
+    {"model_id": "salamander_fire_v2-theta",
+     "path": "/datasets/orientation.salamander_fire_adult.v2.pth",
+     "sha256": "<record at preflight>"}
+  ],
+  "strata": {
+    "_note": "Each stratum can independently break the port. Fidelity strata are RGB-only: the reference RAISES on grayscale/RGBA, so there is no reference angle to compare against. The RGB-canonicalization wrapper is validated separately by converting the fixture to RGB externally and running the reference on that.",
+    "rgb_jpeg_downscale": {"min_samples": 20, "_why": "crop >> 224; skimage's anti-alias prefilter only engages downscaling"},
+    "rgb_jpeg_upscale": {"min_samples": 10, "_why": "crop << 224; different interpolation regime"},
+    "extreme_aspect": {"min_samples": 10, "_why": "resize distortion feeds theta"},
+    "bbox_edge_degenerate": {"min_samples": 10, "_why": "exercises the reload-full-image fallback and NumPy's non-clamping slice"},
+    "multi_detection": {"min_samples": 10, "_why": "exercises orientation batching and row/bbox alignment"},
+    "canonicalization_wrapper": {"min_samples": 10, "_why": "grayscale/RGBA: port on the original vs reference on an externally RGB-converted copy"}
+  },
+  "fixtures": [
+    {"_note": "populate with production image byte hashes + exact bboxes + stratum tag",
+     "sha256": "<fixture byte hash>", "bbox": [0, 0, 0, 0], "stratum": "rgb_jpeg_downscale"}
+  ]
+}
