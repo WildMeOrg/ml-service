@@ -33,6 +33,37 @@
 	    "checkpoint_path": "/datasets/vplabeler-msv3.pt",
 	    "img_size": 512,
 	    "threshold": 0.5
+	},
+	{
+	    "model_id": "sea_turtle_new_v0",
+	    "model_type": "lightnet",
+	    "config_path": "/datasets/detect.lightnet.sea_turtle_new.v0.py",
+	    "weight_path": "/datasets/detect.lightnet.sea_turtle_new.v0.weights",
+	    "conf": 0.5,
+	    "nms_thresh": 0.5
+	},
+	{
+	    "model_id": "sea_turtle_new_v0-s42",
+	    "model_type": "lightnet",
+	    "config_path": "/datasets/detect.lightnet.sea_turtle_new.v0.py",
+	    "weight_path": "/datasets/detect.lightnet.sea_turtle_new.v0.weights",
+	    "conf": 0.42,
+	    "nms_thresh": 0.5
+	},
+	{
+	    "model_id": "seaturtles_effnet_v0",
+	    "model_type": "efficientnetv2",
+	    "checkpoint_path": "/datasets/labeler_seaturtles_effnet.v0/labeler_seaturtles_effnet.v0/labeler.0.weights",
+	    "img_size": 512,
+	    "threshold": 0.5,
+	    "parse_compound_labels": true,
+	    "sentinel_prefixes": ["species", "sea_turtle"]
+	},
+	{
+	    "model_id": "sea_turtle_new_v0-theta",
+	    "model_type": "wbia-orientation",
+	    "checkpoint_path": "/datasets/orientation.sea_turtle_new.v0.pth",
+	    "imsize": [224, 224]
 	}
     ]
 }
