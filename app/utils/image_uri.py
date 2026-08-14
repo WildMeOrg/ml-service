@@ -2,12 +2,21 @@
 
 import asyncio
 import base64
+import io
 import logging
 import os
+import stat as stat_module
 from pathlib import Path
 from typing import Optional, Tuple
 
 import httpx
+from fastapi.concurrency import run_in_threadpool
+from PIL import Image
+
+# PIL's own decompression-bomb guard is replaced by the explicit
+# IMAGE_MAX_PIXELS check in check_image_header(), which runs before any
+# decode. Bytes never reach a decoder without passing that check.
+Image.MAX_IMAGE_PIXELS = None
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +58,26 @@ def decode_data_uri(uri: str) -> bytes:
     header, encoded = uri.split(',', 1)
     if ';base64' not in header:
         raise ValueError("Only base64-encoded data URIs are supported")
+    _ensure_initialized()
+    # 4/3 base64 expansion + header slack: reject before materializing
+    if len(encoded) > _settings["max_image_bytes"] * 4 // 3 + 8:
+        raise ImageTooLargeError("Encoded data URI exceeds size cap")
     return base64.b64decode(encoded, validate=True)
+
+
+def check_image_header(data: bytes) -> None:
+    """Reject bytes whose image header is unparseable or declares more
+    pixels than IMAGE_MAX_PIXELS. Parses the header only — no pixel decode."""
+    _ensure_initialized()
+    max_pixels = _settings["max_pixels"]
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            width, height = im.size
+    except Exception as e:
+        raise ValueError(f"Unrecognized image format: {e}")
+    if width * height > max_pixels:
+        raise ImageTooLargeError(
+            f"Image dimensions {width}x{height} exceed {max_pixels} pixel cap")
 
 
 async def _fetch_url_bytes(uri: str) -> bytes:
@@ -88,11 +116,18 @@ async def resolve_image_uri(uri: str) -> bytes:
         return await asyncio.wait_for(
             _fetch_url_bytes(uri), timeout=_settings["total_deadline_s"])
     else:
+        _ensure_initialized()
         file_path = Path(uri)
-        if not file_path.exists():
+        try:
+            st = os.stat(file_path)
+        except OSError:
             raise ValueError(f"File not found: {uri}")
-        with open(file_path, "rb") as f:
-            return f.read()
+        if not stat_module.S_ISREG(st.st_mode):
+            raise ValueError(f"Not a regular file: {uri}")
+        if st.st_size > _settings["max_image_bytes"]:
+            raise ImageTooLargeError(
+                f"File size {st.st_size} exceeds cap {_settings['max_image_bytes']}")
+        return await run_in_threadpool(file_path.read_bytes)
 
 
 # --- Shared fetch state -----------------------------------------------------
