@@ -4,6 +4,10 @@ Bounds per-request parse-time memory: FastAPI/Pydantic materializes the
 whole body before route handlers run, so the cap must sit below them.
 Aggregate concurrency is bounded separately by uvicorn --limit-concurrency."""
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 class BodyLimitMiddleware:
     def __init__(self, app, max_bytes: int):
@@ -48,12 +52,14 @@ class BodyLimitMiddleware:
 
         try:
             await self.app(scope, counting_receive, guarded_send)
-        except Exception:
+        except Exception as exc:
             # the disconnect we injected may surface as ClientDisconnect (or
             # similar) from the app; if we already answered 413 that is
             # expected — anything else is a real error
             if not rejected:
                 raise
+            logger.warning(
+                "Suppressed exception after body-cap 413 was delivered: %r", exc)
 
     @staticmethod
     async def _reject(send):
