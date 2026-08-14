@@ -12,6 +12,14 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+class ImageTooLargeError(ValueError):
+    """Image exceeds IMAGE_FETCH_MAX_BYTES or IMAGE_MAX_PIXELS."""
+
+
+class EmptyImageError(ValueError):
+    """Upstream returned a successful but empty body."""
+
+
 def is_data_uri(uri: str) -> bool:
     return uri.startswith('data:')
 
@@ -44,6 +52,28 @@ def decode_data_uri(uri: str) -> bytes:
     return base64.b64decode(encoded, validate=True)
 
 
+async def _fetch_url_bytes(uri: str) -> bytes:
+    """Stream a URL through the shared client, enforcing the byte cap."""
+    max_bytes = _settings["max_image_bytes"]
+    async with _client.stream("GET", uri) as response:
+        response.raise_for_status()
+        declared = response.headers.get("content-length")
+        if declared is not None and declared.isdigit() and int(declared) > max_bytes:
+            raise ImageTooLargeError(
+                f"Declared content-length {declared} exceeds cap {max_bytes}")
+        chunks = []
+        size = 0
+        async for chunk in response.aiter_bytes():
+            size += len(chunk)
+            if size > max_bytes:
+                raise ImageTooLargeError(
+                    f"Body exceeded cap {max_bytes} bytes mid-stream")
+            chunks.append(chunk)
+        if size == 0:
+            raise EmptyImageError("Upstream returned an empty body")
+        return b"".join(chunks)
+
+
 async def resolve_image_uri(uri: str) -> bytes:
     """Resolve an image URI (URL, data URI, or local path) to raw bytes.
 
@@ -54,10 +84,9 @@ async def resolve_image_uri(uri: str) -> bytes:
     if is_data_uri(uri):
         return decode_data_uri(uri)
     elif uri.startswith(('http://', 'https://')):
-        async with httpx.AsyncClient() as client:
-            response = await client.get(uri)
-            response.raise_for_status()
-            return response.content
+        _ensure_initialized()
+        return await asyncio.wait_for(
+            _fetch_url_bytes(uri), timeout=_settings["total_deadline_s"])
     else:
         file_path = Path(uri)
         if not file_path.exists():
