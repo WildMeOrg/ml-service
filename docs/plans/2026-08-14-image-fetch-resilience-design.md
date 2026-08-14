@@ -222,8 +222,8 @@ irregular/oversized local files (§2).
 All four routers restructure identically:
 
 ```
-POST /… → validate models             (no locks; registry reads only)
-        → acquire admission semaphore (held to end of request)
+POST /… → acquire admission semaphore (held to end of request)
+        →   validate models           (registry reads only)
         →   fetch_image_for_request() (streaming, deadline-capped)
         →   acquire inference semaphore
         →     inference
@@ -232,6 +232,10 @@ POST /… → validate models             (no locks; registry reads only)
 
 In `pipeline_router` the model validation moves out of the semaphore block —
 safe, it only reads the in-memory model registry.
+
+Validation runs inside the admission slot; under full saturation a malformed
+request waits for a slot before failing — accepted for implementation
+simplicity.
 
 ### 6. Observability
 

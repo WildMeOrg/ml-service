@@ -7,19 +7,21 @@ import logging
 import os
 import stat as stat_module
 import time
+import warnings
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import NoReturn, Optional, Tuple
 
 import httpx
 from fastapi import HTTPException
 from fastapi.concurrency import run_in_threadpool
 from PIL import Image
 
-# PIL's own decompression-bomb guard is replaced by the explicit
-# IMAGE_MAX_PIXELS check in check_image_header(), which runs before any
-# decode. Bytes never reach a decoder without passing that check.
-Image.MAX_IMAGE_PIXELS = None
+# check_image_header() enforces IMAGE_MAX_PIXELS with a friendly 400 before
+# any decode on the fetch_image_for_request path. Setting PIL's own guard to
+# the same cap (instead of disabling it) keeps a hard backstop on decode
+# paths that do not go through that helper (e.g. the wbia-compat router).
+Image.MAX_IMAGE_PIXELS = int(os.getenv("IMAGE_MAX_PIXELS", "150000000"))
 
 logger = logging.getLogger(__name__)
 
@@ -74,8 +76,16 @@ def check_image_header(data: bytes) -> None:
     _ensure_initialized()
     max_pixels = _settings["max_pixels"]
     try:
-        with Image.open(io.BytesIO(data)) as im:
-            width, height = im.size
+        with warnings.catch_warnings():
+            # PIL's own guard (set to the same cap, see module top) only
+            # warns at 1x and raises at 2x; suppress the warning here so our
+            # ImageTooLargeError stays the single user-visible error for
+            # both the 1x-2x and >2x cases.
+            warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(data)) as im:
+                width, height = im.size
+    except Image.DecompressionBombError as e:
+        raise ImageTooLargeError(f"Image header exceeds pixel cap: {e}")
     except Exception as e:
         raise ValueError(f"Unrecognized image format: {e}")
     if width * height > max_pixels:
@@ -170,6 +180,9 @@ def init_image_fetch(transport: Optional[httpx.AsyncBaseTransport] = None) -> No
     if _client is not None:
         return
     _settings = load_fetch_settings()
+    # pool=None on the client is safe only while the admission semaphore
+    # bounds concurrent requests to the pool size
+    assert _settings["admission_limit"] >= 1
     _client = httpx.AsyncClient(
         timeout=httpx.Timeout(
             connect=_settings["connect_timeout_s"],
@@ -230,7 +243,7 @@ async def admission_slot():
         _admission.release()
 
 
-def _fail(status_code: int, uri: str, exc: Exception, started: float):
+def _fail(status_code: int, uri: str, exc: Exception, started: float) -> NoReturn:
     logger.warning(
         "Image fetch failed (%d, %s, %.0f ms): %s",
         status_code, type(exc).__name__, (time.monotonic() - started) * 1000,
@@ -265,7 +278,8 @@ async def fetch_image_for_request(uri: str) -> bytes:
         code = e.response.status_code
         if code in (408, 429) or code >= 500:
             _fail(502, uri, e, started)
-        _fail(400, uri, e, started)
+        else:
+            _fail(400, uri, e, started)
     except httpx.UnsupportedProtocol as e:
         _fail(400, uri, e, started)
     except httpx.InvalidURL as e:

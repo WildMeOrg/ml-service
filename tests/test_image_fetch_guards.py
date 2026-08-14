@@ -77,3 +77,9 @@ def test_local_path_reads_regular_file(tmp_path):
     f = tmp_path / "ok.png"
     f.write_bytes(ONE_PX_PNG)
     assert asyncio.run(image_uri.resolve_image_uri(str(f))) == ONE_PX_PNG
+
+
+def test_pil_bomb_guard_is_finite():
+    # process-wide backstop for decode paths that bypass check_image_header
+    assert Image.MAX_IMAGE_PIXELS is not None
+    assert Image.MAX_IMAGE_PIXELS == 150000000
