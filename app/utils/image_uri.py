@@ -6,10 +6,13 @@ import io
 import logging
 import os
 import stat as stat_module
+import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional, Tuple
 
 import httpx
+from fastapi import HTTPException
 from fastapi.concurrency import run_in_threadpool
 from PIL import Image
 
@@ -206,3 +209,66 @@ def reset_fetch_state_for_tests() -> None:
 def _ensure_initialized() -> None:
     if _client is None:
         init_image_fetch()
+
+
+@asynccontextmanager
+async def admission_slot():
+    """Bounded admission: one slot per in-flight image request, held from
+    fetch start through inference end. 503 (retryable) if the wait exceeds
+    IMAGE_ADMISSION_WAIT_S."""
+    _ensure_initialized()
+    try:
+        await asyncio.wait_for(
+            _admission.acquire(), timeout=_settings["admission_wait_s"])
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=503,
+            detail="Service saturated: no admission slot available")
+    try:
+        yield
+    finally:
+        _admission.release()
+
+
+def _fail(status_code: int, uri: str, exc: Exception, started: float):
+    logger.warning(
+        "Image fetch failed (%d, %s, %.0f ms): %s",
+        status_code, type(exc).__name__, (time.monotonic() - started) * 1000,
+        sanitize_uri_for_logging(uri))
+    raise HTTPException(
+        status_code=status_code,
+        detail=f"Image fetch failed for {sanitize_uri_for_response(uri)}: "
+               f"{type(exc).__name__}")
+
+
+async def fetch_image_for_request(uri: str) -> bytes:
+    """Router entry point: resolve + header-check an image URI, mapping
+    every failure to the retry-ladder-correct HTTPException."""
+    started = time.monotonic()
+    try:
+        data = await resolve_image_uri(uri)
+        check_image_header(data)
+        logger.debug(
+            "Image fetched: %d bytes in %.0f ms from %s",
+            len(data), (time.monotonic() - started) * 1000,
+            sanitize_uri_for_logging(uri))
+        return data
+    except ValueError as e:               # incl. ImageTooLarge/Empty/bad header
+        _fail(400, uri, e, started)
+    except asyncio.TimeoutError as e:     # total deadline
+        _fail(504, uri, e, started)
+    except httpx.TimeoutException as e:   # connect/read/write/pool timeout
+        _fail(504, uri, e, started)
+    except httpx.TooManyRedirects as e:
+        _fail(400, uri, e, started)
+    except httpx.HTTPStatusError as e:
+        code = e.response.status_code
+        if code in (408, 429) or code >= 500:
+            _fail(502, uri, e, started)
+        _fail(400, uri, e, started)
+    except httpx.UnsupportedProtocol as e:
+        _fail(400, uri, e, started)
+    except httpx.InvalidURL as e:
+        _fail(400, uri, e, started)
+    except httpx.RequestError as e:       # DNS, refused, reset, TLS, decoding
+        _fail(502, uri, e, started)
