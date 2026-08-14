@@ -230,8 +230,9 @@ POST /… → acquire admission semaphore (held to end of request)
         → response
 ```
 
-In `pipeline_router` the model validation moves out of the semaphore block —
-safe, it only reads the in-memory model registry.
+In `pipeline_router` the model validation moves out of the *inference*
+semaphore — safe, it only reads the in-memory model registry — while running
+inside the admission slot, per the flow above.
 
 Validation runs inside the admission slot; under full saturation a malformed
 request waits for a slot before failing — accepted for implementation
