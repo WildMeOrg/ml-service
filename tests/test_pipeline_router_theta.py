@@ -20,6 +20,11 @@ from fastapi.testclient import TestClient
 
 from app.routers import pipeline_router
 
+VALID_PNG_DATA_URI = (
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+    "AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+
 
 def _client(predict_model, classify_model, extract_model, orientation_model=None):
     app = FastAPI()
@@ -70,7 +75,7 @@ def _orientation(thetas, effective_bboxes=None):
     return om
 
 
-PAYLOAD = {"image_uri": "data:image/png;base64,iVBORw0KGgo=",
+PAYLOAD = {"image_uri": VALID_PNG_DATA_URI,
            "predict_model_id": "p", "classify_model_id": "c",
            "extract_model_id": "e"}
 

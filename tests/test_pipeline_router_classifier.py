@@ -5,6 +5,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from app.routers import pipeline_router
 
+VALID_PNG_DATA_URI = (
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+    "AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+
 
 def _make_app_with_models(predict_model, classify_model, extract_model):
     """Build a minimal FastAPI app with monkey-patched ModelHandler."""
@@ -63,7 +68,7 @@ def test_pipeline_classify_densenet_classifier_emits_top_level_iaclass_and_viewp
         "predict_model_id": "p",
         "classify_model_id": "c",
         "extract_model_id": "e",
-        "image_uri": "data:image/png;base64,iVBORw0KGgo=",
+        "image_uri": VALID_PNG_DATA_URI,
     })
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -102,7 +107,7 @@ def test_pipeline_classify_densenet_classifier_pure_viewpoint_omits_iaclass():
     resp = client.post("/pipeline/", json={
         "predict_model_id": "p", "classify_model_id": "c",
         "extract_model_id": "e",
-        "image_uri": "data:image/png;base64,iVBORw0KGgo=",
+        "image_uri": VALID_PNG_DATA_URI,
     })
     body = resp.json()
     r = body["results"][0]
@@ -151,7 +156,7 @@ def test_pipeline_classify_efficientnet_compound_labels_emits_top_level_iaclass_
     resp = client.post("/pipeline/", json={
         "predict_model_id": "p", "classify_model_id": "c",
         "extract_model_id": "e",
-        "image_uri": "data:image/png;base64,iVBORw0KGgo=",
+        "image_uri": VALID_PNG_DATA_URI,
     })
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -173,6 +178,6 @@ def test_pipeline_classify_densenet_orientation_rejected_with_400():
     client = _make_app_with_models(pm, cm, em)
     resp = client.post("/pipeline/", json={
         "predict_model_id": "p", "classify_model_id": "c",
-        "extract_model_id": "e", "image_uri": "data:image/png;base64,iVBORw0KGgo=",
+        "extract_model_id": "e", "image_uri": VALID_PNG_DATA_URI,
     })
     assert resp.status_code == 400

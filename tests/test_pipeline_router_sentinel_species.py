@@ -16,6 +16,11 @@ from fastapi.testclient import TestClient
 
 from app.routers import pipeline_router
 
+VALID_PNG_DATA_URI = (
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+    "AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+
 
 def _client(classify_predictions):
     from app.models.efficientnet import EfficientNetModel
@@ -56,7 +61,7 @@ def _client(classify_predictions):
 
 def _post(client):
     return client.post("/pipeline/", json={
-        "image_uri": "data:image/jpeg;base64,/9j/4AAQSkZJRg==",
+        "image_uri": VALID_PNG_DATA_URI,
         "predict_model_id": "p",
         "classify_model_id": "c",
         "extract_model_id": "e",
