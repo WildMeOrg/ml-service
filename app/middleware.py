@@ -22,29 +22,38 @@ class BodyLimitMiddleware:
             return
 
         received = 0
-        response_started = False
+        rejected = False          # we sent the 413; swallow the app's output
+        response_started = False  # app began responding; too late to reject
 
         async def counting_receive():
-            nonlocal received
+            nonlocal received, rejected
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
                 if received > self.max_bytes:
-                    raise _BodyTooLarge()
+                    if not response_started and not rejected:
+                        rejected = True
+                        await self._reject(send)
+                    # abort the app's body read; connection is done
+                    return {"type": "http.disconnect"}
             return message
 
-        async def tracking_send(message):
+        async def guarded_send(message):
             nonlocal response_started
+            if rejected:
+                return  # 413 already sent; drop the app's response
             if message["type"] == "http.response.start":
                 response_started = True
             await send(message)
 
         try:
-            await self.app(scope, counting_receive, tracking_send)
-        except _BodyTooLarge:
-            if not response_started:
-                await self._reject(send)
-            # else: response already in flight; connection ends here
+            await self.app(scope, counting_receive, guarded_send)
+        except Exception:
+            # the disconnect we injected may surface as ClientDisconnect (or
+            # similar) from the app; if we already answered 413 that is
+            # expected — anything else is a real error
+            if not rejected:
+                raise
 
     @staticmethod
     async def _reject(send):
@@ -58,7 +67,3 @@ class BodyLimitMiddleware:
             ],
         })
         await send({"type": "http.response.body", "body": body})
-
-
-class _BodyTooLarge(Exception):
-    pass
