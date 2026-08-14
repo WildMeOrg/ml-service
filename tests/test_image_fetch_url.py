@@ -28,8 +28,13 @@ def test_url_fetch_declared_oversize_rejected_before_body():
 
 def test_url_fetch_undeclared_oversize_rejected_midstream(monkeypatch):
     monkeypatch.setenv("IMAGE_FETCH_MAX_BYTES", "10")
-    _init_with(lambda req: httpx.Response(200, content=b"x" * 32))
-    with pytest.raises(image_uri.ImageTooLargeError):
+    async def no_length_body():
+        # Generator body so httpx doesn't auto-set content-length
+        yield b"x" * 20
+    def handler(req):
+        return httpx.Response(200, content=no_length_body())
+    _init_with(handler)
+    with pytest.raises(image_uri.ImageTooLargeError, match="mid-stream"):
         asyncio.run(image_uri.resolve_image_uri("https://wb.example/liar.jpg"))
 
 
