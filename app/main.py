@@ -25,6 +25,12 @@ logger = logging.getLogger(__name__)
 # Create FastAPI app
 app = FastAPI()
 
+from app.middleware import BodyLimitMiddleware
+from app.utils import image_uri
+
+MAX_REQUEST_BODY_BYTES = int(os.getenv("MAX_REQUEST_BODY_BYTES", "4194304"))
+app.add_middleware(BodyLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
+
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='FastAPI Model Serving Application')
 parser.add_argument('--device', type=str, default='cuda', 
@@ -35,26 +41,31 @@ parser.add_argument('--port', type=int, default=8888,
                    help='Port to run the server on')
 parser.add_argument('--reload', action='store_true', 
                    help='Enable auto-reload')
-parser.add_argument('--workers', type=int, default=1, 
+parser.add_argument('--workers', type=int, default=1,
                    help='Number of worker processes')
+parser.add_argument('--limit-concurrency', type=int, default=32,
+                   help='Max concurrent connections per worker; excess get 503 '
+                        'before their bodies are read (bounds parse-time memory)')
 args = parser.parse_args()
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.main:app", host=args.host, port=args.port, 
-               reload=args.reload, workers=args.workers)
+    uvicorn.run("app.main:app", host=args.host, port=args.port,
+               reload=args.reload, workers=args.workers,
+               limit_concurrency=args.limit_concurrency)
 
 @app.on_event("startup")
 async def startup_event():
     """Initialize the application on startup.
-    
+
     This function is called when the FastAPI application starts up. It performs the following actions:
     1. Creates a ModelHandler instance
     2. Loads the model configuration from model_config.json
     3. Initializes and loads all configured models with the specified device
-    
+
     The models are stored in the application state and can be accessed via request.app.state.model_handler.
     """
+    image_uri.init_image_fetch()
     # Initialize model handler
     model_handler = ModelHandler()
     app.state.device = args.device
@@ -104,6 +115,7 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """Clean up models and free GPU memory on shutdown."""
+    await image_uri.shutdown_image_fetch()
     import torch
     if hasattr(app.state, 'model_handler'):
         for model_id, info in app.state.model_handler.models.items():
