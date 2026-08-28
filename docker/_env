@@ -26,7 +26,7 @@ MODEL_CONFIG=/data0/user/model_config.json
 # PyTorch device: cuda, cpu (default: cuda)
 # DEVICE=cuda
 
-# Number of uvicorn workers (default: 1 — use 1 for GPU to avoid VRAM contention)
+# Number of uvicorn workers (default: 4 — set 1 for GPU to avoid VRAM contention)
 # WORKERS=1
 
 # Host port to expose (default: 6050)
@@ -34,3 +34,54 @@ MODEL_CONFIG=/data0/user/model_config.json
 
 # Directory shared with WBIA/Wildbook for image paths (so image_uuid_list file paths resolve)
 # DATA_DB_DIR=/data/db
+
+# Image fetch and admission ------------------------------------------------
+#
+# The service fetches every image_uri itself, so these bound what one slow or
+# hostile upstream can cost. All have in-code defaults; leaving them unset
+# here keeps current behaviour. Changing any of them requires a restart.
+
+# Seconds to wait for a connection to an image host to be established
+# (default: 10). Raise where the path to upstreams is lossy or slow: a
+# connection that times out here costs a full retry, not a slow success.
+# IMAGE_FETCH_CONNECT_TIMEOUT_S=10
+
+# Seconds of silence permitted between reads, NOT total transfer time
+# (default: 30). A slow but steady download will not trip this.
+# IMAGE_FETCH_READ_TIMEOUT_S=30
+
+# Hard ceiling on one fetch, start to finish (default: 60). This is what
+# stops a slow transfer holding an admission slot indefinitely -- and what
+# cuts off large images on a degraded link. Raise where upstreams are slow.
+# IMAGE_FETCH_TOTAL_DEADLINE_S=60
+
+# Maximum image size accepted, in bytes (default: 52428800 = 50MB).
+# IMAGE_FETCH_MAX_BYTES=52428800
+
+# Concurrent image fetches PER WORKER (default: 8). Effective total is this
+# times WORKERS, so 4 workers means 32 concurrent fetches against upstreams.
+# IMAGE_ADMISSION_LIMIT=8
+
+# Seconds a request waits for an admission slot before 503 (default: 20).
+# IMAGE_ADMISSION_WAIT_S=20
+
+# Decoded-pixel ceiling, a decompression-bomb guard (default: 150000000).
+# IMAGE_MAX_PIXELS=150000000
+
+# Maximum request body accepted, in bytes (default: 4194304 = 4MB).
+# Installs POSTing data URIs need ~4/3x the image size for base64 inflation:
+# a 50MB image needs roughly a 67MB cap.
+# MAX_REQUEST_BODY_BYTES=4194304
+
+# cv2's own decode backstop, read by OpenCV rather than by app code. Not
+# passed through by default -- uncomment the matching line in
+# docker-compose.prod.yml to enable it.
+# OPENCV_IO_MAX_IMAGE_PIXELS=1073741824
+
+# Endpoint defaults --------------------------------------------------------
+
+# Model used by /explain/ (PairX) when the caller omits model_id
+# (default: miewid-msv4.1). Must name a MiewID model THIS instance loads --
+# registries differ between instances, and an id that is not loaded returns
+# 404. Set it where your registry uses a different name, e.g.:
+# EXPLAIN_DEFAULT_MODEL_ID=miewid-msv4_v3
