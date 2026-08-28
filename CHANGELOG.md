@@ -1,5 +1,33 @@
 ## [Unreleased]
 
+- `/explain/` (PairX) joins the image-fetch resilience path. It was the one
+  router PR #39 did not migrate and still used an inline `httpx.AsyncClient()`
+  -- httpx's 5s default timeout, no env knob -- inside a bare
+  `except Exception` that reported read timeouts, upstream 5xx and undecodable
+  bodies alike as 400, which Wildbook does not retry. It now uses
+  `fetch_image_for_request` behind `admission_slot` (one slot per image, since
+  a pair request fans out to 2N fetches), so the `IMAGE_FETCH_*` knobs apply
+  and statuses map correctly (504 slow upstream, 502 upstream fault, 400
+  caller error). `process_asyncio_result` no longer flattens those back to 400.
+  Local paths are resolved by the shared helper, which does not expand a
+  leading `~`; absolute paths, relative paths, URLs and (newly) data URIs are
+  unaffected.
+- `/explain/` validates the pairing, the batch size and every bbox/theta
+  *before* fetching any image, so a request already known to be invalid takes
+  no slots from the process-wide admission gate that the other routers queue
+  on. Non-finite bbox values and thetas are now rejected explicitly: a bare
+  `NaN` survives `json.loads` and every `x < 0` test, then broke `int()` deep
+  in cropping.
+- PairX inference moved off the event loop (`run_in_threadpool`). Running the
+  synchronous torch forward+backward inline pinned the loop for its whole
+  duration and starved every concurrent image fetch on that worker -- the
+  Flukebook incident of 2026-08-28, where a sibling `/extract/` fetch blew its
+  60s deadline on an asset that had served 200 in under a second. Because that
+  offload makes two explains genuinely parallel against one shared model,
+  `MAX_CONCURRENT_EXPLANATIONS` drops 2 -> 1 to keep PAIR-X's backward pass and
+  `zero_grad()` from racing; inline execution already serialized them, so
+  observed concurrency is unchanged.
+
 - Image-fetch resilience (design: docs/plans/2026-08-14-image-fetch-resilience-design.md):
   image downloads now use a shared client with explicit timeouts and a 60s total
   deadline, run outside the inference semaphores behind a bounded admission gate,
