@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+- `run_pairx` logs the exception behind its generic 500. It is one of only two
+  lines producing `{"detail":"Internal Server Error"}`, and was the one that
+  logged nothing -- so a PairX failure was undiagnosable from the logs. The
+  wire response is unchanged and still opaque; the cause and the batch shape
+  (which is what a CUDA OOM turns on) now reach the log.
+
 - `/explain/` (PairX) joins the image-fetch resilience path. It was the one
   router PR #39 did not migrate and still used an inline `httpx.AsyncClient()`
   -- httpx's 5s default timeout, no env knob -- inside a bare

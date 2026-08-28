@@ -324,6 +324,16 @@ def run_pairx(imgs1_transformed, imgs2_transformed, imgs1, imgs2, model, layer_k
                     layer_key, k_lines, k_colors, visualization_type)
             return first_half + second_half
         else:
+            # The response stays deliberately opaque, so the cause has to go
+            # somewhere. Without this the 500 is undiagnosable: it is one of
+            # only two lines producing this exact body, and the other one
+            # (process_asyncio_result) is the only one that logged.
+            # Batch shape is included because the failure this most often
+            # hides is a CUDA OOM, whose likelihood depends on it.
+            logger.exception(
+                "PAIR-X inference failed (layer_key=%s, pairs=%d, k_lines=%d, "
+                "k_colors=%d)", layer_key, len(imgs1_transformed), k_lines,
+                k_colors)
             raise HTTPException(status_code=500, detail=f"Internal Server Error")
     finally:
         # PAIR-X backward() accumulates .grad on model params — clear to prevent VRAM growth
