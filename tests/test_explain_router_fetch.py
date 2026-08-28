@@ -39,6 +39,8 @@ def _png_bytes():
 def _miewid():
     m = MagicMock(spec=MiewidModel)
     m.model = MagicMock()
+    # Real instances get this in __init__; spec= only exposes class attrs.
+    m.inference_lock = threading.RLock()
     return m
 
 

@@ -1,5 +1,18 @@
 ## [Unreleased]
 
+- Fixed `/explain/` 500s caused by a concurrent forward hijacking PairX's
+  feature-map capture. PAIR-X registers a `register_forward_hook` on a
+  submodule of the *shared* MiewID instance (pairx/core.py:23-43); that hook
+  fires for every forward through the submodule, from any thread, until it is
+  removed. A `/extract` or `/pipeline` forward landing between PairX's own
+  forward and `handle.remove()` replaced the captured tensor with a no-grad
+  one, and PairX's backward then died with `element 0 of tensors does not
+  require grad and does not have a grad_fn`. `MiewidModel` now carries an
+  `inference_lock` held by `extract_embeddings` across its forward and by
+  `/explain` across the whole PairX call. The lock is taken inside the worker
+  thread, so the event loop is never blocked. Latent until PairX moved off the
+  event loop, which had been serializing these by accident.
+
 - `run_pairx` logs the exception behind its generic 500. It is one of only two
   lines producing `{"detail":"Internal Server Error"}`, and was the one that
   logged nothing -- so a PairX failure was undiagnosable from the logs. The

@@ -8,6 +8,7 @@ registry held only `miewid-msv4_v3`, every request failed -- allowlisted
 names 500'd because they were not loaded, and the real name was rejected 400
 because it was not allowlisted.
 """
+import threading
 import pathlib
 from unittest.mock import MagicMock, patch
 
@@ -61,6 +62,8 @@ def _body(model_id, **over):
 def _miewid():
     m = MagicMock(spec=MiewidModel)
     m.model = MagicMock()
+    # Real instances get this in __init__; spec= only exposes class attrs.
+    m.inference_lock = threading.RLock()
     return m
 
 

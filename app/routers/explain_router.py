@@ -265,6 +265,17 @@ def process_asyncio_result(result):
     image, transform = result
     return image, transform
 
+def run_pairx_locked(lock, *args, **kwargs):
+    """Run PAIR-X holding `lock`, excluding other forwards on the same model.
+
+    Called through run_in_threadpool, so the lock is acquired on the worker
+    thread and never on the event loop -- blocking there would reintroduce
+    the request starvation that moving PAIR-X off the loop fixed.
+    """
+    with lock:
+        return run_pairx(*args, **kwargs)
+
+
 def run_pairx(imgs1_transformed, imgs2_transformed, imgs1, imgs2, model, layer_key, 
         k_lines, k_colors, visualization_type):
     """Run PAIR-X on provided images with given parameters.
@@ -461,8 +472,14 @@ async def read_items(
             # the 2026-08-28 Flukebook incident, where a sibling /extract/
             # fetch blew its 60s deadline on an asset that had served 200 in
             # under a second, and the next /explain/ 400'd on its own timeout.
+            # model_entry.inference_lock excludes /extract and /pipeline
+            # forwards on this same MiewID instance for the whole call: PAIR-X
+            # captures its feature map with a forward hook on a submodule of
+            # it, and any other forward through that submodule while the hook
+            # is registered overwrites the capture with a no-grad tensor.
             visualizations = await run_in_threadpool(
-                run_pairx, image1s_transformed, image2s_transformed,
+                run_pairx_locked, model_entry.inference_lock,
+                image1s_transformed, image2s_transformed,
                 image1s, image2s, model, body.layer_key,
                 body.k_lines, body.k_colors, body.visualization_type)
         else:

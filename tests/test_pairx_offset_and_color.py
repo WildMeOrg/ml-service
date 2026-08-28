@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import threading
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -45,7 +46,10 @@ def _miewid_stub():
     type rather than on a model_id string, so these tests pass an object
     that satisfies `isinstance(..., MiewidModel)`.
     """
-    return MagicMock(spec=MiewidModel)
+    m = MagicMock(spec=MiewidModel)
+    # Real instances get this in __init__; spec= only exposes class attrs.
+    m.inference_lock = threading.RLock()
+    return m
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +266,7 @@ def test_extract_embeddings_uses_canonical_chip_helper():
     # Stand up a real MiewidModel instance but stub the heavy bits.
     model = MiewidModel.__new__(MiewidModel)
     model.device = "cpu"
+    model.inference_lock = threading.RLock()   # __new__ skips __init__
 
     fake_tensor = torch.zeros(3, 4, 4)
     captured = {}
@@ -353,6 +358,7 @@ def test_extract_embeddings_handles_zero_size_bbox_with_rotation():
 
     model = MiewidModel.__new__(MiewidModel)
     model.device = "cpu"
+    model.inference_lock = threading.RLock()   # __new__ skips __init__
     captured = {}
 
     def fake_preprocess(image):
@@ -387,6 +393,7 @@ def test_extract_embeddings_no_bbox_with_theta_uses_full_frame_helper():
 
     model = MiewidModel.__new__(MiewidModel)
     model.device = "cpu"
+    model.inference_lock = threading.RLock()   # __new__ skips __init__
     captured = {}
 
     def fake_preprocess(image):
@@ -410,6 +417,7 @@ def test_extract_embeddings_no_bbox_no_theta_uses_full_image():
 
     model = MiewidModel.__new__(MiewidModel)
     model.device = "cpu"
+    model.inference_lock = threading.RLock()   # __new__ skips __init__
     captured = {}
 
     def fake_preprocess(image):
