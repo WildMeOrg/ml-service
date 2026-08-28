@@ -66,6 +66,7 @@ async def startup_event():
     The models are stored in the application state and can be accessed via request.app.state.model_handler.
     """
     image_uri.init_image_fetch()
+    explain_router.init_explain_settings()
     # Initialize model handler
     model_handler = ModelHandler()
     app.state.device = args.device

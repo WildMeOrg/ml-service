@@ -15,7 +15,7 @@ from PIL import Image
 from fastapi import APIRouter, HTTPException, Request, Depends
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pairx import explain
 
 from app.models.miewid import MiewidModel
@@ -101,6 +101,20 @@ def validate_vis_parameters(body):
     else:
         raise HTTPException(status_code=400, detail="Unsupported algorithm.")
 
+_default_model_id: Optional[str] = None
+
+
+def init_explain_settings() -> None:
+    """Snapshot env configuration at startup.
+
+    Mirrors `load_fetch_settings()` in app/utils/image_uri.py: config is
+    read once into module state at lifespan init rather than per request,
+    so every request in a process sees the same value. Idempotent.
+    """
+    global _default_model_id
+    _default_model_id = os.getenv("EXPLAIN_DEFAULT_MODEL_ID", "miewid-msv4.1")
+
+
 def default_explain_model_id() -> str:
     """Model id to use when the caller omits `model_id`.
 
@@ -111,7 +125,9 @@ def default_explain_model_id() -> str:
     construction. Env-configurable, with the historic value as the shipped
     default so existing deployments are unaffected.
     """
-    return os.getenv("EXPLAIN_DEFAULT_MODEL_ID", "miewid-msv4.1")
+    if _default_model_id is None:
+        init_explain_settings()
+    return _default_model_id
 
 
 def resolve_pairx_model(handler, model_id):
@@ -283,7 +299,7 @@ class body(BaseModel):
     image2_uris: list[str]
     bb2: list[list[float]]
     theta2: list[float] = [0.0]
-    model_id: Optional[str] = None
+    model_id: str = Field(default_factory=default_explain_model_id)
     crop_bbox: bool = False
     visualization_type: str = "only_colors"
     layer_key: str = "backbone.blocks.3"
@@ -302,8 +318,13 @@ async def read_items(
     # Resolve the model before fetching any image: a bad model id is a
     # permanent error, and downloading two images first wastes bandwidth
     # and holds an explain slot for the duration of the fetch.
-    model_id = body.model_id or default_explain_model_id()
-    model_entry = resolve_pairx_model(handler, model_id)
+    # An explicitly-sent blank is a caller error, not a request to use the
+    # deployment default: silently substituting a different model would run
+    # inference the caller never asked for. Omitted model_id never reaches
+    # here as blank -- the field default_factory has already filled it in.
+    if not body.model_id or not body.model_id.strip():
+        raise HTTPException(status_code=400, detail="model_id must not be blank.")
+    model_entry = resolve_pairx_model(handler, body.model_id)
     device = request.app.state.device
 
     image1s = []

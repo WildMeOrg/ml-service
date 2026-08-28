@@ -153,13 +153,19 @@ def test_omitted_model_id_uses_default_and_404s_when_default_not_loaded():
     pi.assert_not_called()
 
 
-def test_omitted_model_id_uses_configured_default(monkeypatch):
-    """EXPLAIN_DEFAULT_MODEL_ID lets a deployment name its own model.
+def _reinit_settings(monkeypatch, value=None):
+    """Re-snapshot the startup config the way lifespan init would."""
+    if value is None:
+        monkeypatch.delenv("EXPLAIN_DEFAULT_MODEL_ID", raising=False)
+    else:
+        monkeypatch.setenv("EXPLAIN_DEFAULT_MODEL_ID", value)
+    monkeypatch.setattr(explain_router, "_default_model_id", None)
+    explain_router.init_explain_settings()
 
-    kaiju loads `miewid-msv4_v3`, not the historic `miewid-msv4.1`, so the
-    fallback for callers that omit model_id has to be per-deployment.
-    """
-    monkeypatch.setenv("EXPLAIN_DEFAULT_MODEL_ID", "miewid-msv4_v3")
+
+def test_omitted_model_id_uses_configured_default(monkeypatch):
+    """EXPLAIN_DEFAULT_MODEL_ID lets a deployment name its own model."""
+    _reinit_settings(monkeypatch, "miewid-msv4_v3")
     client = _make_client({"miewid-msv4_v3": _miewid()})
     payload = _body("ignored")
     del payload["model_id"]
@@ -172,11 +178,8 @@ def test_omitted_model_id_uses_configured_default(monkeypatch):
 
 
 def test_explicit_model_id_overrides_configured_default(monkeypatch):
-    """An explicitly sent id always wins over the env fallback.
-
-    This is the Wildbook >= 11.0 path; the env default must not shadow it.
-    """
-    monkeypatch.setenv("EXPLAIN_DEFAULT_MODEL_ID", "miewid-msv4_v3")
+    """An explicitly sent id always wins over the configured fallback."""
+    _reinit_settings(monkeypatch, "miewid-msv4_v3")
     client = _make_client({"miewid-msv4_v3": _miewid()})
     r = client.post("/explain/", json=_body("not-loaded"))
     assert r.status_code == 404, r.text
@@ -185,5 +188,47 @@ def test_explicit_model_id_overrides_configured_default(monkeypatch):
 
 def test_default_is_historic_value_when_env_unset(monkeypatch):
     """Unset env keeps the shipped default, so existing deployments are unaffected."""
-    monkeypatch.delenv("EXPLAIN_DEFAULT_MODEL_ID", raising=False)
+    _reinit_settings(monkeypatch)
     assert explain_router.default_explain_model_id() == "miewid-msv4.1"
+
+
+def test_explicit_null_model_id_is_rejected_by_validation(monkeypatch):
+    """JSON null must stay a 422, not become "use the deployment default".
+
+    The field is `str` with a default_factory, not Optional[str]: making it
+    nullable would turn a client bug into silently running a different model.
+    """
+    _reinit_settings(monkeypatch, "miewid-msv4_v3")
+    client = _make_client({"miewid-msv4_v3": _miewid()})
+    payload = _body("ignored")
+    payload["model_id"] = None
+    r = client.post("/explain/", json=payload)
+    assert r.status_code == 422, r.text
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+def test_explicitly_blank_model_id_is_400_not_silently_defaulted(monkeypatch, blank):
+    """A blank id is a caller error, never a request for the default.
+
+    Before the configurable default existed, "" failed the allowlist with a
+    400. Substituting the deployment default would run inference the caller
+    never asked for.
+    """
+    _reinit_settings(monkeypatch, "miewid-msv4_v3")
+    client = _make_client({"miewid-msv4_v3": _miewid()})
+    with patch.object(explain_router, "process_image") as pi:
+        r = client.post("/explain/", json=_body(blank))
+    assert r.status_code == 400, r.text
+    assert "blank" in r.text.lower()
+    pi.assert_not_called()
+
+
+def test_default_is_snapshotted_at_startup_not_read_per_request(monkeypatch):
+    """Changing the env after init must not change request behaviour.
+
+    Matches load_fetch_settings() in image_uri.py: config is read once at
+    lifespan init so every request in a process sees the same value.
+    """
+    _reinit_settings(monkeypatch, "miewid-msv4_v3")
+    monkeypatch.setenv("EXPLAIN_DEFAULT_MODEL_ID", "changed-after-startup")
+    assert explain_router.default_explain_model_id() == "miewid-msv4_v3"

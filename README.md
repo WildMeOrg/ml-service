@@ -144,6 +144,24 @@ POST /explain/
 
 Generates visual explanations of what features two images share, using PAIR-X.
 
+`model_id` must name a MiewID model **loaded by this instance** — the endpoint
+validates against the live model registry, not a fixed list. An id that is not
+loaded returns `404` listing the available models; an id that is loaded but is
+not a MiewID model returns `400`. Neither is retryable, so a misconfigured id
+fails once rather than looping.
+
+If `model_id` is omitted, it falls back to `EXPLAIN_DEFAULT_MODEL_ID`
+(default: `miewid-msv4.1`), read once at startup — changing it requires a
+restart. Set this on deployments whose registry uses a different name:
+
+```bash
+EXPLAIN_DEFAULT_MODEL_ID=miewid-msv4_v3
+```
+
+Sending `model_id` explicitly is preferred; the fallback exists for callers
+that predate the field. An explicitly blank `model_id` is rejected with `400`
+rather than silently substituting the default.
+
 **Request**:
 ```json
 {
