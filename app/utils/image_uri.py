@@ -5,6 +5,7 @@ import base64
 import io
 import logging
 import os
+import re
 import stat as stat_module
 import time
 import warnings
@@ -93,6 +94,69 @@ def check_image_header(data: bytes) -> None:
             f"Image dimensions {width}x{height} exceed {max_pixels} pixel cap")
 
 
+def encode_bare_fragment(uri: str) -> str:
+    """Percent-encode a bare '#' inside a URL's PATH so it stays in the path.
+
+    '#' opens a fragment, which is client-side only and never sent to the
+    server, so a filename containing an unencoded '#' truncates the request
+    silently: Flukebook's `.../3c8f4264-.../2000_174419#R8123A.jpg` was
+    requested as `.../2000_174419` and 404'd (2026-08-28). Wildbook builds
+    these URLs without encoding the filename.
+
+    Only the path is rewritten -- never the authority, and never after a real
+    query begins:
+
+      * `https://h/dir/2000_174419#R8123A.jpg` -> path `/dir/2000_174419%23R8123A.jpg`
+      * `https://h/a#b.jpg?sig=x`              -> path `/a%23b.jpg`, query `sig=x`
+      * `https://h/img.jpg?sig=x#frag`         -> unchanged; a '#' after the
+        query is a genuine fragment and stays one
+      * `https://evil#@internal.example/a.jpg` -> unchanged. Here '#' ends the
+        authority, so there is no path to fix. A blanket replace would turn
+        this into userinfo `evil%23` on host `internal.example` -- sending a
+        caller-supplied fetch to a DIFFERENT HOST than the URL names.
+
+    Idempotent: an already-encoded '%23' contains no '#'.
+
+    Trade-off: on a path-bearing URL a genuine trailing fragment is now read
+    as part of the filename and will 404. A fragment is meaningless for a
+    binary image fetch and Wildbook has no path that appends one, so this
+    reading is right for the producers we serve. No non-heuristic rule can
+    separate the two intents; the real fix belongs where the URL is built.
+
+    '?' has the same class of problem and is deliberately NOT encoded: query
+    strings are legitimate and common (signed URLs), so blanket-encoding
+    would break them.
+
+    Contract: absolute http(s) URLs only. A scheme-relative input ('//h/a#b')
+    is returned unchanged rather than guessed at -- both call sites gate on
+    an 'http://' or 'https://' prefix, so one cannot reach here.
+    """
+    if '#' not in uri:
+        return uri
+    scheme_sep = uri.find('://')
+    if scheme_sep == -1:
+        return uri
+    authority_start = scheme_sep + 3
+    delimiter = re.search(r'[/?#]', uri[authority_start:])
+    if delimiter is None or delimiter.group() != '/':
+        # No path component: the '#' terminates the authority (or none is
+        # present). Nothing here is a filename, so leave it entirely alone.
+        return uri
+    path_start = authority_start + delimiter.start()
+    head, rest = uri[:path_start], uri[path_start:]
+    query_at = rest.find('?')
+    if query_at == -1:
+        fixed = rest.replace('#', '%23')
+    else:
+        fixed = rest[:query_at].replace('#', '%23') + rest[query_at:]
+    if fixed == rest:
+        return uri
+    encoded = head + fixed
+    logger.info("Encoded bare '#' in image URI path: %s",
+                sanitize_uri_for_logging(encoded))
+    return encoded
+
+
 async def _fetch_url_bytes(uri: str) -> bytes:
     """Stream a URL through the shared client, enforcing the byte cap."""
     max_bytes = _settings["max_image_bytes"]
@@ -127,7 +191,8 @@ async def resolve_image_uri(uri: str) -> bytes:
     elif uri.startswith(('http://', 'https://')):
         _ensure_initialized()
         return await asyncio.wait_for(
-            _fetch_url_bytes(uri), timeout=_settings["total_deadline_s"])
+            _fetch_url_bytes(encode_bare_fragment(uri)),
+            timeout=_settings["total_deadline_s"])
     else:
         _ensure_initialized()
         file_path = Path(uri)
