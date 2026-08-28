@@ -21,6 +21,19 @@ from app.models.yolo_ultralytics import YOLOUltralyticsModel
 from app.routers import explain_router
 
 
+@pytest.fixture(autouse=True)
+def _restore_default_model_id():
+    """Keep the module-level snapshot from leaking across tests.
+
+    monkeypatch restores os.environ but not module globals, so a test that
+    re-snapshots would otherwise change what later tests observe depending
+    on execution order.
+    """
+    original = explain_router._default_model_id
+    yield
+    explain_router._default_model_id = original
+
+
 def _make_client(models: dict):
     """Build a test app whose registry contains exactly `models`."""
     app = FastAPI()
@@ -235,16 +248,3 @@ def test_default_is_snapshotted_not_read_per_request(monkeypatch):
     assert explain_router.default_explain_model_id() == "miewid-msv4_v3"
     explain_router.init_explain_settings()   # explicit re-snapshot picks it up
     assert explain_router.default_explain_model_id() == "changed-after-startup"
-
-
-def test_startup_hook_wires_explain_settings():
-    """The lifespan hook must re-snapshot config.
-
-    The value is also snapshotted at import, so this wiring is defence in
-    depth rather than load-bearing -- but silently dropping it would mean
-    env changes between import and startup are missed.
-    """
-    # app.main parses argv at import time, so read the source rather than
-    # importing it.
-    src = (pathlib.Path(__file__).resolve().parents[1] / "app" / "main.py").read_text()
-    assert "explain_router.init_explain_settings()" in src

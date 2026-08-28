@@ -105,9 +105,11 @@ def _read_default_model_id() -> str:
     return os.getenv("EXPLAIN_DEFAULT_MODEL_ID", "miewid-msv4.1")
 
 
-# Snapshotted at import so there is no uninitialised state to guard against:
-# a process that never runs the startup hook still holds a correct value as
-# of process start, which is when a container's environment is fixed anyway.
+# Snapshotted at module import so there is no uninitialised state to guard
+# against: a process that never runs the startup hook still holds a correct
+# value as of import, which for a container is when the environment is fixed.
+# Setting the variable from Python *after* this module is imported requires
+# an explicit init_explain_settings() to take effect.
 _default_model_id: str = _read_default_model_id()
 
 
@@ -115,9 +117,10 @@ def init_explain_settings() -> None:
     """Re-snapshot env configuration at startup.
 
     Mirrors the config lifecycle of `load_fetch_settings()` in
-    app/utils/image_uri.py: read once, not per request, so every request in
-    a process sees the same value. Not idempotent by design -- calling it
-    again deliberately re-reads the environment.
+    app/utils/image_uri.py: config is snapshotted, never read per request,
+    so every request in a process sees the same value. Not idempotent by
+    design -- calling it again deliberately re-reads the environment,
+    which is how a caller picks up a change made after import.
     """
     global _default_model_id
     _default_model_id = _read_default_model_id()
@@ -130,8 +133,9 @@ def default_explain_model_id() -> str:
     the right default is deployment-specific: model registries drift between
     installations (one host loads `miewid-msv4_v3`, not the historic
     `miewid-msv4.1`), so a hardcoded default is wrong somewhere by
-    construction. Returns the startup snapshot; changing
-    EXPLAIN_DEFAULT_MODEL_ID requires a restart.
+    construction. Returns the current snapshot; changing
+    EXPLAIN_DEFAULT_MODEL_ID requires re-snapshotting via
+    `init_explain_settings()`, normally by restarting the process.
     """
     return _default_model_id
 
