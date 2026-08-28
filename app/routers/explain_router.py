@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import logging
+import os
 from pathlib import Path
 
 import albumentations
@@ -12,6 +13,8 @@ import torchvision.transforms as transforms
 from albumentations.pytorch import ToTensorV2
 from PIL import Image
 from fastapi import APIRouter, HTTPException, Request, Depends
+from typing import Optional
+
 from pydantic import BaseModel
 from pairx import explain
 
@@ -36,8 +39,15 @@ async def get_model_handler(request: Request) -> ModelHandler:
     return request.app.state.model_handler
 
 def preprocess(image, model):
-    """Runs preprocessing on an image based on the model to be used."""
-    if model.lower().startswith("miewid"):
+    """Runs preprocessing on an image based on the model to be used.
+
+    `model` is a resolved model instance, not a model id. Keying off the
+    instance type keeps this in step with the registry; the previous
+    `model_id.startswith("miewid")` test drifted whenever a deployment
+    registered a MiewID model under a name that did not start with
+    "miewid".
+    """
+    if isinstance(model, MiewidModel):
         # Match wbia-plugin-miew-id's training/inference transforms (and
         # MiewidModel.preprocess) so PairX visualizations operate on the
         # same tensor representation as embedding extraction. albumentations
@@ -88,11 +98,44 @@ def validate_vis_parameters(body):
             raise HTTPException(status_code=400, detail=f"K Colors must be less than 100")
         if body.visualization_type not in ["lines_and_colors", "only_lines", "only_colors"]:
             raise HTTPException(status_code=400, detail="Unsupported visualization type.")
-        possible_models = ["miewid-msv3", "miewid-msv4.1"]
-        if not body.model_id.lower() in possible_models:
-            raise HTTPException(status_code=400, detail="Unsupported model for pairx.")
     else:
         raise HTTPException(status_code=400, detail="Unsupported algorithm.")
+
+def default_explain_model_id() -> str:
+    """Model id to use when the caller omits `model_id`.
+
+    Wildbook >= 11.0 sends `model_id` explicitly. Older callers omit it, and
+    the right default is deployment-specific: model registries drift between
+    installations (kaiju loads `miewid-msv4_v3`, not the historic
+    `miewid-msv4.1`), so a hardcoded default is wrong somewhere by
+    construction. Env-configurable, with the historic value as the shipped
+    default so existing deployments are unaffected.
+    """
+    return os.getenv("EXPLAIN_DEFAULT_MODEL_ID", "miewid-msv4.1")
+
+
+def resolve_pairx_model(handler, model_id):
+    """Resolve `model_id` against the loaded registry for a pairx request.
+
+    Raises 404 when the model is not loaded (listing what is), and 400 when
+    it is loaded but is not a MiewID model. Both are permanent, caller-side
+    errors: returning them as 4xx rather than letting an AttributeError
+    become a 500 matters because Wildbook retries 5xx, so a misconfigured
+    model id would otherwise retry forever against an unresolvable error.
+    """
+    model_entry = handler.get_model(model_id)
+    if model_entry is None:
+        raise HTTPException(status_code=404, detail={
+            "error": f"Model '{model_id}' not found.",
+            "available_models": list(handler.list_models().keys()),
+        })
+    if not isinstance(model_entry, MiewidModel):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model '{model_id}' is not a MiewID model. PairX requires a MiewID model.",
+        )
+    return model_entry
+
 
 async def process_image(uri, bbox, theta, crop_bbox, model, device):
     """Reads image in from uri and generates pretransform and transform images to use for visualiztaion. 
@@ -240,7 +283,7 @@ class body(BaseModel):
     image2_uris: list[str]
     bb2: list[list[float]]
     theta2: list[float] = [0.0]
-    model_id: str = "miewid-msv4.1"
+    model_id: Optional[str] = None
     crop_bbox: bool = False
     visualization_type: str = "only_colors"
     layer_key: str = "backbone.blocks.3"
@@ -256,6 +299,11 @@ async def read_items(
     ):
 
     validate_vis_parameters(body)
+    # Resolve the model before fetching any image: a bad model id is a
+    # permanent error, and downloading two images first wastes bandwidth
+    # and holds an explain slot for the duration of the fetch.
+    model_id = body.model_id or default_explain_model_id()
+    model_entry = resolve_pairx_model(handler, model_id)
     device = request.app.state.device
 
     image1s = []
@@ -272,12 +320,12 @@ async def read_items(
     # Read in images asynchronously
     tasks = []
     for uri, bb, theta in zip(body.image1_uris, bb1s, theta1s):
-        tasks.append(process_image(uri, bb, theta, body.crop_bbox, body.model_id, device))
+        tasks.append(process_image(uri, bb, theta, body.crop_bbox, model_entry, device))
     results1 = await asyncio.gather(*tasks, return_exceptions=True)
     
     tasks = []
     for uri, bb, theta in zip(body.image2_uris, bb2s, theta2s):
-        tasks.append(process_image(uri, bb, theta, body.crop_bbox, body.model_id, device))
+        tasks.append(process_image(uri, bb, theta, body.crop_bbox, model_entry, device))
     results2 = await asyncio.gather(*tasks, return_exceptions=True)
     
 
@@ -306,7 +354,7 @@ async def read_items(
     # Only apply semaphore to the actual prediction
     async with explain_semaphore:
         if body.algorithm.lower() == "pairx":
-            model = handler.get_model(body.model_id).model
+            model = model_entry.model
             visualizations = run_pairx(image1s_transformed, image2s_transformed, image1s, image2s, model, body.layer_key, body.k_lines, body.k_colors, body.visualization_type)
         else:
             raise HTTPException(status_code=400, detail="Unsupported algorithm.")
