@@ -35,6 +35,18 @@ import pytest
 import torch
 from PIL import Image
 
+from app.models.miewid import MiewidModel
+
+
+def _miewid_stub():
+    """A stand-in for a resolved MiewID model instance.
+
+    `process_image` (via `preprocess`) now branches on the model instance
+    type rather than on a model_id string, so these tests pass an object
+    that satisfies `isinstance(..., MiewidModel)`.
+    """
+    return MagicMock(spec=MiewidModel)
+
 
 # ---------------------------------------------------------------------------
 # Bug 1: spatial offset — display image must equal chip when bbox is given
@@ -70,7 +82,7 @@ def test_process_image_returns_chip_as_display_when_bbox_provided(tmp_path):
     theta = 0.0
 
     display, tensor = asyncio.run(
-        process_image(str(img_path), bbox, theta, crop_bbox=False, model="miewid-msv4.1", device="cpu")
+        process_image(str(img_path), bbox, theta, crop_bbox=False, model=_miewid_stub(), device="cpu")
     )
 
     # Tensor should always be (1, 3, 440, 440)
@@ -101,7 +113,7 @@ def test_process_image_returns_full_image_when_no_bbox(tmp_path):
     Image.fromarray(img, mode="RGB").save(img_path)
 
     display, _ = asyncio.run(
-        process_image(str(img_path), [0, 0, 0, 0], 0.0, crop_bbox=False, model="miewid-msv4.1", device="cpu")
+        process_image(str(img_path), [0, 0, 0, 0], 0.0, crop_bbox=False, model=_miewid_stub(), device="cpu")
     )
 
     import torchvision.transforms as transforms
@@ -126,7 +138,7 @@ def test_process_image_theta_only_with_sentinel_bbox_does_not_crash(tmp_path):
 
     theta = 0.4
     display, tensor = asyncio.run(
-        process_image(str(img_path), [0, 0, 0, 0], theta, crop_bbox=False, model="miewid-msv4.1", device="cpu")
+        process_image(str(img_path), [0, 0, 0, 0], theta, crop_bbox=False, model=_miewid_stub(), device="cpu")
     )
 
     assert tensor.shape == (1, 3, 440, 440)
@@ -150,7 +162,7 @@ def test_process_image_full_frame_bbox_with_rotation_uses_rotated_chip(tmp_path)
 
     theta = 0.4
     display, _ = asyncio.run(
-        process_image(str(img_path), [0, 0, w, h], theta, crop_bbox=False, model="miewid-msv4.1", device="cpu")
+        process_image(str(img_path), [0, 0, w, h], theta, crop_bbox=False, model=_miewid_stub(), device="cpu")
     )
 
     expected_chip = get_chip_from_img(img, [0, 0, w, h], theta)
