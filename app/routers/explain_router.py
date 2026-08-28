@@ -1,12 +1,11 @@
 import asyncio
 import base64
 import logging
+import math
 import os
-from pathlib import Path
 
 import albumentations
 import cv2
-import httpx
 import numpy as np
 import torch
 import torchvision.transforms as transforms
@@ -21,6 +20,11 @@ from pairx import explain
 from app.models.miewid import MiewidModel
 from app.models.model_handler import ModelHandler
 from app.utils.helpers import get_chip_from_img
+from app.utils.image_uri import (
+    admission_slot,
+    fetch_image_for_request,
+    sanitize_uri_for_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +33,6 @@ router = APIRouter(prefix="/explain", tags=["Explain"])
 MAX_BATCH_SIZE = 16
 MAX_CONCURRENT_EXPLANATIONS = 2
 explain_semaphore = asyncio.Semaphore(MAX_CONCURRENT_EXPLANATIONS)
-
-def is_url(string):
-    """Checks if a string is formatted as a url"""
-    return string.startswith(('http://', 'https://'))
 
 async def get_model_handler(request: Request) -> ModelHandler:
     """Dependency to get the model handler from the app state."""
@@ -82,8 +82,17 @@ def validate_img_parameters(bbox, theta):
     if len(bbox) != 4:
         raise HTTPException(status_code=400, detail=f"Each bounding box should have 4 values")
     for x in bbox:
+        # NaN must be rejected explicitly: json.loads accepts a bare NaN,
+        # Pydantic keeps it as a float, and every `x < 0` comparison against
+        # it is False -- so it reaches int() in get_chip_from_img and raises.
+        # That is a permanent caller error, and as a 500 Wildbook would retry
+        # it forever.
+        if not math.isfinite(x):
+            raise HTTPException(status_code=400, detail="Bounding box values must be finite")
         if x < 0:
             raise HTTPException(status_code=400, detail="Bounding box values should be positive")
+    if not math.isfinite(theta):
+        raise HTTPException(status_code=400, detail="Theta must be finite")
 
 def validate_vis_parameters(body):
     """Checks if body parameters related to a specific visualization algorithm are valid."""
@@ -168,22 +177,35 @@ async def process_image(uri, bbox, theta, crop_bbox, model, device):
     If crop_bbox is true, the preptransform image will be cropped. The transformed image will always be cropped.
     The transformed image will be stored on the device provided, ("cpu", "cuda", etc.)"""
     uri = uri.strip()
-    try:
-        if is_url(uri):
-            async with httpx.AsyncClient() as client:
-                response = await client.get(uri)
-            if response.status_code != 200:
-                raise HTTPException(status_code=400, detail=f"Failed to download image: {response.status_code}")
-            image_bytes = np.frombuffer(response.content, np.uint8)
-            image = cv2.imdecode(image_bytes, cv2.IMREAD_COLOR)
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        else:
-            path = str(Path(uri).expanduser().resolve())
-            image = cv2.imread(path)
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error loading image: {str(e)}")
+    # The shared fetch path (URL, data URI, or local path) with explicit
+    # timeouts, a byte/pixel cap, and retry-ladder-correct statuses: 504 for a
+    # slow upstream, 502 for an upstream fault, 400 only for a genuine caller
+    # error. The inline httpx.AsyncClient() this replaces used httpx's 5s
+    # default and a bare `except Exception` that reported every one of those as
+    # 400 -- which Wildbook does not retry.
+    #
+    # One admission slot per image, not per request: /explain fans out to 2N
+    # images through asyncio.gather, and the shared client is built with
+    # pool=None on the explicit promise that the admission semaphore is what
+    # holds concurrent requests down to max_connections.
+    async with admission_slot():
+        image_bytes = await fetch_image_for_request(uri)
 
+    image = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        # check_image_header() already accepted the header, so this is a body
+        # PIL can parse and OpenCV cannot. Guard it: cv2.cvtColor(None, ...)
+        # raises '(-215:Assertion failed) !_src.empty()', which used to reach
+        # the caller as the entire error detail.
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not decode image: {sanitize_uri_for_response(uri)}")
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+    # Retained deliberately. read_items() validates every bbox/theta before it
+    # fetches anything, so this is redundant on that path -- but it keeps
+    # process_image() correct on its own terms rather than relying on its one
+    # caller having checked first.
     validate_img_parameters(bbox, theta)
 
     # extend_bb_list pads missing bboxes with [0, 0, 0, 0]. When the
@@ -214,12 +236,25 @@ async def process_image(uri, bbox, theta, crop_bbox, model, device):
     return image, transformed_image.to(device)
 
 def process_asyncio_result(result):
-    """Processes a result of process_image() when it is run via asyncio."""
+    """Processes a result of process_image() when it is run via asyncio.
+
+    An HTTPException passes through untouched. process_image has already
+    mapped the failure to the right status, and re-wrapping it as 400 here
+    undid that for every image: a 504 from a stalled Wildbook reached the
+    caller as a permanent client error it would never retry.
+
+    Anything else escaping process_image is a fault in this service, not in
+    the request, so it is a 500 -- and its message stays in the log rather
+    than in the response body.
+    """
+    if isinstance(result, HTTPException):
+        raise result
     if isinstance(result, Exception):
-        raise HTTPException(status_code=400, detail=f"{str(result)}")
-    else:
-        image, transform = result
-        return image, transform
+        logger.error("Unhandled error preparing an explain image",
+                     exc_info=result)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+    image, transform = result
+    return image, transform
 
 def run_pairx(imgs1_transformed, imgs2_transformed, imgs1, imgs2, model, layer_key, 
         k_lines, k_colors, visualization_type):
@@ -348,6 +383,25 @@ async def read_items(
     theta1s = extend_theta_list(body.image1_uris, body.theta1)
     theta2s = extend_theta_list(body.image2_uris, body.theta2)
 
+    # Check the pairing and the crop parameters BEFORE fetching anything.
+    # These are permanent caller errors, and every image fetched takes a slot
+    # from the process-wide admission gate that /extract, /predict, /classify
+    # and /pipeline are also queueing on -- so a request already known to be
+    # invalid must not consume any. Same reasoning as resolving the model
+    # first, one step up.
+    if len(body.image1_uris) != 1:
+        if len(body.image1_uris) != len(body.image2_uris):
+            raise HTTPException(status_code=400, detail="Either provide only one image 1 or the same number of image1s and image2s.")
+        if len(body.image1_uris) > MAX_BATCH_SIZE:
+            raise HTTPException(status_code=400, detail=f"Batch exceeded max size of {str(MAX_BATCH_SIZE)}")
+    # Zip against the URI lists so validation covers exactly the images the
+    # fetch loops below will process -- no more (a caller's unused surplus
+    # bbox should not fail the request) and no fewer.
+    for _, bb, theta in zip(body.image1_uris, bb1s, theta1s):
+        validate_img_parameters(bb, theta)
+    for _, bb, theta in zip(body.image2_uris, bb2s, theta2s):
+        validate_img_parameters(bb, theta)
+
     # Read in images asynchronously
     tasks = []
     for uri, bb, theta in zip(body.image1_uris, bb1s, theta1s):
@@ -369,18 +423,14 @@ async def read_items(
             image2s.append(image2)
             image2s_transformed.append(image2_transformed)
     else:
-        if len(body.image1_uris) != len(body.image2_uris):
-            raise HTTPException(status_code=400, detail="Either provide only one image 1 or the same number of image1s and image2s.")
-        else:
-            if len(body.image1_uris) > MAX_BATCH_SIZE:
-                raise HTTPException(status_code=400, detail=f"Batch exceeded max size of {str(MAX_BATCH_SIZE)}")
-            for i in range(len(body.image1_uris)):
-                image1, image1_transformed = process_asyncio_result(results1[i])
-                image1s.append(image1)
-                image1s_transformed.append(image1_transformed)
-                image2, image2_transformed = process_asyncio_result(results2[i])
-                image2s.append(image2)
-                image2s_transformed.append(image2_transformed)
+        # Pairing and batch size were validated before the fetch above.
+        for i in range(len(body.image1_uris)):
+            image1, image1_transformed = process_asyncio_result(results1[i])
+            image1s.append(image1)
+            image1s_transformed.append(image1_transformed)
+            image2, image2_transformed = process_asyncio_result(results2[i])
+            image2s.append(image2)
+            image2s_transformed.append(image2_transformed)
 
     # Only apply semaphore to the actual prediction
     async with explain_semaphore:
