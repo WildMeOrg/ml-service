@@ -1,3 +1,13 @@
+## [Unreleased]
+
+- Image-fetch resilience (design: docs/plans/2026-08-14-image-fetch-resilience-design.md):
+  image downloads now use a shared client with explicit timeouts and a 60s total
+  deadline, run outside the inference semaphores behind a bounded admission gate,
+  stream with a 50 MB cap and 150 MP header check, and map failures to
+  retry-ladder-correct statuses (504/502 retryable, 400 permanent, 503 saturated,
+  413 oversized body). Fixes the GiraffeSpotter timeout→500 retry storm
+  (2026-08-14) and removes slow-Wildbook head-of-line blocking.
+
 ## v1.0.0 — Wildbook ML Service GA
 
 First stable release of the Wildbook ML Service, a FastAPI replacement for the

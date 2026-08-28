@@ -17,6 +17,17 @@ services:
       - ultralytics_config:/root/.config/Ultralytics
     environment:
       - PYTHONPATH=/app
+    # Image-fetch resilience knobs (defaults in code; override via environment:)
+    #   IMAGE_FETCH_CONNECT_TIMEOUT_S=10  IMAGE_FETCH_READ_TIMEOUT_S=30
+    #   IMAGE_FETCH_TOTAL_DEADLINE_S=60   IMAGE_ADMISSION_LIMIT=8
+    #   IMAGE_ADMISSION_WAIT_S=20         IMAGE_FETCH_MAX_BYTES=52428800
+    #   IMAGE_MAX_PIXELS=150000000        MAX_REQUEST_BODY_BYTES=4194304
+    #   OPENCV_IO_MAX_IMAGE_PIXELS  (cv2 decode backstop; cv2 default ~1GP)
+    # Data-URI installs: MAX_REQUEST_BODY_BYTES must cover base64 inflation
+    #   (~4/3x: a 50MB image needs ~67MB body cap).
+    # Raise MAX_REQUEST_BODY_BYTES only for installations POSTing data URIs.
+    # Recommended nginx back-stop in front of this service: client_max_body_size.
+    # --limit-concurrency 32 (in-code default) 503s excess connections per worker.
     command: python3 -m app.main --host 0.0.0.0 --port 6050 --device ${DEVICE:-cuda} --workers ${WORKERS:-4}
     deploy:
       resources:
