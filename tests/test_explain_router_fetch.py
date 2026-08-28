@@ -13,6 +13,8 @@ second moments earlier -- the fetch was not slow, it was starved of event-loop
 time by PairX running synchronously in the handler.
 """
 import json
+import threading
+import time
 
 import cv2
 import httpx
@@ -121,6 +123,73 @@ def test_fetch_failure_does_not_consume_an_inference_slot(monkeypatch):
     r = _client(responder).post("/explain/", json=BODY)
     assert r.status_code == 504, r.text
     assert SpySemaphore.acquired is False
+
+
+def test_a_running_explain_does_not_starve_concurrent_requests():
+    """The incident, end to end: a slow PairX must not stall the event loop.
+
+    Timestamps are absolute and recorded inside the handlers. Measuring
+    latency from the caller cannot detect this: if the loop is blocked, the
+    caller's own await does not resume until the block ends, so it reports
+    zero latency after the fact. Verified to discriminate -- with PairX
+    called inline this probe is served 1002 ms after PairX begins (the full
+    blocking call), versus 241 ms offloaded (the 250 ms we wait before
+    probing).
+    """
+    import asyncio
+
+    pairx_seconds = 1.0
+    started = threading.Event()
+    marks = {}
+
+    image_uri.init_image_fetch(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, content=_png_bytes())))
+
+    app = FastAPI()
+    app.include_router(explain_router.router)
+
+    @app.get("/probe")
+    async def probe():
+        marks["probe_served"] = time.monotonic()
+        return {"ok": True}
+
+    handler = MagicMock()
+    handler.get_model.side_effect = lambda mid: {"miewid-msv4.1": _miewid()}.get(mid)
+    handler.list_models.return_value = {"miewid-msv4.1": {}}
+    app.state.model_handler = handler
+    app.state.device = "cpu"
+
+    def slow_pairx(*a, **k):
+        marks["pairx_started"] = time.monotonic()
+        started.set()
+        time.sleep(pairx_seconds)
+        return [np.zeros((4, 4, 3), np.uint8)]
+
+    async def scenario():
+        async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            task = asyncio.create_task(c.post("/explain/", json=BODY))
+            # Synchronize on PairX having actually begun. A fixed sleep can
+            # elapse before the request reaches PairX on a cold run, which
+            # would serve /probe first and make the comparison below
+            # trivially -- and silently -- true.
+            deadline = time.monotonic() + 10
+            while not started.is_set() and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            probe_response = await c.get("/probe")
+            return await task, probe_response
+
+    with patch.object(explain_router, "run_pairx", slow_pairx):
+        explain_response, probe_response = asyncio.run(scenario())
+
+    assert explain_response.status_code == 200, explain_response.text
+    assert probe_response.status_code == 200
+    assert started.is_set(), "PairX never ran; the test proved nothing"
+    waited = marks["probe_served"] - marks["pairx_started"]
+    assert waited >= 0, "probe was served before PairX began"
+    assert waited < pairx_seconds * 0.9, (
+        f"probe was served {waited:.2f}s after PairX began; the event loop "
+        f"was starved for the duration of the inference")
 
 
 def _counting(responder):

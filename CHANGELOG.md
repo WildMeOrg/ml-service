@@ -18,6 +18,16 @@
   on. Non-finite bbox values and thetas are now rejected explicitly: a bare
   `NaN` survives `json.loads` and every `x < 0` test, then broke `int()` deep
   in cropping.
+- PairX inference moved off the event loop (`run_in_threadpool`). Running the
+  synchronous torch forward+backward inline pinned the loop for its whole
+  duration and starved every concurrent image fetch on that worker -- the
+  Flukebook incident of 2026-08-28, where a sibling `/extract/` fetch blew its
+  60s deadline on an asset that had served 200 in under a second. Because that
+  offload makes two explains genuinely parallel against one shared model,
+  `MAX_CONCURRENT_EXPLANATIONS` drops 2 -> 1 to keep PAIR-X's backward pass and
+  `zero_grad()` from racing; inline execution already serialized them, so
+  observed concurrency is unchanged.
+
 - Image-fetch resilience (design: docs/plans/2026-08-14-image-fetch-resilience-design.md):
   image downloads now use a shared client with explicit timeouts and a 60s total
   deadline, run outside the inference semaphores behind a bounded admission gate,

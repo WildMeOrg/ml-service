@@ -12,6 +12,7 @@ import torchvision.transforms as transforms
 from albumentations.pytorch import ToTensorV2
 from PIL import Image
 from fastapi import APIRouter, HTTPException, Request, Depends
+from fastapi.concurrency import run_in_threadpool
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -31,7 +32,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/explain", tags=["Explain"])
 
 MAX_BATCH_SIZE = 16
-MAX_CONCURRENT_EXPLANATIONS = 2
+# 1, not 2. PairX now runs in a worker thread, so a semaphore of 2 would make
+# two explains genuinely concurrent against a single shared model instance --
+# and PAIR-X backpropagates, so they would race on .grad and on the
+# zero_grad(set_to_none=True) in run_pairx's finally. While run_pairx ran
+# inline on the event loop the second holder could never be scheduled, so 2
+# was already 1 in practice; this makes that explicit rather than newly
+# serial. Matches the phase-0 finding that serializing CUDA work beat
+# overlapping it on every axis (throughput, p95, p99).
+MAX_CONCURRENT_EXPLANATIONS = 1
 explain_semaphore = asyncio.Semaphore(MAX_CONCURRENT_EXPLANATIONS)
 
 async def get_model_handler(request: Request) -> ModelHandler:
@@ -436,7 +445,16 @@ async def read_items(
     async with explain_semaphore:
         if body.algorithm.lower() == "pairx":
             model = model_entry.model
-            visualizations = run_pairx(image1s_transformed, image2s_transformed, image1s, image2s, model, body.layer_key, body.k_lines, body.k_colors, body.visualization_type)
+            # PairX is a synchronous torch forward+backward. Run inline it
+            # pinned the event loop for its whole duration, so every image
+            # fetch in flight on this worker was starved until it returned --
+            # the 2026-08-28 Flukebook incident, where a sibling /extract/
+            # fetch blew its 60s deadline on an asset that had served 200 in
+            # under a second, and the next /explain/ 400'd on its own timeout.
+            visualizations = await run_in_threadpool(
+                run_pairx, image1s_transformed, image2s_transformed,
+                image1s, image2s, model, body.layer_key,
+                body.k_lines, body.k_colors, body.visualization_type)
         else:
             raise HTTPException(status_code=400, detail="Unsupported algorithm.")
     
