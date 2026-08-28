@@ -8,6 +8,7 @@ registry held only `miewid-msv4_v3`, every request failed -- allowlisted
 names 500'd because they were not loaded, and the real name was rejected 400
 because it was not allowlisted.
 """
+import pathlib
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -159,7 +160,6 @@ def _reinit_settings(monkeypatch, value=None):
         monkeypatch.delenv("EXPLAIN_DEFAULT_MODEL_ID", raising=False)
     else:
         monkeypatch.setenv("EXPLAIN_DEFAULT_MODEL_ID", value)
-    monkeypatch.setattr(explain_router, "_default_model_id", None)
     explain_router.init_explain_settings()
 
 
@@ -223,12 +223,28 @@ def test_explicitly_blank_model_id_is_400_not_silently_defaulted(monkeypatch, bl
     pi.assert_not_called()
 
 
-def test_default_is_snapshotted_at_startup_not_read_per_request(monkeypatch):
-    """Changing the env after init must not change request behaviour.
+def test_default_is_snapshotted_not_read_per_request(monkeypatch):
+    """Changing the env after the snapshot must not change behaviour.
 
-    Matches load_fetch_settings() in image_uri.py: config is read once at
-    lifespan init so every request in a process sees the same value.
+    Matches load_fetch_settings() in image_uri.py: config is read once so
+    every request in a process sees the same value. Catches a regression to
+    a per-request os.getenv.
     """
     _reinit_settings(monkeypatch, "miewid-msv4_v3")
     monkeypatch.setenv("EXPLAIN_DEFAULT_MODEL_ID", "changed-after-startup")
     assert explain_router.default_explain_model_id() == "miewid-msv4_v3"
+    explain_router.init_explain_settings()   # explicit re-snapshot picks it up
+    assert explain_router.default_explain_model_id() == "changed-after-startup"
+
+
+def test_startup_hook_wires_explain_settings():
+    """The lifespan hook must re-snapshot config.
+
+    The value is also snapshotted at import, so this wiring is defence in
+    depth rather than load-bearing -- but silently dropping it would mean
+    env changes between import and startup are missed.
+    """
+    # app.main parses argv at import time, so read the source rather than
+    # importing it.
+    src = (pathlib.Path(__file__).resolve().parents[1] / "app" / "main.py").read_text()
+    assert "explain_router.init_explain_settings()" in src

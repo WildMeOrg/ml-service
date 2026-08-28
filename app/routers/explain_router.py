@@ -101,32 +101,38 @@ def validate_vis_parameters(body):
     else:
         raise HTTPException(status_code=400, detail="Unsupported algorithm.")
 
-_default_model_id: Optional[str] = None
+def _read_default_model_id() -> str:
+    return os.getenv("EXPLAIN_DEFAULT_MODEL_ID", "miewid-msv4.1")
+
+
+# Snapshotted at import so there is no uninitialised state to guard against:
+# a process that never runs the startup hook still holds a correct value as
+# of process start, which is when a container's environment is fixed anyway.
+_default_model_id: str = _read_default_model_id()
 
 
 def init_explain_settings() -> None:
-    """Snapshot env configuration at startup.
+    """Re-snapshot env configuration at startup.
 
-    Mirrors `load_fetch_settings()` in app/utils/image_uri.py: config is
-    read once into module state at lifespan init rather than per request,
-    so every request in a process sees the same value. Idempotent.
+    Mirrors the config lifecycle of `load_fetch_settings()` in
+    app/utils/image_uri.py: read once, not per request, so every request in
+    a process sees the same value. Not idempotent by design -- calling it
+    again deliberately re-reads the environment.
     """
     global _default_model_id
-    _default_model_id = os.getenv("EXPLAIN_DEFAULT_MODEL_ID", "miewid-msv4.1")
+    _default_model_id = _read_default_model_id()
 
 
 def default_explain_model_id() -> str:
-    """Model id to use when the caller omits `model_id`.
+    """Model id used when the caller omits `model_id`.
 
     Wildbook >= 11.0 sends `model_id` explicitly. Older callers omit it, and
     the right default is deployment-specific: model registries drift between
-    installations (kaiju loads `miewid-msv4_v3`, not the historic
+    installations (one host loads `miewid-msv4_v3`, not the historic
     `miewid-msv4.1`), so a hardcoded default is wrong somewhere by
-    construction. Env-configurable, with the historic value as the shipped
-    default so existing deployments are unaffected.
+    construction. Returns the startup snapshot; changing
+    EXPLAIN_DEFAULT_MODEL_ID requires a restart.
     """
-    if _default_model_id is None:
-        init_explain_settings()
     return _default_model_id
 
 
