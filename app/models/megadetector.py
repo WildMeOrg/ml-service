@@ -9,6 +9,7 @@ from PIL import Image
 
 from PytorchWildlife.models import detection as pw_detection
 from .base_model import BaseModel
+from ..utils.checkpoint_utils import get_checkpoint_path
 
 logger = logging.getLogger(__name__)
 
@@ -55,18 +56,27 @@ class MegaDetectorModel(BaseModel):
             device: Device to load the model on (e.g., 'cpu', 'cuda', 'mps')
             **kwargs: Additional parameters including:
                 - model_id: The model variant (e.g., 'MDV6-yolov10-e')
+                - checkpoint_path: Optional explicit weight file (local path
+                  or URL, resolved like every other model type). Absent ->
+                  PytorchWildlife downloads its pinned weights itself.
                 - conf: Default confidence threshold
         """
         # Use model_id from kwargs as the version
         model_id = kwargs.get('model_id')
         if not model_id:
             raise ValueError("Model ID must be provided in the model configuration")
-        
+
+        # Resolve an explicit weight through the shared resolver so
+        # MODEL_BASE-style configs can pin/serve this model like the others,
+        # instead of always downloading from PytorchWildlife's zenodo URL.
+        local_weights = get_checkpoint_path(kwargs.get('checkpoint_path'))
+
         logger.info(f"Loading MegaDetector model {model_id} on device {device}")
-        
+
         # Load the model using model_id as version
         try:
             self.model = pw_detection.MegaDetectorV6(
+                weights=local_weights,
                 version=model_id,
                 device=device,
                 pretrained=True
