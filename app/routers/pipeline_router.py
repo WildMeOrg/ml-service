@@ -66,9 +66,12 @@ async def run_pipeline(
             # classifier to decide, and Wildbook omits the field entirely for
             # such an IA.json entry -- requiring it 422s a valid caller before
             # any work is done. Only resolve the slot when one was asked for;
-            # a named-but-unknown classifier is still a 404 below.
+            # a named-but-unknown classifier is still a 404 below. The test
+            # is `is not None`, not truthiness: an explicitly-sent blank is a
+            # caller error (a mis-edited config), not a request to skip
+            # classification, and must not silently disable the step.
             classify_model = None
-            if pipeline_request.classify_model_id:
+            if pipeline_request.classify_model_id is not None:
                 classify_model = handler.get_model(pipeline_request.classify_model_id)
             
             available_models = list(handler.list_models().keys())
@@ -82,7 +85,7 @@ async def run_pipeline(
                     }
                 )
             
-            if pipeline_request.classify_model_id and not classify_model:
+            if pipeline_request.classify_model_id is not None and not classify_model:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail={

@@ -163,3 +163,58 @@ def test_pipeline_unknown_classify_model_id_still_404s():
     })
 
     assert resp.status_code == 404, resp.text
+
+
+def test_pipeline_blank_classify_model_id_is_a_caller_error():
+    """An explicitly-sent blank is a mis-edited config, not "skip classify".
+
+    Silently disabling the step would leave an operator who typo'd
+    `"classify_model_id": ""` with unclassified annotations and no error.
+    """
+    client = _make_client(_detector(), _extractor())
+
+    resp = client.post("/pipeline/", json={
+        "predict_model_id": "p",
+        "classify_model_id": "",
+        "extract_model_id": "e",
+        "image_uri": VALID_PNG_DATA_URI,
+    })
+
+    assert resp.status_code == 404, resp.text
+
+
+def test_pipeline_without_classifier_still_uses_the_theta_regressor():
+    """The theta path must survive the classifier going away.
+
+    A wbia-orientation model runs BEFORE the gather (theta has to precede
+    the crop), so it is the one orientation kind that never enters
+    task_names. Its theta and effective_bbox must still reach extraction
+    and the emitted result.
+    """
+    from app.models.wbia_orientation import WbiaOrientationModel
+
+    om = MagicMock(spec=WbiaOrientationModel)
+    om.predict_batch.return_value = [{
+        "model_id": "o", "theta": 1.25, "coords_normalized": [0.5] * 5,
+        "effective_bbox": [12, 22, 96, 116],
+    }]
+    em = _extractor()
+    client = _make_client(_detector(), em, orientation_model=om)
+
+    resp = client.post("/pipeline/", json={
+        "predict_model_id": "p",
+        "extract_model_id": "e",
+        "orientation_model_id": "o",
+        "image_uri": VALID_PNG_DATA_URI,
+    })
+
+    assert resp.status_code == 200, resp.text
+    r = resp.json()["results"][0]
+    assert r["theta"] == 1.25
+    assert r["theta_source"] == "orientation"
+    assert r["bbox"] == [12, 22, 96, 116]
+    assert r["classification"] is None
+    # the crop MiewID embedded is the one orientation actually rotated
+    _, kwargs = em.extract_embeddings.call_args
+    assert kwargs["bbox"] == (12, 22, 96, 116)
+    assert kwargs["theta"] == 1.25
