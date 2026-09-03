@@ -25,7 +25,7 @@ pipeline_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PIPELINES)
 class PipelineRequest(BaseModel):
     """Request model for pipeline endpoint."""
     predict_model_id: str = Field(..., description="ID of the model to use for prediction (bbox detection)")
-    classify_model_id: str = Field(..., description="ID of the classification model (EfficientNet or DenseNet-classifier)")
+    classify_model_id: Optional[str] = Field(None, description="ID of the classification model (EfficientNet or DenseNet-classifier). Optional: single-species configs with no labeler omit it")
     extract_model_id: str = Field(..., description="ID of the MiewID model to use for embeddings extraction")
     orientation_model_id: Optional[str] = Field(None, description="ID of the DenseNet orientation model (optional)")
     image_uri: str = Field(..., description="URI of the image to process (URL or file path)")
@@ -60,8 +60,19 @@ async def run_pipeline(
         try:
             # Validate all models exist and are of correct types
             predict_model = handler.get_model(pipeline_request.predict_model_id)
-            classify_model = handler.get_model(pipeline_request.classify_model_id)
             extract_model = handler.get_model(pipeline_request.extract_model_id)
+            # The classify slot is optional. A single-species deployment (a
+            # dedicated detector plus MiewID, no labeler) has nothing for a
+            # classifier to decide, and Wildbook omits the field entirely for
+            # such an IA.json entry -- requiring it 422s a valid caller before
+            # any work is done. Only resolve the slot when one was asked for;
+            # a named-but-unknown classifier is still a 404 below. The test
+            # is `is not None`, not truthiness: an explicitly-sent blank is a
+            # caller error (a mis-edited config), not a request to skip
+            # classification, and must not silently disable the step.
+            classify_model = None
+            if pipeline_request.classify_model_id is not None:
+                classify_model = handler.get_model(pipeline_request.classify_model_id)
             
             available_models = list(handler.list_models().keys())
             
@@ -74,7 +85,7 @@ async def run_pipeline(
                     }
                 )
             
-            if not classify_model:
+            if pipeline_request.classify_model_id is not None and not classify_model:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail={
@@ -93,8 +104,9 @@ async def run_pipeline(
                 )
             
             # Validate model types
-            if not isinstance(classify_model, (EfficientNetModel, DenseNetClassifierModel,
-                                              DenseNetWildDogCascadeModel)):
+            if classify_model is not None and not isinstance(
+                    classify_model, (EfficientNetModel, DenseNetClassifierModel,
+                                     DenseNetWildDogCascadeModel)):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Model '{pipeline_request.classify_model_id}' must be "
@@ -311,14 +323,15 @@ async def run_pipeline(
                     tasks = []
                     task_names = []
 
-                    classify_task = run_in_threadpool(
-                        classify_model.predict,
-                        image_bytes=image_bytes,
-                        bbox=bbox_list,
-                        theta=theta
-                    )
-                    tasks.append(classify_task)
-                    task_names.append('classify')
+                    if classify_model is not None:
+                        classify_task = run_in_threadpool(
+                            classify_model.predict,
+                            image_bytes=image_bytes,
+                            bbox=bbox_list,
+                            theta=theta
+                        )
+                        tasks.append(classify_task)
+                        task_names.append('classify')
 
                     extract_task = run_in_threadpool(
                         extract_model.extract_embeddings,
@@ -341,10 +354,15 @@ async def run_pipeline(
 
                     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                    # Unpack results, handling per-task failures
-                    classify_result = results[0]
-                    embeddings = results[1]
-                    orientation_result = results[2] if len(results) > 2 else None
+                    # Unpack results, handling per-task failures. Key off
+                    # task_names, never a fixed index: the classify task is
+                    # conditional, so a positional read would hand the
+                    # extractor's embedding to the classify slot whenever a
+                    # request omits classify_model_id.
+                    by_name = dict(zip(task_names, results))
+                    classify_result = by_name.get('classify')
+                    embeddings = by_name['extract']
+                    orientation_result = by_name.get('orientation')
 
                     if isinstance(classify_result, Exception):
                         logger.warning(f"Classification failed for bbox {i}: {classify_result}")
@@ -461,7 +479,8 @@ async def run_pipeline(
                     'image_uri': sanitize_uri_for_response(pipeline_request.image_uri),
                     'models_used': {
                         'predict_model_id': pipeline_request.predict_model_id,
-                        'classify_model_id': pipeline_request.classify_model_id,
+                        **(({'classify_model_id': pipeline_request.classify_model_id}
+                            ) if pipeline_request.classify_model_id else {}),
                         'extract_model_id': pipeline_request.extract_model_id,
                         **(({'orientation_model_id': pipeline_request.orientation_model_id}
                             ) if pipeline_request.orientation_model_id else {})
