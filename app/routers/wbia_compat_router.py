@@ -20,6 +20,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 import httpx
+
+from app.utils.image_uri import encode_bare_fragment
 import numpy as np
 from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel
@@ -423,7 +425,9 @@ def _load_image(image_uri: str) -> Optional[bytes]:
     """Load image bytes from a URI (URL or local file path)."""
     try:
         if image_uri.startswith(("http://", "https://")):
-            resp = httpx.get(image_uri, timeout=30)
+            # A bare '#' in a filename would otherwise truncate the request
+            # at the fragment delimiter; see encode_bare_fragment.
+            resp = httpx.get(encode_bare_fragment(image_uri), timeout=30)
             resp.raise_for_status()
             return resp.content
         else:

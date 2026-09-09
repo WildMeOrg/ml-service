@@ -1,5 +1,19 @@
 ## [Unreleased]
 
+- Image URIs containing a bare `#` now resolve. `#` opens a URL fragment,
+  which is never sent to the server, so a filename like
+  `2000_174419#R8123A.jpg` was requested as `2000_174419` and 404'd -- which
+  the fetch path correctly, but unhelpfully, reported as a permanent 400.
+  `#` is now percent-encoded in the PATH of http(s) URIs, in both the shared
+  fetch path and `/wbia-compat`'s own loader. Only the path: never the
+  authority (a blanket replace turns `https://evil#@internal.example/a.jpg`
+  into a fetch against `internal.example`, retargeting a caller-supplied
+  request to a host the URL never named) and never after a real query, so a
+  genuine `?sig=x#frag` fragment still drops. Idempotent; `data:` URIs and
+  local paths never reach the normalizer. Trade-off: on a path-bearing URL a
+  genuine trailing fragment is now read as part of the filename and 404s. `?`
+  is deliberately not encoded -- query strings are legitimate.
+
 - Fixed `/explain/` 500s caused by a concurrent forward hijacking PairX's
   feature-map capture. PAIR-X registers a `register_forward_hook` on a
   submodule of the *shared* MiewID instance (pairx/core.py:23-43); that hook
