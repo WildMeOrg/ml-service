@@ -116,26 +116,42 @@ def check_image_header(data: bytes) -> None:
         # generic "cannot identify image file".
         if _looks_like_video(data):
             raise ImageDecodeError(_VIDEO_DETAIL)
-        raise ImageDecodeError(f"Unrecognized image format: {e}")
+        raise ImageDecodeError(f"Unrecognized image format: {_describe(e)}")
     if width * height > max_pixels:
         raise ImageTooLargeError(
             f"Image dimensions {width}x{height} exceed {max_pixels} pixel cap")
 
 
+# ISO BMFF major brands that identify a video/movie container. The check is
+# affirmative on purpose: the same container family carries still images
+# (AVIF, HEIC/HEIF, CR3), and new image brands keep being registered, so an
+# unknown brand must get the generic cannot-decode message, never "video".
+_VIDEO_BRANDS = frozenset({
+    b'isom', b'iso2', b'iso3', b'iso4', b'iso5', b'iso6', b'iso7', b'iso8',
+    b'iso9', b'mp41', b'mp42', b'mp71', b'avc1', b'qt  ', b'M4V ', b'M4VH',
+    b'M4VP', b'3gp4', b'3gp5', b'3gp6', b'3gp7', b'3gp8', b'3gp9', b'3g2a',
+    b'3g2b', b'3g2c', b'mmp4', b'dash', b'f4v ', b'F4V ', b'MSNV', b'XAVC',
+})
+
+
 def _looks_like_video(data: bytes) -> bool:
-    """Heuristically detect common video container signatures."""
+    """Detect common video container signatures (mp4/mov/3gp, WebM/MKV, AVI)."""
     if len(data) >= 12 and data[4:8] == b'ftyp':
-        # ISO BMFF covers video (mp4, mov, 3gp, m4v) but also still-image
-        # brands (AVIF, HEIC, CR3). Only claim "video" when the major brand
-        # is not a known still-image one, so an undecodable AVIF/HEIC gets
-        # the generic cannot-decode message instead of a misleading one.
-        still_image_brands = {b'avif', b'avis', b'heic', b'heix', b'mif1', b'msf1', b'crx '}
-        return data[8:12] not in still_image_brands
+        return data[8:12] in _VIDEO_BRANDS
     if data.startswith(b'\x1a\x45\xdf\xa3'):
         return True  # Matroska / WebM (EBML)
     if data.startswith(b'RIFF') and data[8:12] == b'AVI ':
         return True  # AVI
     return False
+
+
+def _describe(exc: Exception) -> str:
+    """Caller-safe rendering of a PIL open/load failure. UnidentifiedImageError's
+    text is 'cannot identify image file <_io.BytesIO object at 0x...>' -- an
+    object address, not a diagnosis -- so it gets a fixed phrase."""
+    if isinstance(exc, UnidentifiedImageError):
+        return "not a recognized image format"
+    return f"{type(exc).__name__}: {exc}"
 
 
 def validate_decodable(image_bytes: bytes) -> None:
@@ -160,26 +176,42 @@ def validate_decodable(image_bytes: bytes) -> None:
           explicitly or it would escape to the routers' generic 500 handler.
           Like the others it is a permanent, non-retryable bad input.
 
+    Deliberately NOT caught: Pillow's codec "out of memory error" (an OSError)
+    and cv2.error from an OpenCV allocation failure. Those are server-side
+    resource failures and must stay retryable 5xx.
+
     Raises:
         ImageDecodeError (a ValueError): if the bytes cannot be decoded.
     """
     try:
-        img = Image.open(io.BytesIO(image_bytes))
-        img.load()
+        # The context manager destroys the decoded core on exit, so the PIL
+        # pixel buffer is gone before cv2 allocates its own below; the two
+        # decoded copies never coexist.
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            img.load()
+            fmt = img.format or "unknown"
     except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as e:
+        if "out of memory" in str(e):
+            # Pillow reports a codec allocation failure as OSError(-9,
+            # "out of memory error"). That is the server's problem, not the
+            # image's: let it escape as a 500 so the caller retries.
+            raise
         if _looks_like_video(image_bytes):
             raise ImageDecodeError(_VIDEO_DETAIL)
-        raise ImageDecodeError(f"unprocessable image: cannot decode ({e})")
+        raise ImageDecodeError(f"unprocessable image: cannot decode ({_describe(e)})")
 
     # Pillow decoding alone is not enough: several models (EfficientNet,
     # DenseNet, LightNet) decode with cv2.imdecode, which returns None for
     # formats Pillow accepts (GIF, ICO, ...) and would then crash in
     # cv2.cvtColor with the same !_src.empty() 500 this validation exists to
-    # prevent. Require the bytes to be decodable by both stacks.
+    # prevent. Require the bytes to be decodable by both stacks. imdecode
+    # returns None for every input-related failure (unknown format, codec
+    # limits, corrupt data); it raises cv2.error only for an allocation
+    # failure, which correctly stays a retryable 500.
     if cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR) is None:
         raise ImageDecodeError(
-            f"unprocessable image: format {img.format or 'unknown'} is not "
-            "supported by the inference decoder; use JPEG, PNG, or WebP"
+            f"unprocessable image: the inference decoder (OpenCV) could not "
+            f"decode this {fmt} image; use a JPEG, PNG, or WebP"
         )
 
 
@@ -304,6 +336,7 @@ async def resolve_image_uri(uri: str) -> bytes:
 
 _client: Optional["httpx.AsyncClient"] = None
 _admission: Optional[asyncio.Semaphore] = None
+_decode_slots: Optional[asyncio.Semaphore] = None
 _settings: Optional[dict] = None
 
 
@@ -316,6 +349,7 @@ def load_fetch_settings() -> dict:
         "admission_wait_s": float(os.getenv("IMAGE_ADMISSION_WAIT_S", "20")),
         "max_image_bytes": int(os.getenv("IMAGE_FETCH_MAX_BYTES", "52428800")),
         "max_pixels": int(os.getenv("IMAGE_MAX_PIXELS", "150000000")),
+        "decode_limit": int(os.getenv("IMAGE_DECODE_LIMIT", "2")),
     }
 
 
@@ -330,13 +364,14 @@ async def _log_redirect_hop(response: httpx.Response) -> None:
 
 def init_image_fetch(transport: Optional[httpx.AsyncBaseTransport] = None) -> None:
     """Create the shared client + admission semaphore. Idempotent."""
-    global _client, _admission, _settings
+    global _client, _admission, _decode_slots, _settings
     if _client is not None:
         return
     _settings = load_fetch_settings()
     # pool=None on the client is safe only while the admission semaphore
     # bounds concurrent requests to the pool size
     assert _settings["admission_limit"] >= 1
+    assert _settings["decode_limit"] >= 1
     _client = httpx.AsyncClient(
         timeout=httpx.Timeout(
             connect=_settings["connect_timeout_s"],
@@ -354,22 +389,28 @@ def init_image_fetch(transport: Optional[httpx.AsyncBaseTransport] = None) -> No
         transport=transport,
     )
     _admission = asyncio.Semaphore(_settings["admission_limit"])
+    # The full-decode validation in fetch_image_for_request() holds decoded
+    # pixels (up to IMAGE_MAX_PIXELS x 3 bytes) per in-flight image. Bound it
+    # separately from admission, whose slots hold only compressed bytes.
+    _decode_slots = asyncio.Semaphore(_settings["decode_limit"])
 
 
 async def shutdown_image_fetch() -> None:
-    global _client, _admission, _settings
+    global _client, _admission, _decode_slots, _settings
     if _client is not None:
         await _client.aclose()
     _client = None
     _admission = None
+    _decode_slots = None
     _settings = None
 
 
 def reset_fetch_state_for_tests() -> None:
     """Synchronous reset for test isolation (drops, doesn't close, the client)."""
-    global _client, _admission, _settings
+    global _client, _admission, _decode_slots, _settings
     _client = None
     _admission = None
+    _decode_slots = None
     _settings = None
 
 
@@ -424,8 +465,10 @@ async def fetch_image_for_request(uri: str) -> bytes:
         # Full decode on a worker thread. The header check above cannot see
         # a corrupt scan stream, and a PIL-only check cannot see formats the
         # cv2-backed models reject; either used to surface as a retryable
-        # 500 from inside model.predict.
-        await run_in_threadpool(validate_decodable, data)
+        # 500 from inside model.predict. Bounded by IMAGE_DECODE_LIMIT, not
+        # by admission: a decode holds decoded pixels, admission only bytes.
+        async with _decode_slots:
+            await run_in_threadpool(validate_decodable, data)
         logger.debug(
             "Image fetched: %d bytes in %.0f ms from %s",
             len(data), (time.monotonic() - started) * 1000,

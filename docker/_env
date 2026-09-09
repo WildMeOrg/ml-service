@@ -65,6 +65,12 @@ MODEL_CONFIG=/data0/user/model_config.json
 # Seconds a request waits for an admission slot before 503 (default: 20).
 # IMAGE_ADMISSION_WAIT_S=20
 
+# Concurrent full-image decodes PER WORKER during input validation
+# (default: 2, matching the inference slots). Each holds up to
+# IMAGE_MAX_PIXELS x 3 bytes of decoded pixels; admission slots hold only
+# compressed bytes, hence the separate, tighter bound.
+# IMAGE_DECODE_LIMIT=2
+
 # Decoded-pixel ceiling, a decompression-bomb guard (default: 150000000).
 # IMAGE_MAX_PIXELS=150000000
 

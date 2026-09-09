@@ -140,3 +140,44 @@ def test_decompression_bomb_raises_image_decode_error():
             validate_decodable(valid)
     finally:
         Image.MAX_IMAGE_PIXELS = saved
+
+
+def test_pillow_out_of_memory_is_not_a_decode_error(monkeypatch):
+    """Pillow reports a codec allocation failure as OSError(-9, 'out of memory
+    error'). That is a server-side resource failure: it must escape (-> 500,
+    retried by Wildbook), never be reported as a permanently bad image."""
+    from app.utils import image_uri
+
+    def exploding_open(*a, **k):
+        raise OSError("out of memory error")
+    monkeypatch.setattr(image_uri.Image, "open", exploding_open)
+    with pytest.raises(OSError) as exc_info:
+        validate_decodable(_valid_jpeg_bytes())
+    assert not isinstance(exc_info.value, ImageDecodeError)
+
+
+def test_unknown_bmff_brand_is_not_reported_as_video():
+    # 'heim' is a registered HEIF still-image brand the sniff does not list.
+    # The video check is affirmative, so an unknown brand must fall through
+    # to the generic message rather than be called a video.
+    heim = bytes.fromhex("0000001c6674797068656d6d00000000") + b"\x00" * 64
+    with pytest.raises(ImageDecodeError) as exc_info:
+        validate_decodable(heim)
+    assert "video" not in str(exc_info.value)
+
+
+def test_non_image_message_has_no_object_address():
+    with pytest.raises(ImageDecodeError) as exc_info:
+        validate_decodable(b"this is definitely not an image")
+    assert "BytesIO" not in str(exc_info.value)
+    assert "0x" not in str(exc_info.value)
+
+
+def test_png_over_opencv_width_limit_is_decode_error():
+    # 1048577 px wide is under IMAGE_MAX_PIXELS but over OpenCV's per-side
+    # limit. libpng rejects it inside imdecode, which returns None rather
+    # than raising, so it is a 400 like any other cv2-undecodable image.
+    buf = io.BytesIO()
+    Image.new("L", ((1 << 20) + 1, 1)).save(buf, "png")
+    with pytest.raises(ImageDecodeError, match="OpenCV"):
+        validate_decodable(buf.getvalue())

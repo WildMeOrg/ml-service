@@ -1,6 +1,9 @@
 """fetch_image_for_request must map every failure class to the spec's
 status code, and admission_slot must 503 on wait timeout."""
 import asyncio
+import base64
+import time
+
 import httpx
 import pytest
 from fastapi import HTTPException
@@ -183,3 +186,29 @@ def test_transport_failure_detail_stays_type_name_only():
     with pytest.raises(HTTPException) as exc:
         asyncio.run(image_uri.fetch_image_for_request("https://wb.example/x.jpg"))
     assert exc.value.detail.endswith("ConnectError")
+
+
+def test_full_decode_is_bounded_by_decode_limit(monkeypatch):
+    """Validation holds decoded pixels, so it is bounded by IMAGE_DECODE_LIMIT
+    rather than by the (larger) admission limit."""
+    import threading
+    monkeypatch.setenv("IMAGE_DECODE_LIMIT", "2")
+    lock = threading.Lock()
+    state = {"active": 0, "peak": 0}
+
+    def slow_validate(data):
+        with lock:
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        time.sleep(0.05)
+        with lock:
+            state["active"] -= 1
+    monkeypatch.setattr(image_uri, "validate_decodable", slow_validate)
+
+    uri = "data:image/png;base64," + base64.b64encode(ONE_PX_PNG).decode()
+
+    async def run():
+        image_uri.init_image_fetch()
+        await asyncio.gather(*[image_uri.fetch_image_for_request(uri) for _ in range(6)])
+    asyncio.run(run())
+    assert state["peak"] == 2, state

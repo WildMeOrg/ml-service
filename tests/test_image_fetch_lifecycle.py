@@ -15,6 +15,7 @@ def test_load_fetch_settings_defaults():
     assert s["admission_wait_s"] == 20.0
     assert s["max_image_bytes"] == 52428800
     assert s["max_pixels"] == 150000000
+    assert s["decode_limit"] == 2
 
 
 def test_load_fetch_settings_env_override(monkeypatch):
@@ -29,6 +30,7 @@ def test_init_creates_client_and_admission():
     image_uri.init_image_fetch()
     assert isinstance(image_uri._client, httpx.AsyncClient)
     assert isinstance(image_uri._admission, asyncio.Semaphore)
+    assert isinstance(image_uri._decode_slots, asyncio.Semaphore)
     # invariant asserted at init: pool max_connections == admission_limit
     assert image_uri._settings["admission_limit"] == 8
 
@@ -44,3 +46,4 @@ def test_reset_clears_state():
     image_uri.reset_fetch_state_for_tests()
     assert image_uri._client is None
     assert image_uri._admission is None
+    assert image_uri._decode_slots is None

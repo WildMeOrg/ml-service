@@ -180,13 +180,13 @@ def _make_pipeline_models():
     return pm, cm, em
 
 
-@pytest.mark.parametrize("payload,label", [
+@pytest.mark.parametrize("payload,expected_detail", [
     # mp4 (ISO BMFF ftyp) — the production sharkbook failure
     (bytes.fromhex("00000018667479706d70343200000000") + b"\x00" * 64, "video"),
     # GIF — PIL-loadable but cv2.imdecode returns None in every cv2 model
-    (None, "gif"),
+    (None, "JPEG, PNG, or WebP"),
 ])
-def test_pipeline_rejects_undecodable_media_with_400_before_predict(payload, label):
+def test_pipeline_rejects_undecodable_media_with_400_before_predict(payload, expected_detail):
     if payload is None:
         buf = io.BytesIO()
         Image.new("P", (32, 32)).save(buf, "gif")
@@ -199,6 +199,9 @@ def test_pipeline_rejects_undecodable_media_with_400_before_predict(payload, lab
         "extract_model_id": "e", "image_uri": uri,
     })
     assert resp.status_code == 400, resp.text
+    # The caller-facing reason must survive the router unchanged: the 400
+    # detail is the only diagnostic Wildbook surfaces.
+    assert expected_detail in resp.json()["detail"]
     # Rejection must happen at validation — no model may ever see the bytes.
     pm.predict.assert_not_called()
     cm.predict.assert_not_called()
