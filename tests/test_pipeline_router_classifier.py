@@ -1,8 +1,11 @@
 """Layer-3 integration tests for the new classify-slot model type."""
+import base64
+import io
 from unittest.mock import MagicMock
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from PIL import Image
 from app.routers import pipeline_router
 
 VALID_PNG_DATA_URI = (
@@ -164,6 +167,45 @@ def test_pipeline_classify_efficientnet_compound_labels_emits_top_level_iaclass_
     assert r["iaClass"] == "whale_shark"
     assert r["viewpoint"] == "left"
     assert r["classification"]["class"] == "whale_shark:left"
+
+
+def _make_pipeline_models():
+    from app.models.densenet_classifier import DenseNetClassifierModel
+    from app.models.miewid import MiewidModel
+    from app.models.yolo_ultralytics import YOLOUltralyticsModel
+
+    pm = MagicMock(spec=YOLOUltralyticsModel)
+    cm = MagicMock(spec=DenseNetClassifierModel)
+    em = MagicMock(spec=MiewidModel)
+    return pm, cm, em
+
+
+@pytest.mark.parametrize("payload,expected_detail", [
+    # mp4 (ISO BMFF ftyp) — the production sharkbook failure
+    (bytes.fromhex("00000018667479706d70343200000000") + b"\x00" * 64, "video"),
+    # GIF — PIL-loadable but cv2.imdecode returns None in every cv2 model
+    (None, "JPEG, PNG, or WebP"),
+])
+def test_pipeline_rejects_undecodable_media_with_400_before_predict(payload, expected_detail):
+    if payload is None:
+        buf = io.BytesIO()
+        Image.new("P", (32, 32)).save(buf, "gif")
+        payload = buf.getvalue()
+    pm, cm, em = _make_pipeline_models()
+    client = _make_app_with_models(pm, cm, em)
+    uri = "data:application/octet-stream;base64," + base64.b64encode(payload).decode()
+    resp = client.post("/pipeline/", json={
+        "predict_model_id": "p", "classify_model_id": "c",
+        "extract_model_id": "e", "image_uri": uri,
+    })
+    assert resp.status_code == 400, resp.text
+    # The caller-facing reason must survive the router unchanged: the 400
+    # detail is the only diagnostic Wildbook surfaces.
+    assert expected_detail in resp.json()["detail"]
+    # Rejection must happen at validation — no model may ever see the bytes.
+    pm.predict.assert_not_called()
+    cm.predict.assert_not_called()
+    em.extract_embeddings.assert_not_called()
 
 
 def test_pipeline_classify_densenet_orientation_rejected_with_400():

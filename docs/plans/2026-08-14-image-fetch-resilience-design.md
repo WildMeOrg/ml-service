@@ -86,6 +86,7 @@ Environment variables (read once at startup):
 | `IMAGE_FETCH_MAX_BYTES` | `52428800` (50 MB) | image size cap (streamed, data URI, and local file) |
 | `MAX_REQUEST_BODY_BYTES` | `4194304` (4 MB) | ASGI body cap; raise only on installations that POST data URIs |
 | `IMAGE_MAX_PIXELS` | `150000000` (150 MP) | decoded-dimension cap, checked from the image header before any decode |
+| `IMAGE_DECODE_LIMIT` | `2` | concurrent full decodes per worker in the validation step (PR #27); each holds up to `IMAGE_MAX_PIXELS × 3` bytes of pixels |
 | uvicorn `--limit-concurrency` | `32` | server-level connection cap per worker; excess connections get 503 before their bodies are read |
 
 Budget check: total fetch deadline (60s) + inference must normally fit inside
@@ -200,6 +201,7 @@ point for routers. Maps failures to `HTTPException`, logging each with
 | malformed/unsupported URL, invalid data URI, missing/irregular local file | 400 | drop job |
 | oversized (declared, streamed, encoded data URI, or local `st_size`) | 400 | drop job |
 | decoded dimensions over `IMAGE_MAX_PIXELS`, or unparseable image header | 400 | drop job |
+| body fails a full decode: corrupt scan stream, video container, or a format OpenCV cannot read (PR #27) | 400 | drop job |
 | empty body (0 bytes) | 400 | drop job |
 | redirect loop / too many redirects (`TooManyRedirects`) | 400 | drop job |
 | upstream 4xx **except 408, 429** (auth, gone, forbidden…) | 400 — permanent for an unchanged URI | drop job |
@@ -224,7 +226,9 @@ All four routers restructure identically:
 ```
 POST /… → acquire admission semaphore (held to end of request)
         →   validate models           (registry reads only)
-        →   fetch_image_for_request() (streaming, deadline-capped)
+        →   fetch_image_for_request() (streaming, deadline-capped;
+        →                               header check, then full decode
+        →                               off the loop under IMAGE_DECODE_LIMIT)
         →   acquire inference semaphore
         →     inference
         → response

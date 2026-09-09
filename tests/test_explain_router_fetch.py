@@ -260,14 +260,17 @@ def test_non_finite_bbox_is_400_not_500():
 def test_opencv_undecodable_body_is_400():
     """Bytes PIL accepts but OpenCV cannot decode hit the `image is None` guard.
 
-    Distinct from the HTML case, which check_image_header() rejects earlier --
-    this is the only test that reaches cv2.imdecode returning None.
+    fetch_image_for_request() now requires cv2-decodability itself, so on the
+    real path this guard is a backstop. Bypass the helper here so the router's
+    own guard stays covered: cv2 is one shared module, and patching imdecode
+    would otherwise trip the helper's check first.
     """
-    def responder(request):
-        return httpx.Response(200, content=_png_bytes())
+    async def fetched(uri):
+        return _png_bytes()
 
-    client = _client(responder)
-    with patch.object(explain_router.cv2, "imdecode", return_value=None):
+    client = _client(lambda request: httpx.Response(500))
+    with patch.object(explain_router, "fetch_image_for_request", fetched), \
+         patch.object(explain_router.cv2, "imdecode", return_value=None):
         r = client.post("/explain/", json=BODY)
     assert r.status_code == 400, r.text
     assert "Assertion failed" not in r.text
