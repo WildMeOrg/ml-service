@@ -8,13 +8,10 @@ from fastapi.testclient import TestClient
 from PIL import Image
 from app.routers import pipeline_router
 
-
-def _png_data_uri() -> str:
-    """A real, fully decodable PNG — validate_decodable() now runs a full
-    load() on every request, so header-only magic bytes get rejected with 400."""
-    buf = io.BytesIO()
-    Image.new("RGB", (16, 16), (100, 100, 100)).save(buf, "png")
-    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+VALID_PNG_DATA_URI = (
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+    "AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
 
 
 def _make_app_with_models(predict_model, classify_model, extract_model):
@@ -74,7 +71,7 @@ def test_pipeline_classify_densenet_classifier_emits_top_level_iaclass_and_viewp
         "predict_model_id": "p",
         "classify_model_id": "c",
         "extract_model_id": "e",
-        "image_uri": _png_data_uri(),
+        "image_uri": VALID_PNG_DATA_URI,
     })
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -113,7 +110,7 @@ def test_pipeline_classify_densenet_classifier_pure_viewpoint_omits_iaclass():
     resp = client.post("/pipeline/", json={
         "predict_model_id": "p", "classify_model_id": "c",
         "extract_model_id": "e",
-        "image_uri": _png_data_uri(),
+        "image_uri": VALID_PNG_DATA_URI,
     })
     body = resp.json()
     r = body["results"][0]
@@ -162,7 +159,7 @@ def test_pipeline_classify_efficientnet_compound_labels_emits_top_level_iaclass_
     resp = client.post("/pipeline/", json={
         "predict_model_id": "p", "classify_model_id": "c",
         "extract_model_id": "e",
-        "image_uri": _png_data_uri(),
+        "image_uri": VALID_PNG_DATA_URI,
     })
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -220,6 +217,6 @@ def test_pipeline_classify_densenet_orientation_rejected_with_400():
     client = _make_app_with_models(pm, cm, em)
     resp = client.post("/pipeline/", json={
         "predict_model_id": "p", "classify_model_id": "c",
-        "extract_model_id": "e", "image_uri": _png_data_uri(),
+        "extract_model_id": "e", "image_uri": VALID_PNG_DATA_URI,
     })
     assert resp.status_code == 400

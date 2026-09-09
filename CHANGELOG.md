@@ -1,3 +1,74 @@
+## [Unreleased]
+
+- Image URIs containing a bare `#` now resolve. `#` opens a URL fragment,
+  which is never sent to the server, so a filename like
+  `2000_174419#R8123A.jpg` was requested as `2000_174419` and 404'd -- which
+  the fetch path correctly, but unhelpfully, reported as a permanent 400.
+  `#` is now percent-encoded in the PATH of http(s) URIs, in both the shared
+  fetch path and `/wbia-compat`'s own loader. Only the path: never the
+  authority (a blanket replace turns `https://evil#@internal.example/a.jpg`
+  into a fetch against `internal.example`, retargeting a caller-supplied
+  request to a host the URL never named) and never after a real query, so a
+  genuine `?sig=x#frag` fragment still drops. Idempotent; `data:` URIs and
+  local paths never reach the normalizer. Trade-off: on a path-bearing URL a
+  genuine trailing fragment is now read as part of the filename and 404s. `?`
+  is deliberately not encoded -- query strings are legitimate.
+
+- Fixed `/explain/` 500s caused by a concurrent forward hijacking PairX's
+  feature-map capture. PAIR-X registers a `register_forward_hook` on a
+  submodule of the *shared* MiewID instance (pairx/core.py:23-43); that hook
+  fires for every forward through the submodule, from any thread, until it is
+  removed. A `/extract` or `/pipeline` forward landing between PairX's own
+  forward and `handle.remove()` replaced the captured tensor with a no-grad
+  one, and PairX's backward then died with `element 0 of tensors does not
+  require grad and does not have a grad_fn`. `MiewidModel` now carries an
+  `inference_lock` held by `extract_embeddings` across its forward and by
+  `/explain` across the whole PairX call. The lock is taken inside the worker
+  thread, so the event loop is never blocked. Latent until PairX moved off the
+  event loop, which had been serializing these by accident.
+
+- `run_pairx` logs the exception behind its generic 500. It is one of only two
+  lines producing `{"detail":"Internal Server Error"}`, and was the one that
+  logged nothing -- so a PairX failure was undiagnosable from the logs. The
+  wire response is unchanged and still opaque; the cause and the batch shape
+  (which is what a CUDA OOM turns on) now reach the log.
+
+- `/explain/` (PairX) joins the image-fetch resilience path. It was the one
+  router PR #39 did not migrate and still used an inline `httpx.AsyncClient()`
+  -- httpx's 5s default timeout, no env knob -- inside a bare
+  `except Exception` that reported read timeouts, upstream 5xx and undecodable
+  bodies alike as 400, which Wildbook does not retry. It now uses
+  `fetch_image_for_request` behind `admission_slot` (one slot per image, since
+  a pair request fans out to 2N fetches), so the `IMAGE_FETCH_*` knobs apply
+  and statuses map correctly (504 slow upstream, 502 upstream fault, 400
+  caller error). `process_asyncio_result` no longer flattens those back to 400.
+  Local paths are resolved by the shared helper, which does not expand a
+  leading `~`; absolute paths, relative paths, URLs and (newly) data URIs are
+  unaffected.
+- `/explain/` validates the pairing, the batch size and every bbox/theta
+  *before* fetching any image, so a request already known to be invalid takes
+  no slots from the process-wide admission gate that the other routers queue
+  on. Non-finite bbox values and thetas are now rejected explicitly: a bare
+  `NaN` survives `json.loads` and every `x < 0` test, then broke `int()` deep
+  in cropping.
+- PairX inference moved off the event loop (`run_in_threadpool`). Running the
+  synchronous torch forward+backward inline pinned the loop for its whole
+  duration and starved every concurrent image fetch on that worker -- the
+  Flukebook incident of 2026-08-28, where a sibling `/extract/` fetch blew its
+  60s deadline on an asset that had served 200 in under a second. Because that
+  offload makes two explains genuinely parallel against one shared model,
+  `MAX_CONCURRENT_EXPLANATIONS` drops 2 -> 1 to keep PAIR-X's backward pass and
+  `zero_grad()` from racing; inline execution already serialized them, so
+  observed concurrency is unchanged.
+
+- Image-fetch resilience (design: docs/plans/2026-08-14-image-fetch-resilience-design.md):
+  image downloads now use a shared client with explicit timeouts and a 60s total
+  deadline, run outside the inference semaphores behind a bounded admission gate,
+  stream with a 50 MB cap and 150 MP header check, and map failures to
+  retry-ladder-correct statuses (504/502 retryable, 400 permanent, 503 saturated,
+  413 oversized body). Fixes the GiraffeSpotter timeout→500 retry storm
+  (2026-08-14) and removes slow-Wildbook head-of-line blocking.
+
 ## v1.0.0 — Wildbook ML Service GA
 
 First stable release of the Wildbook ML Service, a FastAPI replacement for the

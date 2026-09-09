@@ -52,7 +52,8 @@ class EfficientNetModel(BaseModel):
     def load(self, model_path: str = "", device: str = 'cpu', model_id: str = "",
              checkpoint_path: str = None, img_size: int = 512, threshold: float = 0.5,
              model_arch: str = None, label_map: dict = None, n_classes: int = None,
-             multi_label: bool = True, parse_compound_labels: bool = False, **kwargs) -> None:
+             multi_label: bool = True, parse_compound_labels: bool = False,
+             sentinel_prefixes: list = None, **kwargs) -> None:
         """Load the EfficientNet model.
 
         Args:
@@ -69,6 +70,11 @@ class EfficientNetModel(BaseModel):
             multi_label: If True, use sigmoid+threshold. If False, use softmax+argmax.
             parse_compound_labels: If True, split labels on ':' to return separate
                                    species and viewpoint fields.
+            sentinel_prefixes: Label prefixes that are namespaces rather than real
+                               species, so `species` is withheld and only the
+                               viewpoint is reported. None (the default) means
+                               parse_class_label applies its own default, which is
+                               the pre-existing behaviour for every model.
             **kwargs: Additional parameters
         """
         try:
@@ -78,6 +84,11 @@ class EfficientNetModel(BaseModel):
             self.threshold = threshold
             self.multi_label = multi_label
             self.parse_compound_labels = parse_compound_labels
+            # None is meaningful: parse_class_label falls back to its own default
+            # sentinel list, so omitting the key changes nothing for any model.
+            # NB pass a list, not a bare string -- `prefix in "species"` would be a
+            # substring test.
+            self.sentinel_prefixes = sentinel_prefixes
 
             if model_arch is not None:
                 self.model_arch = model_arch
