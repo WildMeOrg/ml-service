@@ -181,3 +181,34 @@ def test_png_over_opencv_width_limit_is_decode_error():
     Image.new("L", ((1 << 20) + 1, 1)).save(buf, "png")
     with pytest.raises(ImageDecodeError, match="OpenCV"):
         validate_decodable(buf.getvalue())
+
+
+def test_pillow_core_is_closed_before_opencv_decode(monkeypatch):
+    """Both decoders produce a full-size pixel buffer; PIL's must be gone
+    before cv2 allocates its own. Image.close() is what destroys the core (a
+    `with` block only closes the file pointer), so assert close() precedes
+    imdecode()."""
+    from app.utils import image_uri
+    events = []
+    real_open = image_uri.Image.open
+
+    def spy_open(*a, **k):
+        img = real_open(*a, **k)
+        real_close = img.close
+
+        def close():
+            events.append("close")
+            real_close()
+        img.close = close
+        return img
+
+    real_imdecode = image_uri.cv2.imdecode
+
+    def spy_imdecode(*a, **k):
+        events.append("imdecode")
+        return real_imdecode(*a, **k)
+
+    monkeypatch.setattr(image_uri.Image, "open", spy_open)
+    monkeypatch.setattr(image_uri.cv2, "imdecode", spy_imdecode)
+    validate_decodable(_valid_jpeg_bytes())
+    assert events == ["close", "imdecode"]

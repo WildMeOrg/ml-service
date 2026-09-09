@@ -188,27 +188,74 @@ def test_transport_failure_detail_stays_type_name_only():
     assert exc.value.detail.endswith("ConnectError")
 
 
-def test_full_decode_is_bounded_by_decode_limit(monkeypatch):
+
+@pytest.mark.parametrize("limit", [1, 3])
+def test_full_decode_is_bounded_by_decode_limit(monkeypatch, limit):
     """Validation holds decoded pixels, so it is bounded by IMAGE_DECODE_LIMIT
-    rather than by the (larger) admission limit."""
+    rather than by the (larger) admission limit. Workers block on an event
+    while the test checks the bound, so the result does not depend on timing:
+    fewer than `limit` inside means the bound is too tight (a hardcoded 2
+    would fail at limit=3); more means it is not enforced."""
     import threading
-    monkeypatch.setenv("IMAGE_DECODE_LIMIT", "2")
+    monkeypatch.setenv("IMAGE_DECODE_LIMIT", str(limit))
     lock = threading.Lock()
+    release = threading.Event()
     state = {"active": 0, "peak": 0}
 
-    def slow_validate(data):
+    def gated_validate(data):
         with lock:
             state["active"] += 1
             state["peak"] = max(state["peak"], state["active"])
-        time.sleep(0.05)
+        assert release.wait(5), "workers were never released"
         with lock:
             state["active"] -= 1
-    monkeypatch.setattr(image_uri, "validate_decodable", slow_validate)
+    monkeypatch.setattr(image_uri, "validate_decodable", gated_validate)
 
     uri = "data:image/png;base64," + base64.b64encode(ONE_PX_PNG).decode()
 
     async def run():
         image_uri.init_image_fetch()
-        await asyncio.gather(*[image_uri.fetch_image_for_request(uri) for _ in range(6)])
+        tasks = [asyncio.create_task(image_uri.fetch_image_for_request(uri))
+                 for _ in range(2 * limit)]
+        deadline = time.monotonic() + 5
+        while state["active"] < limit and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert state["active"] == limit, state       # the bound admits `limit`
+        await asyncio.sleep(0.1)                     # excess had ample time...
+        assert state["active"] == limit, state       # ...and stayed out
+        release.set()
+        await asyncio.gather(*tasks)
     asyncio.run(run())
-    assert state["peak"] == 2, state
+    assert state["peak"] == limit, state
+
+
+def test_decode_slot_released_after_failed_validation(monkeypatch):
+    """An ImageDecodeError inside the slot must not leak it."""
+    import io
+    from PIL import Image
+    monkeypatch.setenv("IMAGE_DECODE_LIMIT", "1")
+    buf = io.BytesIO()
+    Image.new("P", (8, 8)).save(buf, "gif")  # PIL ok, cv2 None -> raises in-slot
+    bad = "data:image/gif;base64," + base64.b64encode(buf.getvalue()).decode()
+    good = "data:image/png;base64," + base64.b64encode(ONE_PX_PNG).decode()
+
+    async def run():
+        image_uri.init_image_fetch()
+        with pytest.raises(HTTPException):
+            await image_uri.fetch_image_for_request(bad)
+        # a leaked slot would hang here; wait_for turns that into a failure
+        assert await asyncio.wait_for(image_uri.fetch_image_for_request(good), 5) == ONE_PX_PNG
+    asyncio.run(run())
+
+
+def test_header_stage_memory_error_escapes_as_server_failure(monkeypatch):
+    """check_image_header() catches Exception for unparseable headers; a
+    MemoryError raised there is a resource failure and must not become a
+    permanent 400."""
+    def exploding_open(*a, **k):
+        raise MemoryError()
+    monkeypatch.setattr(image_uri.Image, "open", exploding_open)
+    image_uri.init_image_fetch()
+    uri = "data:image/png;base64," + base64.b64encode(ONE_PX_PNG).decode()
+    with pytest.raises(MemoryError):
+        asyncio.run(image_uri.fetch_image_for_request(uri))

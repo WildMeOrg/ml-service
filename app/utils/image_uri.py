@@ -110,6 +110,8 @@ def check_image_header(data: bytes) -> None:
                 width, height = im.size
     except Image.DecompressionBombError as e:
         raise ImageTooLargeError(f"Image header exceeds pixel cap: {e}")
+    except MemoryError:
+        raise  # server-side resource failure: must stay a retryable 5xx
     except Exception as e:
         # Wildbook sometimes dispatches video MediaAssets (sharkbook .mp4)
         # to the image-only endpoints; name the problem instead of PIL's
@@ -126,6 +128,10 @@ def check_image_header(data: bytes) -> None:
 # affirmative on purpose: the same container family carries still images
 # (AVIF, HEIC/HEIF, CR3), and new image brands keep being registered, so an
 # unknown brand must get the generic cannot-decode message, never "video".
+# 'isom'/'isoN' are formally generic base brands, but they are what ffmpeg
+# and most phones write as the MAJOR brand of a real .mp4, while every
+# still-image encoder writes its own (heic, mif1, avif, crx ...). Dropping
+# them would blind the hint to the most common video in the wild.
 _VIDEO_BRANDS = frozenset({
     b'isom', b'iso2', b'iso3', b'iso4', b'iso5', b'iso6', b'iso7', b'iso8',
     b'iso9', b'mp41', b'mp42', b'mp71', b'avc1', b'qt  ', b'M4V ', b'M4VH',
@@ -183,13 +189,11 @@ def validate_decodable(image_bytes: bytes) -> None:
     Raises:
         ImageDecodeError (a ValueError): if the bytes cannot be decoded.
     """
+    img = None
     try:
-        # The context manager destroys the decoded core on exit, so the PIL
-        # pixel buffer is gone before cv2 allocates its own below; the two
-        # decoded copies never coexist.
-        with Image.open(io.BytesIO(image_bytes)) as img:
-            img.load()
-            fmt = img.format or "unknown"
+        img = Image.open(io.BytesIO(image_bytes))
+        img.load()
+        fmt = img.format or "unknown"
     except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as e:
         if "out of memory" in str(e):
             # Pillow reports a codec allocation failure as OSError(-9,
@@ -199,6 +203,12 @@ def validate_decodable(image_bytes: bytes) -> None:
         if _looks_like_video(image_bytes):
             raise ImageDecodeError(_VIDEO_DETAIL)
         raise ImageDecodeError(f"unprocessable image: cannot decode ({_describe(e)})")
+    finally:
+        # Image.close() is what destroys the decoded core; a `with` block
+        # only closes the file pointer. Drop PIL's pixels before cv2
+        # allocates its own below so the two decoded copies never coexist.
+        if img is not None:
+            img.close()
 
     # Pillow decoding alone is not enough: several models (EfficientNet,
     # DenseNet, LightNet) decode with cv2.imdecode, which returns None for
@@ -467,6 +477,9 @@ async def fetch_image_for_request(uri: str) -> bytes:
         # cv2-backed models reject; either used to surface as a retryable
         # 500 from inside model.predict. Bounded by IMAGE_DECODE_LIMIT, not
         # by admission: a decode holds decoded pixels, admission only bytes.
+        # Like the routers' inference semaphores this bounds cooperative
+        # concurrency: a cancelled await releases the slot while the worker
+        # thread runs to completion.
         async with _decode_slots:
             await run_in_threadpool(validate_decodable, data)
         logger.debug(
