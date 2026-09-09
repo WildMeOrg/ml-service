@@ -110,9 +110,9 @@ def check_image_header(data: bytes) -> None:
                 width, height = im.size
     except Image.DecompressionBombError as e:
         raise ImageTooLargeError(f"Image header exceeds pixel cap: {e}")
-    except MemoryError:
-        raise  # server-side resource failure: must stay a retryable 5xx
     except Exception as e:
+        if _is_resource_failure(e):
+            raise  # the server's problem, not the image's: stays a 5xx
         # Wildbook sometimes dispatches video MediaAssets (sharkbook .mp4)
         # to the image-only endpoints; name the problem instead of PIL's
         # generic "cannot identify image file".
@@ -151,6 +151,18 @@ def _looks_like_video(data: bytes) -> bool:
     return False
 
 
+def _is_resource_failure(exc: BaseException) -> bool:
+    """A server-side allocation failure, as opposed to bad input. These must
+    escape the 400 mapping so Wildbook retries instead of dropping the job."""
+    if isinstance(exc, MemoryError):
+        return True
+    if isinstance(exc, OSError) and "out of memory" in str(exc):
+        return True  # Pillow codec: OSError(-9, "out of memory error")
+    if isinstance(exc, cv2.error) and "Insufficient memory" in str(exc):
+        return True  # OpenCV: "(-4:Insufficient memory)" from OutOfMemoryError
+    return False
+
+
 def _describe(exc: Exception) -> str:
     """Caller-safe rendering of a PIL open/load failure. UnidentifiedImageError's
     text is 'cannot identify image file <_io.BytesIO object at 0x...>' -- an
@@ -174,17 +186,20 @@ def validate_decodable(image_bytes: bytes) -> None:
     fully load() the image. This is CPU-bound: call it via run_in_threadpool
     from async code.
 
-    Catches:
-        - UnidentifiedImageError: not a recognizable image at all.
-        - OSError: broken/truncated scan stream surfaced during load().
-        - Image.DecompressionBombError: pathologically large image rejected by
-          Pillow's bomb guard. It is not an OSError, so it must be listed
-          explicitly or it would escape to the routers' generic 500 handler.
-          Like the others it is a permanent, non-retryable bad input.
+    Every decode failure is treated as a permanently bad image: Pillow
+    surfaces most of them as OSError (broken or truncated scan stream) or
+    UnidentifiedImageError, but not all -- a PNG whose corruption sits after
+    the first IDAT chunk raises SyntaxError from load(), DecompressionBombError
+    is a bare Exception, and other plugins raise ValueError/EOFError. OpenCV's
+    imdecode returns None for most bad input but raises cv2.error from its
+    dimension check (validateInputImageSize, 1<<20 per side).
 
-    Deliberately NOT caught: Pillow's codec "out of memory error" (an OSError)
-    and cv2.error from an OpenCV allocation failure. Those are server-side
-    resource failures and must stay retryable 5xx.
+    Deliberately re-raised (see _is_resource_failure): MemoryError, Pillow's
+    codec "out of memory error" and OpenCV's "Insufficient memory". Those are
+    the server's failures and must stay retryable 5xx. One gap cannot be
+    closed from Python: OpenCV swallows an allocation failure inside its own
+    readData() and returns None, which reads as bad input here. IMAGE_MAX_PIXELS
+    and IMAGE_DECODE_LIMIT keep that case out of reach in practice.
 
     Raises:
         ImageDecodeError (a ValueError): if the bytes cannot be decoded.
@@ -194,11 +209,8 @@ def validate_decodable(image_bytes: bytes) -> None:
         img = Image.open(io.BytesIO(image_bytes))
         img.load()
         fmt = img.format or "unknown"
-    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as e:
-        if "out of memory" in str(e):
-            # Pillow reports a codec allocation failure as OSError(-9,
-            # "out of memory error"). That is the server's problem, not the
-            # image's: let it escape as a 500 so the caller retries.
+    except Exception as e:
+        if _is_resource_failure(e):
             raise
         if _looks_like_video(image_bytes):
             raise ImageDecodeError(_VIDEO_DETAIL)
@@ -214,11 +226,19 @@ def validate_decodable(image_bytes: bytes) -> None:
     # DenseNet, LightNet) decode with cv2.imdecode, which returns None for
     # formats Pillow accepts (GIF, ICO, ...) and would then crash in
     # cv2.cvtColor with the same !_src.empty() 500 this validation exists to
-    # prevent. Require the bytes to be decodable by both stacks. imdecode
-    # returns None for every input-related failure (unknown format, codec
-    # limits, corrupt data); it raises cv2.error only for an allocation
-    # failure, which correctly stays a retryable 500.
-    if cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR) is None:
+    # prevent. Require the bytes to be decodable by both stacks.
+    try:
+        decoded = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    except cv2.error as e:
+        if _is_resource_failure(e):
+            raise
+        # e.g. a Pillow-readable BMP wider than CV_IO_MAX_IMAGE_WIDTH: the
+        # OpenCV text names a source file and function, not the problem, so
+        # log it and give the caller the stable message below.
+        logger.warning("OpenCV rejected a %s image: %s",
+                       fmt, str(e).strip().splitlines()[-1])
+        decoded = None
+    if decoded is None:
         raise ImageDecodeError(
             f"unprocessable image: the inference decoder (OpenCV) could not "
             f"decode this {fmt} image; use a JPEG, PNG, or WebP"

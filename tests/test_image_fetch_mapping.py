@@ -193,9 +193,10 @@ def test_transport_failure_detail_stays_type_name_only():
 def test_full_decode_is_bounded_by_decode_limit(monkeypatch, limit):
     """Validation holds decoded pixels, so it is bounded by IMAGE_DECODE_LIMIT
     rather than by the (larger) admission limit. Workers block on an event
-    while the test checks the bound, so the result does not depend on timing:
-    fewer than `limit` inside means the bound is too tight (a hardcoded 2
-    would fail at limit=3); more means it is not enforced."""
+    while the test checks the bound. The lower bound is deterministic (fewer
+    than `limit` inside within 5 s means the bound is too tight: a hardcoded 2
+    fails at limit=3); the upper bound gives would-be excess entrants 100 ms,
+    which is generous next to the microseconds they need."""
     import threading
     monkeypatch.setenv("IMAGE_DECODE_LIMIT", str(limit))
     lock = threading.Lock()
@@ -259,3 +260,16 @@ def test_header_stage_memory_error_escapes_as_server_failure(monkeypatch):
     uri = "data:image/png;base64," + base64.b64encode(ONE_PX_PNG).decode()
     with pytest.raises(MemoryError):
         asyncio.run(image_uri.fetch_image_for_request(uri))
+
+
+def test_header_stage_pillow_oom_escapes_as_server_failure(monkeypatch):
+    """Same classification as MemoryError for Pillow's codec-level OSError."""
+    def exploding_open(*a, **k):
+        raise OSError("out of memory error")
+    monkeypatch.setattr(image_uri.Image, "open", exploding_open)
+    image_uri.init_image_fetch()
+    uri = "data:image/png;base64," + base64.b64encode(ONE_PX_PNG).decode()
+    with pytest.raises(OSError) as exc:
+        asyncio.run(image_uri.fetch_image_for_request(uri))
+    assert not isinstance(exc.value, HTTPException)
+    assert not isinstance(exc.value, ValueError)

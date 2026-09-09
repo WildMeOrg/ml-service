@@ -212,3 +212,56 @@ def test_pillow_core_is_closed_before_opencv_decode(monkeypatch):
     monkeypatch.setattr(image_uri.cv2, "imdecode", spy_imdecode)
     validate_decodable(_valid_jpeg_bytes())
     assert events == ["close", "imdecode"]
+
+
+def _png_with_corrupt_mid_stream_chunk() -> bytes:
+    """Header and first IDAT intact, so Image.open() and check_image_header()
+    pass; the SECOND IDAT's chunk id is zeroed. Pillow's load() then raises
+    SyntaxError("broken PNG file"), not OSError -- the one decode failure the
+    original except-tuple did not cover."""
+    import struct
+    import numpy as np
+    rng = np.random.default_rng(0)  # noise compresses badly -> several IDATs
+    buf = io.BytesIO()
+    Image.fromarray(rng.integers(0, 255, (256, 256, 3), dtype=np.uint8)).save(buf, "png")
+    data = bytearray(buf.getvalue())
+    idat_ids, pos = [], 8
+    while pos < len(data):
+        length = struct.unpack(">I", data[pos:pos + 4])[0]
+        if bytes(data[pos + 4:pos + 8]) == b"IDAT":
+            idat_ids.append(pos + 4)
+        pos += 12 + length
+    assert len(idat_ids) >= 2, "test image did not produce multiple IDAT chunks"
+    data[idat_ids[1]:idat_ids[1] + 4] = b"\x00\x00\x00\x00"
+    return bytes(data)
+
+
+def test_png_corrupt_after_first_idat_raises_image_decode_error():
+    data = _png_with_corrupt_mid_stream_chunk()
+    Image.open(io.BytesIO(data))  # header parses: this is a load()-stage failure
+    with pytest.raises(ImageDecodeError, match="SyntaxError"):
+        validate_decodable(data)
+
+
+def test_bmp_over_opencv_width_limit_is_decode_error():
+    # Unlike libpng, OpenCV's BMP reader has no width limit of its own, so
+    # imdecode reaches validateInputImageSize(), which RAISES cv2.error
+    # rather than returning None. Still a permanently bad input -> 400.
+    buf = io.BytesIO()
+    Image.new("L", ((1 << 20) + 1, 1)).save(buf, "bmp")
+    with pytest.raises(ImageDecodeError, match="OpenCV"):
+        validate_decodable(buf.getvalue())
+
+
+def test_opencv_allocation_failure_is_not_a_decode_error(monkeypatch):
+    from app.utils import image_uri
+    oom = image_uri.cv2.error(
+        "OpenCV(4.10.0) alloc.cpp:73: error: (-4:Insufficient memory) "
+        "Failed to allocate 3145728 bytes in function 'OutOfMemoryError'")
+
+    def exploding_imdecode(*a, **k):
+        raise oom
+    monkeypatch.setattr(image_uri.cv2, "imdecode", exploding_imdecode)
+    with pytest.raises(image_uri.cv2.error) as exc_info:
+        validate_decodable(_valid_jpeg_bytes())
+    assert exc_info.value is oom
