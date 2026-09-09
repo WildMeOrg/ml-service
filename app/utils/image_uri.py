@@ -199,7 +199,7 @@ def validate_decodable(image_bytes: bytes) -> None:
     the server's failures and must stay retryable 5xx. One gap cannot be
     closed from Python: OpenCV swallows an allocation failure inside its own
     readData() and returns None, which reads as bad input here. IMAGE_MAX_PIXELS
-    and IMAGE_DECODE_LIMIT keep that case out of reach in practice.
+    and IMAGE_DECODE_LIMIT make that case unlikely; they cannot rule it out.
 
     Raises:
         ImageDecodeError (a ValueError): if the bytes cannot be decoded.
@@ -236,7 +236,7 @@ def validate_decodable(image_bytes: bytes) -> None:
         # OpenCV text names a source file and function, not the problem, so
         # log it and give the caller the stable message below.
         logger.warning("OpenCV rejected a %s image: %s",
-                       fmt, str(e).strip().splitlines()[-1])
+                       fmt, (str(e).strip().splitlines() or ["cv2.error"])[-1])
         decoded = None
     if decoded is None:
         raise ImageDecodeError(
