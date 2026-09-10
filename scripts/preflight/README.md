@@ -42,21 +42,31 @@ in the image at all).
 # `ml-service`.
 docker build -t ml-service -f docker/dockerfile .
 
+docker build -t ml-service-preflight -f scripts/preflight/Dockerfile .
+mkdir -p preflight-artifacts
+
 docker run --rm --gpus all \
   -v "$MODELS_DIR:/datasets:ro" \
-  -v "$PWD/scripts/preflight:/app/scripts/preflight:ro" \
   -v "$PWD/fixtures:/fixtures:ro" \
   -v /path/to/wbia-plugin-orientation:/reference:ro \
-  ml-service \
+  -v "$PWD/preflight-artifacts:/artifacts" \
+  ml-service-preflight \
   python3 scripts/preflight/run_gate.py \
       --manifest scripts/preflight/manifest.json \
-      --fixtures /fixtures
+      --fixtures /fixtures \
+      --reference-root /reference \
+      --artifact /artifacts/preflight-artifact.json
 ```
 
-`reference_runner.py` needs the `wbia-plugin-orientation` checkout mounted (it
-loads the plugin's config and `cls_hrnet` via importlib) plus `yacs`. Neither is a
-runtime dependency of ml-service, which is another reason this is a preflight and
-not CI.
+`--reference-root` is the checkout root containing `wbia_orientation/`. It
+wins over `reference_source.path` in the manifest; the default is `/reference`.
+The reference loads lazily, so `--help` works without a mounted checkout.
+Populate the manifest and fixture directory before building the preflight image.
+
+The preflight image adds pinned `yacs` and `utool` without changing the runtime
+image. Its install is constrained by the runtime's `pip freeze`, so conflicting
+dependencies fail the build instead of silently upgrading the inference stack.
+To use an existing runtime tag, pass `--build-arg RUNTIME_IMAGE=your-runtime-tag`.
 
 Emits an artifact recording reference outputs, port outputs, and the full
 environment. **Re-run on any bump to `scikit-image`, `imageio`, `Pillow`, `timm`,
@@ -64,8 +74,9 @@ environment. **Re-run on any bump to `scikit-image`, `imageio`, `Pillow`, `timm`
 alone, which is why Pillow is part of the contract.
 
 `reference_runner.py` loads the plugin's config and `cls_hrnet` via `importlib`,
-bypassing the `wbia` package import (which needs a full WBIA install). `utool` is
-only required for pretrained-weight download, which we skip.
+bypassing the `wbia` package import (which needs a full WBIA install). `cls_hrnet` imports
+`utool` at module load, so the preflight image installs it even though pretrained
+weight downloading is disabled.
 
 ## Environment the gate was last validated against
 

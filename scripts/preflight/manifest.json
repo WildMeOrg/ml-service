@@ -2,7 +2,7 @@
   "_note": "INPUT manifest for the wbia-orientation fidelity gate. It carries inputs and identity, NOT expected answers: the gate executes the pinned reference and the port LIVE and compares them to each other. Frozen expected thetas would only pin one implementation's output and would rot on any dependency bump.",
   "reference_source": {
     "repo": "wbia-plugin-orientation",
-    "path": "/mnt/c/wbia-plugin-orientation",
+    "path": "/reference",
     "_note": "record the commit hash of the reference checkout used for the gate run"
   },
   "thresholds": {

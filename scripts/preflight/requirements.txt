@@ -1,0 +1,3 @@
+# Preflight-only dependencies; cls_hrnet imports utool at module load.
+yacs==0.1.8
+utool==2.2.1
