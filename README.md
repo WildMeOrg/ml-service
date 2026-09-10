@@ -144,6 +144,24 @@ POST /explain/
 
 Generates visual explanations of what features two images share, using PAIR-X.
 
+`model_id` must name a MiewID model **loaded by this instance** — the endpoint
+validates against the live model registry, not a fixed list. An id that is not
+loaded returns `404` listing the available models; an id that is loaded but is
+not a MiewID model returns `400`. Neither is retryable, so a misconfigured id
+fails once rather than looping.
+
+If `model_id` is omitted, it falls back to `EXPLAIN_DEFAULT_MODEL_ID`
+(default: `miewid-msv4.1`), read once at startup — changing it requires a
+restart. Set this on deployments whose registry uses a different name:
+
+```bash
+EXPLAIN_DEFAULT_MODEL_ID=miewid-msv4_v3
+```
+
+Sending `model_id` explicitly is preferred; the fallback exists for callers
+that predate the field. An explicitly blank `model_id` is rejected with `400`
+rather than silently substituting the default.
+
 **Request**:
 ```json
 {
@@ -560,11 +578,15 @@ cd docker
 cp _env .env
 ```
 
-Edit `.env` and set `MODELS_DIR` to the directory containing your model weight files:
+Edit `.env` and set `MODELS_DIR` and `MODEL_CONFIG`:
 
 ```bash
 # Required: directory with .pt, .weights, .bin, .pth model files
 MODELS_DIR=/data0/models
+
+# Required: this deployment's model registry. Keep it OUTSIDE the git checkout —
+# see "Configure models" below.
+MODEL_CONFIG=/data0/model_config.json
 
 # Optional overrides
 # GPU_ID=0          # which GPU (default: 0)
@@ -576,7 +598,10 @@ MODELS_DIR=/data0/models
 
 #### 2. Configure models
 
-Edit `app/model_config.json` to list the models you want to load. Paths in the config should use `/models/` (the container mount point for `MODELS_DIR`):
+Create your registry at the path you set in `MODEL_CONFIG`, listing the models to load. Paths inside it should use `/models/` (the container mount point for `MODELS_DIR`):
+
+> **Keep the registry outside the git checkout.** `app/model_config.json` in this repo is a small development stub. A deployment's registry is a different file — often dozens of models — and if it lives inside the checkout, a routine `git checkout`, `reset --hard`, `stash`, or a pull touching that path will silently replace it with the stub. The service then fails to start on the next restart, taking down every install sharing it. Put the registry beside the weights it references (e.g. `/data0/model_config.json`) and point `MODEL_CONFIG` at it.
+
 
 ```json
 {
@@ -697,6 +722,7 @@ container behavior is unchanged unless the platform injects its own values.
 | `--host` | `HOST` | `0.0.0.0` | Bind address |
 | `--port` | `PORT` | `8888` (bare) / `6050` (image) | Listen port |
 | `--workers` | `WORKERS` | `1` | Uvicorn worker count (use 1 for GPU to avoid VRAM contention) |
+| `--limit-concurrency` | `LIMIT_CONCURRENCY` | `32` | Max concurrent connections per worker; excess get 503 before their bodies are read |
 | `--reload` | — | off | Auto-reload on code changes (development only) |
 
 Malformed integer values (e.g. a Kubernetes service-link `PORT=tcp://...`)

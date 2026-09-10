@@ -1,43 +1,62 @@
 import asyncio
 import base64
 import logging
-from pathlib import Path
+import math
+import os
 
 import albumentations
 import cv2
-import httpx
 import numpy as np
 import torch
 import torchvision.transforms as transforms
 from albumentations.pytorch import ToTensorV2
 from PIL import Image
 from fastapi import APIRouter, HTTPException, Request, Depends
-from pydantic import BaseModel
+from fastapi.concurrency import run_in_threadpool
+from typing import Optional
+
+from pydantic import BaseModel, Field
 from pairx import explain
 
 from app.models.miewid import MiewidModel
 from app.models.model_handler import ModelHandler
 from app.utils.helpers import get_chip_from_img
+from app.utils.image_uri import (
+    admission_slot,
+    fetch_image_for_request,
+    sanitize_uri_for_response,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/explain", tags=["Explain"])
 
 MAX_BATCH_SIZE = 16
-MAX_CONCURRENT_EXPLANATIONS = 2
+# 1, not 2. PairX now runs in a worker thread, so a semaphore of 2 would make
+# two explains genuinely concurrent against a single shared model instance --
+# and PAIR-X backpropagates, so they would race on .grad and on the
+# zero_grad(set_to_none=True) in run_pairx's finally. While run_pairx ran
+# inline on the event loop the second holder could never be scheduled, so 2
+# was already 1 in practice; this makes that explicit rather than newly
+# serial. Matches the phase-0 finding that serializing CUDA work beat
+# overlapping it on every axis (throughput, p95, p99).
+MAX_CONCURRENT_EXPLANATIONS = 1
 explain_semaphore = asyncio.Semaphore(MAX_CONCURRENT_EXPLANATIONS)
-
-def is_url(string):
-    """Checks if a string is formatted as a url"""
-    return string.startswith(('http://', 'https://'))
 
 async def get_model_handler(request: Request) -> ModelHandler:
     """Dependency to get the model handler from the app state."""
     return request.app.state.model_handler
 
 def preprocess(image, model):
-    """Runs preprocessing on an image based on the model to be used."""
-    if model.lower().startswith("miewid"):
+    """Runs preprocessing on an image based on the model to be used.
+
+    `model` is a resolved model instance, not a model id. Keying off the
+    instance type keeps this in step with the registry; the previous
+    `model_id.startswith("miewid")` test drifted whenever a deployment
+    registered a MiewID model under a name that did not start with
+    "miewid".
+    """
+    if isinstance(model, MiewidModel):
         # Match wbia-plugin-miew-id's training/inference transforms (and
         # MiewidModel.preprocess) so PairX visualizations operate on the
         # same tensor representation as embedding extraction. albumentations
@@ -72,8 +91,17 @@ def validate_img_parameters(bbox, theta):
     if len(bbox) != 4:
         raise HTTPException(status_code=400, detail=f"Each bounding box should have 4 values")
     for x in bbox:
+        # NaN must be rejected explicitly: json.loads accepts a bare NaN,
+        # Pydantic keeps it as a float, and every `x < 0` comparison against
+        # it is False -- so it reaches int() in get_chip_from_img and raises.
+        # That is a permanent caller error, and as a 500 Wildbook would retry
+        # it forever.
+        if not math.isfinite(x):
+            raise HTTPException(status_code=400, detail="Bounding box values must be finite")
         if x < 0:
             raise HTTPException(status_code=400, detail="Bounding box values should be positive")
+    if not math.isfinite(theta):
+        raise HTTPException(status_code=400, detail="Theta must be finite")
 
 def validate_vis_parameters(body):
     """Checks if body parameters related to a specific visualization algorithm are valid."""
@@ -88,33 +116,105 @@ def validate_vis_parameters(body):
             raise HTTPException(status_code=400, detail=f"K Colors must be less than 100")
         if body.visualization_type not in ["lines_and_colors", "only_lines", "only_colors"]:
             raise HTTPException(status_code=400, detail="Unsupported visualization type.")
-        possible_models = ["miewid-msv3", "miewid-msv4.1"]
-        if not body.model_id.lower() in possible_models:
-            raise HTTPException(status_code=400, detail="Unsupported model for pairx.")
     else:
         raise HTTPException(status_code=400, detail="Unsupported algorithm.")
+
+def _read_default_model_id() -> str:
+    return os.getenv("EXPLAIN_DEFAULT_MODEL_ID", "miewid-msv4.1")
+
+
+# Snapshotted at module import so there is no uninitialised state to guard
+# against: a process that never runs the startup hook still holds a correct
+# value as of import, which for a container is when the environment is fixed.
+# Setting the variable from Python *after* this module is imported requires
+# an explicit init_explain_settings() to take effect.
+_default_model_id: str = _read_default_model_id()
+
+
+def init_explain_settings() -> None:
+    """Re-snapshot env configuration at startup.
+
+    Mirrors the config lifecycle of `load_fetch_settings()` in
+    app/utils/image_uri.py: config is snapshotted, never read per request,
+    so every request in a process sees the same value. Not idempotent by
+    design -- calling it again deliberately re-reads the environment,
+    which is how a caller picks up a change made after import.
+    """
+    global _default_model_id
+    _default_model_id = _read_default_model_id()
+
+
+def default_explain_model_id() -> str:
+    """Model id used when the caller omits `model_id`.
+
+    Wildbook >= 11.0 sends `model_id` explicitly. Older callers omit it, and
+    the right default is deployment-specific: model registries drift between
+    installations (one host loads `miewid-msv4_v3`, not the historic
+    `miewid-msv4.1`), so a hardcoded default is wrong somewhere by
+    construction. Returns the current snapshot; changing
+    EXPLAIN_DEFAULT_MODEL_ID requires re-snapshotting via
+    `init_explain_settings()`, normally by restarting the process.
+    """
+    return _default_model_id
+
+
+def resolve_pairx_model(handler, model_id):
+    """Resolve `model_id` against the loaded registry for a pairx request.
+
+    Raises 404 when the model is not loaded (listing what is), and 400 when
+    it is loaded but is not a MiewID model. Both are permanent, caller-side
+    errors: returning them as 4xx rather than letting an AttributeError
+    become a 500 matters because Wildbook retries 5xx, so a misconfigured
+    model id would otherwise retry forever against an unresolvable error.
+    """
+    model_entry = handler.get_model(model_id)
+    if model_entry is None:
+        raise HTTPException(status_code=404, detail={
+            "error": f"Model '{model_id}' not found.",
+            "available_models": list(handler.list_models().keys()),
+        })
+    if not isinstance(model_entry, MiewidModel):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model '{model_id}' is not a MiewID model. PairX requires a MiewID model.",
+        )
+    return model_entry
+
 
 async def process_image(uri, bbox, theta, crop_bbox, model, device):
     """Reads image in from uri and generates pretransform and transform images to use for visualiztaion. 
     If crop_bbox is true, the preptransform image will be cropped. The transformed image will always be cropped.
     The transformed image will be stored on the device provided, ("cpu", "cuda", etc.)"""
     uri = uri.strip()
-    try:
-        if is_url(uri):
-            async with httpx.AsyncClient() as client:
-                response = await client.get(uri)
-            if response.status_code != 200:
-                raise HTTPException(status_code=400, detail=f"Failed to download image: {response.status_code}")
-            image_bytes = np.frombuffer(response.content, np.uint8)
-            image = cv2.imdecode(image_bytes, cv2.IMREAD_COLOR)
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        else:
-            path = str(Path(uri).expanduser().resolve())
-            image = cv2.imread(path)
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error loading image: {str(e)}")
+    # The shared fetch path (URL, data URI, or local path) with explicit
+    # timeouts, a byte/pixel cap, and retry-ladder-correct statuses: 504 for a
+    # slow upstream, 502 for an upstream fault, 400 only for a genuine caller
+    # error. The inline httpx.AsyncClient() this replaces used httpx's 5s
+    # default and a bare `except Exception` that reported every one of those as
+    # 400 -- which Wildbook does not retry.
+    #
+    # One admission slot per image, not per request: /explain fans out to 2N
+    # images through asyncio.gather, and the shared client is built with
+    # pool=None on the explicit promise that the admission semaphore is what
+    # holds concurrent requests down to max_connections.
+    async with admission_slot():
+        image_bytes = await fetch_image_for_request(uri)
 
+    image = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        # check_image_header() already accepted the header, so this is a body
+        # PIL can parse and OpenCV cannot. Guard it: cv2.cvtColor(None, ...)
+        # raises '(-215:Assertion failed) !_src.empty()', which used to reach
+        # the caller as the entire error detail.
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not decode image: {sanitize_uri_for_response(uri)}")
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+    # Retained deliberately. read_items() validates every bbox/theta before it
+    # fetches anything, so this is redundant on that path -- but it keeps
+    # process_image() correct on its own terms rather than relying on its one
+    # caller having checked first.
     validate_img_parameters(bbox, theta)
 
     # extend_bb_list pads missing bboxes with [0, 0, 0, 0]. When the
@@ -145,12 +245,36 @@ async def process_image(uri, bbox, theta, crop_bbox, model, device):
     return image, transformed_image.to(device)
 
 def process_asyncio_result(result):
-    """Processes a result of process_image() when it is run via asyncio."""
+    """Processes a result of process_image() when it is run via asyncio.
+
+    An HTTPException passes through untouched. process_image has already
+    mapped the failure to the right status, and re-wrapping it as 400 here
+    undid that for every image: a 504 from a stalled Wildbook reached the
+    caller as a permanent client error it would never retry.
+
+    Anything else escaping process_image is a fault in this service, not in
+    the request, so it is a 500 -- and its message stays in the log rather
+    than in the response body.
+    """
+    if isinstance(result, HTTPException):
+        raise result
     if isinstance(result, Exception):
-        raise HTTPException(status_code=400, detail=f"{str(result)}")
-    else:
-        image, transform = result
-        return image, transform
+        logger.error("Unhandled error preparing an explain image",
+                     exc_info=result)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+    image, transform = result
+    return image, transform
+
+def run_pairx_locked(lock, *args, **kwargs):
+    """Run PAIR-X holding `lock`, excluding other forwards on the same model.
+
+    Called through run_in_threadpool, so the lock is acquired on the worker
+    thread and never on the event loop -- blocking there would reintroduce
+    the request starvation that moving PAIR-X off the loop fixed.
+    """
+    with lock:
+        return run_pairx(*args, **kwargs)
+
 
 def run_pairx(imgs1_transformed, imgs2_transformed, imgs1, imgs2, model, layer_key, 
         k_lines, k_colors, visualization_type):
@@ -211,6 +335,16 @@ def run_pairx(imgs1_transformed, imgs2_transformed, imgs1, imgs2, model, layer_k
                     layer_key, k_lines, k_colors, visualization_type)
             return first_half + second_half
         else:
+            # The response stays deliberately opaque, so the cause has to go
+            # somewhere. Without this the 500 is undiagnosable: it is one of
+            # only two lines producing this exact body, and the other one
+            # (process_asyncio_result) is the only one that logged.
+            # Batch shape is included because the failure this most often
+            # hides is a CUDA OOM, whose likelihood depends on it.
+            logger.exception(
+                "PAIR-X inference failed (layer_key=%s, pairs=%d, k_lines=%d, "
+                "k_colors=%d)", layer_key, len(imgs1_transformed), k_lines,
+                k_colors)
             raise HTTPException(status_code=500, detail=f"Internal Server Error")
     finally:
         # PAIR-X backward() accumulates .grad on model params — clear to prevent VRAM growth
@@ -240,7 +374,7 @@ class body(BaseModel):
     image2_uris: list[str]
     bb2: list[list[float]]
     theta2: list[float] = [0.0]
-    model_id: str = "miewid-msv4.1"
+    model_id: str = Field(default_factory=default_explain_model_id)
     crop_bbox: bool = False
     visualization_type: str = "only_colors"
     layer_key: str = "backbone.blocks.3"
@@ -256,6 +390,16 @@ async def read_items(
     ):
 
     validate_vis_parameters(body)
+    # Resolve the model before fetching any image: a bad model id is a
+    # permanent error, and downloading two images first wastes bandwidth
+    # and holds an explain slot for the duration of the fetch.
+    # An explicitly-sent blank is a caller error, not a request to use the
+    # deployment default: silently substituting a different model would run
+    # inference the caller never asked for. Omitted model_id never reaches
+    # here as blank -- the field default_factory has already filled it in.
+    if not body.model_id or not body.model_id.strip():
+        raise HTTPException(status_code=400, detail="model_id must not be blank.")
+    model_entry = resolve_pairx_model(handler, body.model_id)
     device = request.app.state.device
 
     image1s = []
@@ -269,15 +413,34 @@ async def read_items(
     theta1s = extend_theta_list(body.image1_uris, body.theta1)
     theta2s = extend_theta_list(body.image2_uris, body.theta2)
 
+    # Check the pairing and the crop parameters BEFORE fetching anything.
+    # These are permanent caller errors, and every image fetched takes a slot
+    # from the process-wide admission gate that /extract, /predict, /classify
+    # and /pipeline are also queueing on -- so a request already known to be
+    # invalid must not consume any. Same reasoning as resolving the model
+    # first, one step up.
+    if len(body.image1_uris) != 1:
+        if len(body.image1_uris) != len(body.image2_uris):
+            raise HTTPException(status_code=400, detail="Either provide only one image 1 or the same number of image1s and image2s.")
+        if len(body.image1_uris) > MAX_BATCH_SIZE:
+            raise HTTPException(status_code=400, detail=f"Batch exceeded max size of {str(MAX_BATCH_SIZE)}")
+    # Zip against the URI lists so validation covers exactly the images the
+    # fetch loops below will process -- no more (a caller's unused surplus
+    # bbox should not fail the request) and no fewer.
+    for _, bb, theta in zip(body.image1_uris, bb1s, theta1s):
+        validate_img_parameters(bb, theta)
+    for _, bb, theta in zip(body.image2_uris, bb2s, theta2s):
+        validate_img_parameters(bb, theta)
+
     # Read in images asynchronously
     tasks = []
     for uri, bb, theta in zip(body.image1_uris, bb1s, theta1s):
-        tasks.append(process_image(uri, bb, theta, body.crop_bbox, body.model_id, device))
+        tasks.append(process_image(uri, bb, theta, body.crop_bbox, model_entry, device))
     results1 = await asyncio.gather(*tasks, return_exceptions=True)
     
     tasks = []
     for uri, bb, theta in zip(body.image2_uris, bb2s, theta2s):
-        tasks.append(process_image(uri, bb, theta, body.crop_bbox, body.model_id, device))
+        tasks.append(process_image(uri, bb, theta, body.crop_bbox, model_entry, device))
     results2 = await asyncio.gather(*tasks, return_exceptions=True)
     
 
@@ -290,24 +453,35 @@ async def read_items(
             image2s.append(image2)
             image2s_transformed.append(image2_transformed)
     else:
-        if len(body.image1_uris) != len(body.image2_uris):
-            raise HTTPException(status_code=400, detail="Either provide only one image 1 or the same number of image1s and image2s.")
-        else:
-            if len(body.image1_uris) > MAX_BATCH_SIZE:
-                raise HTTPException(status_code=400, detail=f"Batch exceeded max size of {str(MAX_BATCH_SIZE)}")
-            for i in range(len(body.image1_uris)):
-                image1, image1_transformed = process_asyncio_result(results1[i])
-                image1s.append(image1)
-                image1s_transformed.append(image1_transformed)
-                image2, image2_transformed = process_asyncio_result(results2[i])
-                image2s.append(image2)
-                image2s_transformed.append(image2_transformed)
+        # Pairing and batch size were validated before the fetch above.
+        for i in range(len(body.image1_uris)):
+            image1, image1_transformed = process_asyncio_result(results1[i])
+            image1s.append(image1)
+            image1s_transformed.append(image1_transformed)
+            image2, image2_transformed = process_asyncio_result(results2[i])
+            image2s.append(image2)
+            image2s_transformed.append(image2_transformed)
 
     # Only apply semaphore to the actual prediction
     async with explain_semaphore:
         if body.algorithm.lower() == "pairx":
-            model = handler.get_model(body.model_id).model
-            visualizations = run_pairx(image1s_transformed, image2s_transformed, image1s, image2s, model, body.layer_key, body.k_lines, body.k_colors, body.visualization_type)
+            model = model_entry.model
+            # PairX is a synchronous torch forward+backward. Run inline it
+            # pinned the event loop for its whole duration, so every image
+            # fetch in flight on this worker was starved until it returned --
+            # the 2026-08-28 Flukebook incident, where a sibling /extract/
+            # fetch blew its 60s deadline on an asset that had served 200 in
+            # under a second, and the next /explain/ 400'd on its own timeout.
+            # model_entry.inference_lock excludes /extract and /pipeline
+            # forwards on this same MiewID instance for the whole call: PAIR-X
+            # captures its feature map with a forward hook on a submodule of
+            # it, and any other forward through that submodule while the hook
+            # is registered overwrites the capture with a no-grad tensor.
+            visualizations = await run_in_threadpool(
+                run_pairx_locked, model_entry.inference_lock,
+                image1s_transformed, image2s_transformed,
+                image1s, image2s, model, body.layer_key,
+                body.k_lines, body.k_colors, body.visualization_type)
         else:
             raise HTTPException(status_code=400, detail="Unsupported algorithm.")
     

@@ -1,13 +1,12 @@
 import logging
 from fastapi import APIRouter, HTTPException, Request, status, Depends
 from typing import Optional, Dict, Any, List
-import httpx
 import asyncio
 from pydantic import BaseModel, Field
 import json
 import os
 from app.models.model_handler import ModelHandler
-from app.utils.image_uri import resolve_image_uri, sanitize_uri_for_logging
+from app.utils.image_uri import fetch_image_for_request, admission_slot, sanitize_uri_for_logging
 from fastapi.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
@@ -71,7 +70,7 @@ async def predict(
     Raises:
         HTTPException: If there's an error processing the request
     """
-    async with predict_semaphore:
+    async with admission_slot():
         try:
             # Get the model instance
             model = handler.get_model(prediction.model_id)
@@ -84,45 +83,34 @@ async def predict(
                         "available_models": available_models
                     }
                 )
-            
+
             # Resolve image bytes from URI (URL, data URI, or local path)
-            try:
-                image_bytes = await resolve_image_uri(prediction.image_uri)
-            except ValueError as e:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=str(e)
+            image_bytes = await fetch_image_for_request(prediction.image_uri)
+
+            async with predict_semaphore:
+                # Get model info for default parameters
+                model_info = handler.get_model_info(prediction.model_id)
+
+                # Prepare prediction parameters, overriding defaults with any provided parameters
+                predict_params = model_info['config'].copy()
+                if prediction.model_params:
+                    predict_params.update(prediction.model_params)
+
+                # Remove any parameters that shouldn't be passed to predict
+                predict_params.pop('model_path', None)
+                predict_params.pop('device', None)
+
+                # Run inference in a thread pool
+                result = await run_in_threadpool(
+                    model.predict,
+                    image_bytes=image_bytes,
+                    **predict_params
                 )
-            
-            # Get model info for default parameters
-            model_info = handler.get_model_info(prediction.model_id)
-            
-            # Prepare prediction parameters, overriding defaults with any provided parameters
-            predict_params = model_info['config'].copy()
-            if prediction.model_params:
-                predict_params.update(prediction.model_params)
-            
-            # Remove any parameters that shouldn't be passed to predict
-            predict_params.pop('model_path', None)
-            predict_params.pop('device', None)
-            
-            # Run inference in a thread pool
-            result = await run_in_threadpool(
-                model.predict,
-                image_bytes=image_bytes,
-                **predict_params
-            )
-            
-            # Add model_id to the result
-            result['model_id'] = prediction.model_id
-            return result
-            
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Error downloading image: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Error downloading image: {str(e)}"
-            )
+
+                # Add model_id to the result
+                result['model_id'] = prediction.model_id
+                return result
+
         except HTTPException:
             raise
         except Exception as e:

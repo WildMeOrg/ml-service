@@ -1,11 +1,10 @@
 import logging
 from fastapi import APIRouter, HTTPException, Request, status, Depends
 from typing import Dict, Any, List, Optional
-import httpx
 import asyncio
 from pydantic import BaseModel, Field
 from app.models.model_handler import ModelHandler
-from app.utils.image_uri import resolve_image_uri, sanitize_uri_for_response
+from app.utils.image_uri import fetch_image_for_request, admission_slot, sanitize_uri_for_response
 from fastapi.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
@@ -44,7 +43,7 @@ async def classify_image(
     Raises:
         HTTPException: If there's an error processing the request
     """
-    async with classify_semaphore:
+    async with admission_slot():
         try:
             # Validate bbox format if provided
             if classify_request.bbox is not None and len(classify_request.bbox) != 4:
@@ -52,7 +51,7 @@ async def classify_image(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Bounding box must contain exactly 4 values: [x, y, width, height]"
                 )
-            
+
             # Get the model instance
             model = handler.get_model(classify_request.model_id)
             if not model:
@@ -64,7 +63,7 @@ async def classify_image(
                         "available_models": available_models
                     }
                 )
-            
+
             # Check if the model supports classification (has predict method)
             if not hasattr(model, 'predict'):
                 raise HTTPException(
@@ -73,35 +72,22 @@ async def classify_image(
                 )
 
             # Resolve image bytes from URI (URL, data URI, or local path)
-            try:
-                image_bytes = await resolve_image_uri(classify_request.image_uri)
-            except ValueError as e:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=str(e)
+            image_bytes = await fetch_image_for_request(classify_request.image_uri)
+
+            async with classify_semaphore:
+                # Run classification in a thread pool
+                result = await run_in_threadpool(
+                    model.predict,
+                    image_bytes=image_bytes,
+                    bbox=classify_request.bbox,
+                    theta=classify_request.theta
                 )
-                with open(file_path, "rb") as f:
-                    image_bytes = f.read()
-            
-            # Run classification in a thread pool
-            result = await run_in_threadpool(
-                model.predict,
-                image_bytes=image_bytes,
-                bbox=classify_request.bbox,
-                theta=classify_request.theta
-            )
-            
-            # Add request metadata to result
-            result['image_uri'] = sanitize_uri_for_response(classify_request.image_uri)
-            
-            return result
-            
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Error downloading image: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Error downloading image: {str(e)}"
-            )
+
+                # Add request metadata to result
+                result['image_uri'] = sanitize_uri_for_response(classify_request.image_uri)
+
+                return result
+
         except HTTPException:
             raise
         except Exception as e:

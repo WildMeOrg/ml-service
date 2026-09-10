@@ -14,6 +14,7 @@ from albumentations.pytorch import ToTensorV2
 from PIL import Image
 import numpy as np
 import io
+import threading
 from app.utils.checkpoint_utils import get_checkpoint_path
 from app.utils.helpers import get_chip_from_img
 
@@ -65,6 +66,21 @@ class MiewidModel(BaseModel):
         self.device = "cuda"
         self.preprocess = None
         self.use_checkpoint = False
+        # Serializes forwards through this instance across routers.
+        #
+        # PAIR-X (/explain) captures its feature map with a forward hook
+        # registered on a submodule of this very object (pairx/core.py:23-43),
+        # and that hook fires for EVERY forward through the submodule, from any
+        # thread, until it is removed. A /extract or /pipeline forward landing
+        # in that window -- same model id, same instance, under no_grad --
+        # overwrites the captured tensor with one that has no grad_fn, and
+        # PAIR-X's backward then dies with "element 0 of tensors does not
+        # require grad".
+        #
+        # A plain Lock is sufficient: run_pairx_locked acquires once and
+        # run_pairx's OOM recursion stays inside that single acquisition,
+        # never reacquiring. Nothing takes this lock twice on one thread.
+        self.inference_lock = threading.Lock()
 
     def load(self, model_path: str = "", device: str = "cuda", **kwargs) -> None:
         self.device = device
@@ -199,8 +215,10 @@ class MiewidModel(BaseModel):
             input_tensor = augmented["image"]
             input_batch = input_tensor.unsqueeze(0).to(self.device)
             
-            # Extract embeddings
-            with torch.no_grad():
+            # Extract embeddings. The lock is held only across the forward,
+            # not the decode/preprocess above it, so a slow image never blocks
+            # another endpoint's inference.
+            with self.inference_lock, torch.no_grad():
                 embeddings = self.model(input_batch)
             
             # Convert to numpy and return

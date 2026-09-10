@@ -28,12 +28,28 @@ from __future__ import annotations
 
 import asyncio
 import io
+import threading
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 import torch
 from PIL import Image
+
+from app.models.miewid import MiewidModel
+
+
+def _miewid_stub():
+    """A stand-in for a resolved MiewID model instance.
+
+    `process_image` (via `preprocess`) now branches on the model instance
+    type rather than on a model_id string, so these tests pass an object
+    that satisfies `isinstance(..., MiewidModel)`.
+    """
+    m = MagicMock(spec=MiewidModel)
+    # Real instances get this in __init__; spec= only exposes class attrs.
+    m.inference_lock = threading.RLock()
+    return m
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +86,7 @@ def test_process_image_returns_chip_as_display_when_bbox_provided(tmp_path):
     theta = 0.0
 
     display, tensor = asyncio.run(
-        process_image(str(img_path), bbox, theta, crop_bbox=False, model="miewid-msv4.1", device="cpu")
+        process_image(str(img_path), bbox, theta, crop_bbox=False, model=_miewid_stub(), device="cpu")
     )
 
     # Tensor should always be (1, 3, 440, 440)
@@ -101,7 +117,7 @@ def test_process_image_returns_full_image_when_no_bbox(tmp_path):
     Image.fromarray(img, mode="RGB").save(img_path)
 
     display, _ = asyncio.run(
-        process_image(str(img_path), [0, 0, 0, 0], 0.0, crop_bbox=False, model="miewid-msv4.1", device="cpu")
+        process_image(str(img_path), [0, 0, 0, 0], 0.0, crop_bbox=False, model=_miewid_stub(), device="cpu")
     )
 
     import torchvision.transforms as transforms
@@ -126,7 +142,7 @@ def test_process_image_theta_only_with_sentinel_bbox_does_not_crash(tmp_path):
 
     theta = 0.4
     display, tensor = asyncio.run(
-        process_image(str(img_path), [0, 0, 0, 0], theta, crop_bbox=False, model="miewid-msv4.1", device="cpu")
+        process_image(str(img_path), [0, 0, 0, 0], theta, crop_bbox=False, model=_miewid_stub(), device="cpu")
     )
 
     assert tensor.shape == (1, 3, 440, 440)
@@ -150,7 +166,7 @@ def test_process_image_full_frame_bbox_with_rotation_uses_rotated_chip(tmp_path)
 
     theta = 0.4
     display, _ = asyncio.run(
-        process_image(str(img_path), [0, 0, w, h], theta, crop_bbox=False, model="miewid-msv4.1", device="cpu")
+        process_image(str(img_path), [0, 0, w, h], theta, crop_bbox=False, model=_miewid_stub(), device="cpu")
     )
 
     expected_chip = get_chip_from_img(img, [0, 0, w, h], theta)
@@ -250,6 +266,7 @@ def test_extract_embeddings_uses_canonical_chip_helper():
     # Stand up a real MiewidModel instance but stub the heavy bits.
     model = MiewidModel.__new__(MiewidModel)
     model.device = "cpu"
+    model.inference_lock = threading.RLock()   # __new__ skips __init__
 
     fake_tensor = torch.zeros(3, 4, 4)
     captured = {}
@@ -341,6 +358,7 @@ def test_extract_embeddings_handles_zero_size_bbox_with_rotation():
 
     model = MiewidModel.__new__(MiewidModel)
     model.device = "cpu"
+    model.inference_lock = threading.RLock()   # __new__ skips __init__
     captured = {}
 
     def fake_preprocess(image):
@@ -375,6 +393,7 @@ def test_extract_embeddings_no_bbox_with_theta_uses_full_frame_helper():
 
     model = MiewidModel.__new__(MiewidModel)
     model.device = "cpu"
+    model.inference_lock = threading.RLock()   # __new__ skips __init__
     captured = {}
 
     def fake_preprocess(image):
@@ -398,6 +417,7 @@ def test_extract_embeddings_no_bbox_no_theta_uses_full_image():
 
     model = MiewidModel.__new__(MiewidModel)
     model.device = "cpu"
+    model.inference_lock = threading.RLock()   # __new__ skips __init__
     captured = {}
 
     def fake_preprocess(image):

@@ -15,7 +15,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def _probe(attr, env=None, argv=None):
     """Import app.main in a subprocess and return getattr(main.args, attr)."""
     child_env = {k: v for k, v in os.environ.items()
-                 if k not in ("PORT", "HOST", "DEVICE", "WORKERS")}
+                 if k not in ("PORT", "HOST", "DEVICE", "WORKERS",
+                              "LIMIT_CONCURRENCY")}
     child_env.update(env or {})
     code = (
         "import sys; "
@@ -80,3 +81,13 @@ def test_host_env_supplies_default():
 
 def test_workers_env_supplies_default():
     assert _probe("workers", env={"WORKERS": "2"}) == "2"
+
+
+def test_limit_concurrency_env_supplies_default():
+    """Added after the merge with main, which introduced the flag: a deploy
+    knob outside the env contract would leave the image non-portable."""
+    assert _probe("limit_concurrency", env={"LIMIT_CONCURRENCY": "64"}) == "64"
+
+
+def test_malformed_limit_concurrency_env_falls_back():
+    assert _probe("limit_concurrency", env={"LIMIT_CONCURRENCY": "lots"}) == "32"

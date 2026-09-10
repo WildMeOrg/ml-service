@@ -1,0 +1,275 @@
+"""fetch_image_for_request must map every failure class to the spec's
+status code, and admission_slot must 503 on wait timeout."""
+import asyncio
+import base64
+import time
+
+import httpx
+import pytest
+from fastapi import HTTPException
+
+from app.utils import image_uri
+from tests.test_image_fetch_guards import ONE_PX_PNG
+
+
+def _status_for(handler):
+    image_uri.init_image_fetch(transport=httpx.MockTransport(handler))
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(image_uri.fetch_image_for_request("https://wb.example/x.jpg"))
+    return exc.value.status_code
+
+
+def test_success_returns_bytes():
+    image_uri.init_image_fetch(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, content=ONE_PX_PNG)))
+    data = asyncio.run(image_uri.fetch_image_for_request("https://wb.example/ok.png"))
+    assert data == ONE_PX_PNG
+
+
+def test_read_timeout_maps_504():
+    def h(req):
+        raise httpx.ReadTimeout("stall", request=req)
+    assert _status_for(h) == 504
+
+
+def test_connect_error_maps_502():
+    def h(req):
+        raise httpx.ConnectError("refused", request=req)
+    assert _status_for(h) == 502
+
+
+def test_upstream_500_maps_502():
+    assert _status_for(lambda r: httpx.Response(500)) == 502
+
+
+def test_upstream_429_maps_502():
+    assert _status_for(lambda r: httpx.Response(429)) == 502
+
+
+def test_upstream_408_maps_502():
+    assert _status_for(lambda r: httpx.Response(408)) == 502
+
+
+@pytest.mark.parametrize("code", [401, 403, 404, 410, 415])
+def test_upstream_permanent_4xx_maps_400(code):
+    assert _status_for(lambda r, c=code: httpx.Response(c)) == 400
+
+
+def test_too_many_redirects_maps_400():
+    def h(req):
+        return httpx.Response(302, headers={"location": str(req.url)})
+    assert _status_for(h) == 400
+
+
+def test_decoding_error_maps_502():
+    def h(req):
+        raise httpx.DecodingError("bad encoding", request=req)
+    assert _status_for(h) == 502
+
+
+def test_unparseable_image_maps_400():
+    assert _status_for(lambda r: httpx.Response(200, content=b"mp4junk" * 4)) == 400
+
+
+def test_invalid_data_uri_maps_400():
+    image_uri.init_image_fetch()
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(image_uri.fetch_image_for_request("data:image/png;base64"))
+    assert exc.value.status_code == 400
+
+
+def test_total_deadline_maps_504(monkeypatch):
+    monkeypatch.setenv("IMAGE_FETCH_TOTAL_DEADLINE_S", "0.05")
+
+    async def run():
+        async def drip():
+            yield b"a"
+            await asyncio.sleep(0.2)
+            yield b"b"
+        image_uri.init_image_fetch(
+            transport=httpx.MockTransport(lambda r: httpx.Response(200, content=drip())))
+        with pytest.raises(HTTPException) as exc:
+            await image_uri.fetch_image_for_request("https://wb.example/drip.jpg")
+        assert exc.value.status_code == 504
+    asyncio.run(run())
+
+
+def test_admission_slot_503_on_wait_timeout(monkeypatch):
+    monkeypatch.setenv("IMAGE_ADMISSION_LIMIT", "1")
+    monkeypatch.setenv("IMAGE_ADMISSION_WAIT_S", "0.05")
+
+    async def run():
+        image_uri.init_image_fetch()
+        async with image_uri.admission_slot():
+            with pytest.raises(HTTPException) as exc:
+                async with image_uri.admission_slot():
+                    pass
+            assert exc.value.status_code == 503
+    asyncio.run(run())
+
+
+def test_admission_slot_releases_on_exception():
+    async def run():
+        image_uri.init_image_fetch()
+        with pytest.raises(RuntimeError):
+            async with image_uri.admission_slot():
+                raise RuntimeError("boom")
+        # slot must be free again
+        async with image_uri.admission_slot():
+            pass
+    asyncio.run(run())
+
+
+def test_failure_log_contains_sanitized_uri(caplog):
+    def h(req):
+        raise httpx.ConnectError("refused", request=req)
+    image_uri.init_image_fetch(transport=httpx.MockTransport(h))
+    with pytest.raises(HTTPException):
+        asyncio.run(image_uri.fetch_image_for_request("https://wb.example/y.jpg"))
+    assert any("https://wb.example/y.jpg" in r.message for r in caplog.records)
+
+
+# --- decode validation (PR #27) ---------------------------------------------
+# check_image_header() only parses the header; fetch_image_for_request() then
+# fully decodes with both PIL and cv2 so a permanently bad image is a 400
+# (drop job) and never a retryable 500 from inside model.predict.
+
+def _http_exc_for(content: bytes) -> HTTPException:
+    image_uri.init_image_fetch(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, content=content)))
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(image_uri.fetch_image_for_request("https://wb.example/x.jpg"))
+    return exc.value
+
+
+def _jpeg_with_broken_scan() -> bytes:
+    """Valid JPEG header, corrupt entropy-coded scan: passes the header check,
+    fails only on a full load()."""
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 64), (120, 120, 120)).save(buf, "jpeg", quality=90)
+    data = bytearray(buf.getvalue())
+    at = max(20, len(data) - 40)
+    for i in range(at, min(at + 32, len(data) - 1), 2):
+        data[i:i + 2] = b"\xff\x99"
+    return bytes(data)
+
+
+def test_corrupt_scan_stream_maps_400_with_decode_reason():
+    exc = _http_exc_for(_jpeg_with_broken_scan())
+    assert exc.status_code == 400
+    assert "ImageDecodeError" in exc.detail
+
+
+def test_video_container_maps_400_with_video_hint():
+    mp4 = bytes.fromhex("00000018667479706d70343200000000") + b"\x00" * 64
+    exc = _http_exc_for(mp4)
+    assert exc.status_code == 400
+    assert "video" in exc.detail
+
+
+def test_pil_only_format_maps_400_with_format_hint():
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("P", (32, 32)).save(buf, "gif")  # PIL loads it; cv2.imdecode -> None
+    exc = _http_exc_for(buf.getvalue())
+    assert exc.status_code == 400
+    assert "JPEG, PNG, or WebP" in exc.detail
+
+
+def test_transport_failure_detail_stays_type_name_only():
+    def h(req):
+        raise httpx.ConnectError("refused to connect to 10.0.0.7", request=req)
+    image_uri.init_image_fetch(transport=httpx.MockTransport(h))
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(image_uri.fetch_image_for_request("https://wb.example/x.jpg"))
+    assert exc.value.detail.endswith("ConnectError")
+
+
+
+@pytest.mark.parametrize("limit", [1, 3])
+def test_full_decode_is_bounded_by_decode_limit(monkeypatch, limit):
+    """Validation holds decoded pixels, so it is bounded by IMAGE_DECODE_LIMIT
+    rather than by the (larger) admission limit. Workers block on an event
+    while the test checks the bound. The lower bound is deterministic (fewer
+    than `limit` inside within 5 s means the bound is too tight: a hardcoded 2
+    fails at limit=3); the upper bound gives would-be excess entrants 100 ms,
+    which is generous next to the microseconds they need."""
+    import threading
+    monkeypatch.setenv("IMAGE_DECODE_LIMIT", str(limit))
+    lock = threading.Lock()
+    release = threading.Event()
+    state = {"active": 0, "peak": 0}
+
+    def gated_validate(data):
+        with lock:
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        assert release.wait(5), "workers were never released"
+        with lock:
+            state["active"] -= 1
+    monkeypatch.setattr(image_uri, "validate_decodable", gated_validate)
+
+    uri = "data:image/png;base64," + base64.b64encode(ONE_PX_PNG).decode()
+
+    async def run():
+        image_uri.init_image_fetch()
+        tasks = [asyncio.create_task(image_uri.fetch_image_for_request(uri))
+                 for _ in range(2 * limit)]
+        deadline = time.monotonic() + 5
+        while state["active"] < limit and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert state["active"] == limit, state       # the bound admits `limit`
+        await asyncio.sleep(0.1)                     # excess had ample time...
+        assert state["active"] == limit, state       # ...and stayed out
+        release.set()
+        await asyncio.gather(*tasks)
+    asyncio.run(run())
+    assert state["peak"] == limit, state
+
+
+def test_decode_slot_released_after_failed_validation(monkeypatch):
+    """An ImageDecodeError inside the slot must not leak it."""
+    import io
+    from PIL import Image
+    monkeypatch.setenv("IMAGE_DECODE_LIMIT", "1")
+    buf = io.BytesIO()
+    Image.new("P", (8, 8)).save(buf, "gif")  # PIL ok, cv2 None -> raises in-slot
+    bad = "data:image/gif;base64," + base64.b64encode(buf.getvalue()).decode()
+    good = "data:image/png;base64," + base64.b64encode(ONE_PX_PNG).decode()
+
+    async def run():
+        image_uri.init_image_fetch()
+        with pytest.raises(HTTPException):
+            await image_uri.fetch_image_for_request(bad)
+        # a leaked slot would hang here; wait_for turns that into a failure
+        assert await asyncio.wait_for(image_uri.fetch_image_for_request(good), 5) == ONE_PX_PNG
+    asyncio.run(run())
+
+
+def test_header_stage_memory_error_escapes_as_server_failure(monkeypatch):
+    """check_image_header() catches Exception for unparseable headers; a
+    MemoryError raised there is a resource failure and must not become a
+    permanent 400."""
+    def exploding_open(*a, **k):
+        raise MemoryError()
+    monkeypatch.setattr(image_uri.Image, "open", exploding_open)
+    image_uri.init_image_fetch()
+    uri = "data:image/png;base64," + base64.b64encode(ONE_PX_PNG).decode()
+    with pytest.raises(MemoryError):
+        asyncio.run(image_uri.fetch_image_for_request(uri))
+
+
+def test_header_stage_pillow_oom_escapes_as_server_failure(monkeypatch):
+    """Same classification as MemoryError for Pillow's codec-level OSError."""
+    def exploding_open(*a, **k):
+        raise OSError("out of memory error")
+    monkeypatch.setattr(image_uri.Image, "open", exploding_open)
+    image_uri.init_image_fetch()
+    uri = "data:image/png;base64," + base64.b64encode(ONE_PX_PNG).decode()
+    with pytest.raises(OSError) as exc:
+        asyncio.run(image_uri.fetch_image_for_request(uri))
+    assert not isinstance(exc.value, HTTPException)
+    assert not isinstance(exc.value, ValueError)
