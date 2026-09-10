@@ -710,10 +710,67 @@ uvicorn app.main:app --host 0.0.0.0 --port 6050
 
 ### Command Line Options
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--device` | `cuda` | PyTorch device: `cuda`, `cpu`, or `mps` |
-| `--host` | `0.0.0.0` | Bind address |
-| `--port` | `8888` | Listen port |
-| `--workers` | `1` | Uvicorn worker count (use 1 for GPU to avoid VRAM contention) |
-| `--reload` | off | Auto-reload on code changes (development only) |
+Each flag's default comes from an environment variable when set, so the same
+container image runs unmodified across providers (Cloud Run injects `PORT`,
+RunPod/VMs set `DEVICE`, etc.). An explicit CLI flag always beats the
+environment. The Docker image sets `PORT=6050` and `HOST=0.0.0.0`, so
+container behavior is unchanged unless the platform injects its own values.
+
+| Flag | Env var | Default | Description |
+|------|---------|---------|-------------|
+| `--device` | `DEVICE` | `cuda` | PyTorch device: `cuda`, `cpu`, or `mps` |
+| `--host` | `HOST` | `0.0.0.0` | Bind address |
+| `--port` | `PORT` | `8888` (bare) / `6050` (image) | Listen port |
+| `--workers` | `WORKERS` | `1` | Uvicorn worker count (use 1 for GPU to avoid VRAM contention) |
+| `--limit-concurrency` | `LIMIT_CONCURRENCY` | `32` | Max concurrent connections per worker; excess get 503 without reaching the application |
+| `--reload` | — | off | Auto-reload on code changes (development only) |
+
+Malformed integer values are ignored with a warning rather than crashing
+startup; the image health check applies the same validation and fallback, so
+whenever the listen port comes from `PORT` it probes the port the server
+actually bound. (Overriding the port with an explicit `--port` flag instead
+breaks that pairing — see below.) A `LIMIT_CONCURRENCY` below 2 is
+rejected with a warning and falls back to the default 32 — uvicorn counts
+the connection it is serving, so a limit of 1 would 503 every request,
+`/health` included, marking the container unhealthy (and, under the
+`autoheal=true` label both compose files set, restarting it).
+
+#### Upgrading an existing deployment
+
+Before this change the image's `CMD` hardcoded `--host 0.0.0.0 --port 6050`,
+so container environment variables named `PORT`/`HOST`/`DEVICE`/`WORKERS`
+were ignored. They are now read as defaults, and `LIMIT_CONCURRENCY` is new.
+
+**A flag passed explicitly at launch still wins, but it only protects the
+setting it names.** Both compose files in `docker/` pin host, port, device
+and workers, and both override the healthcheck to `localhost:6050`, so a
+deployment using them keeps its current behavior. Neither pins
+`--limit-concurrency`, so a container environment that happens to define
+`LIMIT_CONCURRENCY` would newly take effect there.
+
+Deployments that rely on the image's own `CMD` should check, before pulling,
+whether the *container* environment already defines any of these names for
+an unrelated purpose:
+
+| Variable | If already set to something unrelated |
+|----------|----------------------------------------|
+| `PORT` | The listener moves. The image healthcheck follows it, but published port mappings, reverse-proxy upstreams and external/orchestrator probes do **not**. A malformed or out-of-range value binds 8888, not 6050. |
+| `HOST` | A loopback or unreachable address makes the service unreachable from outside the container. |
+| `DEVICE` | Model loading may fail, or fall to CPU. |
+| `WORKERS` | Extra workers each load a full model copy — VRAM exhaustion. |
+| `LIMIT_CONCURRENCY` | Values below 2 fall back to 32; low values 503 real traffic; high values weaken the body-size memory bound. |
+
+Check the effective container environment, not the host shell: a compose
+`.env` file feeds variable *substitution* and does not by itself become
+container environment. Audit `environment:`/`env_file:` blocks and any
+overlay files, `docker run -e/--env-file`, Kubernetes `env`/`envFrom`, and
+`ENV` in any derived image.
+
+Two port details to know about. The image healthcheck resolves its port
+from `PORT`, so it probes the wrong place whenever an explicit `--port`
+disagrees with `PORT` — `--port 7000` against the image's `PORT=6050` sends
+the probe to 6050 and fails a healthy server. Prefer setting `PORT` over
+passing `--port`; if you must pass the flag, override the healthcheck too,
+as both compose files do. Separately, clearing `PORT` rather than changing
+it drops server *and* probe to 8888 together — consistent, but `EXPOSE 6050`
+and any port mapping are then stale.

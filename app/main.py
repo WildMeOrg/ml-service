@@ -22,6 +22,41 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+
+def _int_env(name: str, fallback: int, minimum: int = 1, maximum: int = None) -> int:
+    """Integer from the environment, tolerating provider-injected junk.
+
+    PORT in particular is set by the platform on PaaS providers (Cloud Run,
+    Fly, Railway), and an operator's env file can carry a stale or malformed
+    value, or a link-style URL copied from a prefixed variable such as
+    REDIS_PORT=tcp://10.0.0.1:6379. A config oddity must not crash startup.
+    Bare ASCII digits within [minimum, maximum] only — exactly what the
+    image healthcheck's shell validation accepts, so server and probe never
+    disagree about the port.
+    """
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return fallback
+    try:
+        if not (value.isascii() and value.isdecimal()):
+            raise ValueError(value)
+        if maximum is not None and len(value) > len(str(maximum)):
+            # More digits than the ceiling can have, rejected before int().
+            # The bound is explicit so it mirrors the probe's ${#p} check:
+            # left to CPython's integer-string conversion limit, a padded
+            # PORT like "0"*5000 + "7777" would fall back here while the
+            # shell accepted it, sending the probe after a port the server
+            # never bound.
+            raise ValueError(value)
+        number = int(value)
+    except ValueError:
+        logger.warning(f"Ignoring invalid {name}={value!r}; using {fallback}")
+        return fallback
+    if number < minimum or (maximum is not None and number > maximum):
+        logger.warning(f"Ignoring out-of-range {name}={value!r}; using {fallback}")
+        return fallback
+    return number
+
 # Create FastAPI app
 app = FastAPI()
 
@@ -31,21 +66,28 @@ from app.utils import image_uri
 MAX_REQUEST_BODY_BYTES = int(os.getenv("MAX_REQUEST_BODY_BYTES", "4194304"))
 app.add_middleware(BodyLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
 
-# Parse command line arguments
+# Parse command line arguments. Defaults come from the environment so the
+# same image runs unmodified across providers (Cloud Run injects PORT;
+# RunPod/VMs set DEVICE etc.). Explicit CLI flags still override.
 parser = argparse.ArgumentParser(description='FastAPI Model Serving Application')
-parser.add_argument('--device', type=str, default='cuda', 
+parser.add_argument('--device', type=str, default=os.getenv('DEVICE', 'cuda'),
                    help='Device to run the models on (e.g., cpu, cuda, mps)')
-parser.add_argument('--host', type=str, default='0.0.0.0', 
+parser.add_argument('--host', type=str, default=os.getenv('HOST', '0.0.0.0'),
                    help='Host to run the server on')
-parser.add_argument('--port', type=int, default=8888, 
+parser.add_argument('--port', type=int, default=_int_env('PORT', 8888, maximum=65535),
                    help='Port to run the server on')
-parser.add_argument('--reload', action='store_true', 
+parser.add_argument('--reload', action='store_true',
                    help='Enable auto-reload')
-parser.add_argument('--workers', type=int, default=1,
-                   help='Number of worker processes')
-parser.add_argument('--limit-concurrency', type=int, default=32,
+parser.add_argument('--workers', type=int, default=_int_env('WORKERS', 1),
+                   help='Number of worker processes (keep at 1 per GPU)')
+# minimum=2: uvicorn rejects when len(connections) >= limit and counts the
+# connection being served, so a limit of 1 503s every request including
+# /health, marking a healthy container unhealthy for autoheal to restart.
+parser.add_argument('--limit-concurrency', type=int,
+                   default=_int_env('LIMIT_CONCURRENCY', 32, minimum=2),
                    help='Max concurrent connections per worker; excess get 503 '
-                        'before their bodies are read (bounds parse-time memory)')
+                        'without reaching the application (bounds parse-time '
+                        'memory)')
 args = parser.parse_args()
 
 if __name__ == "__main__":
