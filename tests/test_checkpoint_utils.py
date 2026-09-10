@@ -52,7 +52,9 @@ def test_download_passes_timeout_to_requests(monkeypatch, tmp_path):
 
     assert calls, "requests.get was never called"
     assert calls[0].get("timeout") == checkpoint_utils.DOWNLOAD_TIMEOUT
-    assert checkpoint_utils.DOWNLOAD_TIMEOUT >= (5, 60), (
+    assert len(checkpoint_utils.DOWNLOAD_TIMEOUT) == 2
+    assert all(actual >= minimum for actual, minimum in
+               zip(checkpoint_utils.DOWNLOAD_TIMEOUT, (5, 60))), (
         "timeout must leave room for multi-hundred-MB weight files"
     )
 
@@ -268,3 +270,168 @@ def test_get_checkpoint_path_missing_local_raises():
 
 def test_get_checkpoint_path_none_returns_none():
     assert get_checkpoint_path(None) is None
+
+
+def test_cleanup_thread_start_failure_preserves_timeout(monkeypatch, tmp_path):
+    import threading
+
+    release = threading.Event()
+    entered = threading.Event()
+    worker_done = threading.Event()
+
+    class BlockedResponse(FakeResponse):
+        def iter_content(self, chunk_size=8192):
+            entered.set()
+            release.wait(5)
+            yield b'late'
+
+        def close(self):
+            pass
+
+    original_start = threading.Thread.start
+    original_stream = checkpoint_utils._stream_to_cache
+
+    def start(thread):
+        if thread.name == 'checkpoint-close':
+            raise RuntimeError("can't start new thread")
+        return original_start(thread)
+
+    def stream(*args):
+        try:
+            return original_stream(*args)
+        finally:
+            worker_done.set()
+
+    monkeypatch.setattr(threading.Thread, 'start', start)
+    monkeypatch.setattr(checkpoint_utils, '_stream_to_cache', stream)
+    monkeypatch.setattr(checkpoint_utils.requests, 'get', lambda *a, **kw: BlockedResponse([]))
+    monkeypatch.setattr(checkpoint_utils, 'DOWNLOAD_TOTAL_DEADLINE', 0.2)
+    try:
+        with pytest.raises(TimeoutError):
+            download_checkpoint('https://example.org/exhausted.pt', str(tmp_path))
+        assert entered.is_set()
+    finally:
+        release.set()
+        assert worker_done.wait(2)
+    assert all(p.name.endswith('.lock') for p in tmp_path.iterdir())
+
+
+def test_deadline_does_not_wait_for_real_buffered_response_close(monkeypatch, tmp_path):
+    """Exercise requests/urllib3's actual read/close lock, not a fake close()."""
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    release = threading.Event()
+    reading = threading.Event()
+    finished = threading.Event()
+    errors = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header('Content-Length', '100')
+            self.end_headers()
+            self.wfile.write(b'x')
+            self.wfile.flush()
+            release.wait(10)
+            self.wfile.write(b'x' * 99)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    real_get = checkpoint_utils.requests.get
+
+    def get(*args, **kwargs):
+        response = real_get(*args, **kwargs)
+        original = response.iter_content
+
+        def iterator(*args, **kwargs):
+            reading.set()
+            yield from original(*args, **kwargs)
+
+        response.iter_content = iterator
+        return response
+
+    monkeypatch.setattr(checkpoint_utils.requests, 'get', get)
+    monkeypatch.setattr(checkpoint_utils, 'DOWNLOAD_TOTAL_DEADLINE', 0.5)
+    monkeypatch.setattr(checkpoint_utils, 'DOWNLOAD_TIMEOUT', (2, 5))
+
+    def download():
+        try:
+            download_checkpoint(f'http://127.0.0.1:{server.server_port}/slow.pt', str(tmp_path))
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    caller = threading.Thread(target=download, daemon=True)
+    caller.start()
+    try:
+        assert reading.wait(2)
+        assert finished.wait(2), 'deadline caller blocked on response.close()'
+        assert not release.is_set()
+        assert len(errors) == 1 and isinstance(errors[0], TimeoutError)
+    finally:
+        release.set()
+        caller.join(6)
+        server.shutdown()
+        server.server_close()
+        serving.join(2)
+    until = time.monotonic() + 5
+    while list(tmp_path.glob('*.part')) and time.monotonic() < until:
+        time.sleep(0.01)
+    assert all(p.name.endswith('.lock') for p in tmp_path.iterdir())
+
+
+def test_blocked_cleanup_releases_cache_lock_and_cannot_overwrite_retry(monkeypatch, tmp_path):
+    import threading
+    import time
+    from pathlib import Path
+
+    release = threading.Event()
+    closing = threading.Event()
+    finished = threading.Event()
+    errors = []
+
+    class BlockedResponse(FakeResponse):
+        def iter_content(self, chunk_size=8192):
+            release.wait(10)
+            yield b'late'
+
+        def close(self):
+            closing.set()
+            release.wait(10)
+
+    responses = iter([BlockedResponse([]), FakeResponse([b'winner'])])
+    monkeypatch.setattr(checkpoint_utils.requests, 'get', lambda *a, **kw: next(responses))
+    monkeypatch.setattr(checkpoint_utils, 'DOWNLOAD_TOTAL_DEADLINE', 0.2)
+    url = 'https://example.org/retry.pt'
+
+    def download():
+        try:
+            download_checkpoint(url, str(tmp_path))
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    caller = threading.Thread(target=download, daemon=True)
+    caller.start()
+    try:
+        assert closing.wait(2)
+        assert finished.wait(2), 'cleanup held caller and cache lock'
+        assert len(errors) == 1 and isinstance(errors[0], TimeoutError)
+        winner = Path(download_checkpoint(url, str(tmp_path)))
+        assert winner.read_bytes() == b'winner'
+    finally:
+        release.set()
+        caller.join(2)
+    until = time.monotonic() + 5
+    while list(tmp_path.glob('*.part')) and time.monotonic() < until:
+        time.sleep(0.01)
+    assert not list(tmp_path.glob('*.part'))
+    assert winner.read_bytes() == b'winner'
