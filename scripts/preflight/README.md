@@ -98,3 +98,13 @@ scikit-image==0.25.2     imageio==2.37.3
 
 `scikit-image` is capped at 0.25.2 because 0.26+ requires Python >=3.11. Pinning a
 newer version from a dev machine's Python breaks the image build outright.
+
+## Canonicalization fixtures
+
+Use 8-bit grayscale (`L`) and `RGBA` originals for `canonicalization_wrapper`.
+The port receives the original bytes; the reference receives an independent
+RGB PNG copy. This copy uses imageio decoding followed by Pillow conversion:
+grayscale channels are replicated and alpha is dropped, without compositing.
+EXIF handling follows the same decoder as inference. Ordinary fidelity strata
+require RGB and receive the original bytes unchanged. Other wrapper modes,
+including 16-bit grayscale, are rejected rather than silently converted lossily.
