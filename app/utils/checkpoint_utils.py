@@ -113,8 +113,11 @@ def _fetch_to_cache(url: str, cache_dir: str, local_path: str) -> str:
                 with contextlib.suppress(Exception):
                     response.close()
 
-            threading.Thread(target=close_response, daemon=True,
-                             name="checkpoint-close").start()
+            # Cleanup is best effort; thread exhaustion must not replace the
+            # caller's timeout. The download worker still observes cancellation.
+            with contextlib.suppress(Exception):
+                threading.Thread(target=close_response, daemon=True,
+                                 name="checkpoint-close").start()
         logger.error(
             f"Download of {url} exceeded {DOWNLOAD_TOTAL_DEADLINE}s deadline"
         )

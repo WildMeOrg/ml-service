@@ -52,6 +52,7 @@ def test_download_passes_timeout_to_requests(monkeypatch, tmp_path):
 
     assert calls, "requests.get was never called"
     assert calls[0].get("timeout") == checkpoint_utils.DOWNLOAD_TIMEOUT
+    assert len(checkpoint_utils.DOWNLOAD_TIMEOUT) == 2
     assert all(actual >= minimum for actual, minimum in
                zip(checkpoint_utils.DOWNLOAD_TIMEOUT, (5, 60))), (
         "timeout must leave room for multi-hundred-MB weight files"
@@ -269,6 +270,50 @@ def test_get_checkpoint_path_missing_local_raises():
 
 def test_get_checkpoint_path_none_returns_none():
     assert get_checkpoint_path(None) is None
+
+
+def test_cleanup_thread_start_failure_preserves_timeout(monkeypatch, tmp_path):
+    import threading
+
+    release = threading.Event()
+    entered = threading.Event()
+    worker_done = threading.Event()
+
+    class BlockedResponse(FakeResponse):
+        def iter_content(self, chunk_size=8192):
+            entered.set()
+            release.wait(5)
+            yield b'late'
+
+        def close(self):
+            pass
+
+    original_start = threading.Thread.start
+    original_stream = checkpoint_utils._stream_to_cache
+
+    def start(thread):
+        if thread.name == 'checkpoint-close':
+            raise RuntimeError("can't start new thread")
+        return original_start(thread)
+
+    def stream(*args):
+        try:
+            return original_stream(*args)
+        finally:
+            worker_done.set()
+
+    monkeypatch.setattr(threading.Thread, 'start', start)
+    monkeypatch.setattr(checkpoint_utils, '_stream_to_cache', stream)
+    monkeypatch.setattr(checkpoint_utils.requests, 'get', lambda *a, **kw: BlockedResponse([]))
+    monkeypatch.setattr(checkpoint_utils, 'DOWNLOAD_TOTAL_DEADLINE', 0.2)
+    try:
+        with pytest.raises(TimeoutError):
+            download_checkpoint('https://example.org/exhausted.pt', str(tmp_path))
+        assert entered.is_set()
+    finally:
+        release.set()
+        assert worker_done.wait(2)
+    assert all(p.name.endswith('.lock') for p in tmp_path.iterdir())
 
 
 def test_deadline_does_not_wait_for_real_buffered_response_close(monkeypatch, tmp_path):
