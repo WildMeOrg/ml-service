@@ -33,17 +33,23 @@ def sha256(path: str) -> str:
     return h.hexdigest()
 
 
-def main() -> int:
+def resolve_reference_root(manifest, override=None):
+    return override or manifest.get("reference_source", {}).get("path") or "/reference"
+
+
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--manifest", required=True)
     ap.add_argument("--fixtures", required=True, help="directory of fixture images")
     ap.add_argument("--artifact", default="preflight-artifact.json")
-    args = ap.parse_args()
+    ap.add_argument("--reference-root", help="checkout root containing wbia_orientation")
+    args = ap.parse_args(argv)
 
     from reference_runner import Reference
     from app.models.wbia_orientation import WbiaOrientationModel
 
     manifest = json.load(open(args.manifest))
+    reference_root = resolve_reference_root(manifest, args.reference_root)
     thr = manifest["thresholds"]
     env = environment()
     print(f"environment: {env}")
@@ -56,7 +62,7 @@ def main() -> int:
             continue
         digest = sha256(path)
         print(f"\n{ck['model_id']}  sha256={digest[:16]}...")
-        ref = Reference(path)
+        ref = Reference(path, reference_root=reference_root)
         port = WbiaOrientationModel()
         port.load(model_id=ck["model_id"], checkpoint_path=path, device="cpu")
 

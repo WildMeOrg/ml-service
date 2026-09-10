@@ -8,6 +8,9 @@ This is the fidelity oracle: the port must agree with THIS, not with a stored
 value or a human's expectation.
 """
 import importlib.util, math, sys
+import hashlib
+from functools import lru_cache
+from pathlib import Path
 import numpy as np, torch, torch.nn as nn, imageio.v2 as imageio, io
 from collections import OrderedDict
 from skimage.transform import resize as sk_resize
@@ -18,26 +21,50 @@ def _load(name, path):
     m = importlib.util.module_from_spec(spec); sys.modules[name] = m
     spec.loader.exec_module(m); return m
 
-_R = "/mnt/c/wbia-plugin-orientation/wbia_orientation/"
-_cfg = _load("wd_cfg", _R + "config/default.py")._C.clone()
-_cls = _load("wd_hrnet", _R + "models/cls_hrnet.py")
-_utils = _load("wd_utils", _R + "utils/utils.py")
-_eval = _load("wd_eval", _R + "core/evaluate.py")
+def load_reference(reference_root):
+    """Load only the standalone modules, isolated and cached per checkout root."""
+    return _load_reference(str(Path(reference_root).resolve()))
+
+
+@lru_cache(maxsize=None)
+def _load_reference(reference_root):
+    root = Path(reference_root) / "wbia_orientation"
+    modules = {"cfg": "config/default.py", "hrnet": "models/cls_hrnet.py",
+               "utils": "utils/utils.py", "eval": "core/evaluate.py"}
+    missing = [str(root / path) for path in modules.values() if not (root / path).is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"Missing reference modules under {reference_root}: {missing}. "
+            "Mount the wbia-plugin-orientation checkout and set --reference-root "
+            "to its root (containing wbia_orientation)."
+        )
+    prefix = "wd_" + hashlib.sha256(reference_root.encode()).hexdigest()
+    names = {key: f"{prefix}_{key}" for key in modules}
+    try:
+        return {key: _load(names[key], str(root / path)) for key, path in modules.items()}
+    except Exception:
+        for name in names.values():
+            sys.modules.pop(name, None)
+        raise
+
 
 _T = transforms.Compose([transforms.ToTensor(),
      transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])])
 
 class Reference:
-    def __init__(self, ckpt):
-        m = _cls.HighResolutionNet(_cfg)
+    def __init__(self, ckpt, reference_root="/reference"):
+        source = load_reference(reference_root)
+        cfg = source["cfg"]._C.clone()
+        self._utils, self._eval = source["utils"], source["eval"]
+        m = source["hrnet"].HighResolutionNet(cfg)
         m.classifier = nn.Linear(m.classifier.in_features, 5)   # OrientationNet does this
         raw = torch.load(ckpt, map_location="cpu", weights_only=False)
         st = raw.get("state", raw) if isinstance(raw, dict) and "state" in raw else raw
         m.load_state_dict(OrderedDict((k.replace("module.","").replace("model.",""), v)
                                       for k, v in st.items()), strict=True)
         m.eval(); self.m = m
-        self.imsize = tuple(_cfg.MODEL.IMSIZE)
-        self.hflip, self.vflip = _cfg.TEST.HFLIP, _cfg.TEST.VFLIP
+        self.imsize = tuple(cfg.MODEL.IMSIZE)
+        self.hflip, self.vflip = cfg.TEST.HFLIP, cfg.TEST.VFLIP
 
     def theta(self, image_bytes, bbox):
         # --- AnimalWbiaDataset.__getitem__ ---
@@ -53,11 +80,11 @@ class Reference:
             out = torch.sigmoid(self.m(x))
             if self.hflip:
                 oh = torch.sigmoid(self.m(torch.flip(x, [3]))).numpy()
-                oh = _utils.hflip_back(oh, [1.0, 1.0]); oh = torch.from_numpy(oh.copy())
+                oh = self._utils.hflip_back(oh, [1.0, 1.0]); oh = torch.from_numpy(oh.copy())
             if self.vflip:
                 ov = torch.sigmoid(self.m(torch.flip(x, [2]))).numpy()
-                ov = _utils.vflip_back(ov, [1.0, 1.0]); ov = torch.from_numpy(ov.copy())
+                ov = self._utils.vflip_back(ov, [1.0, 1.0]); ov = torch.from_numpy(ov.copy())
             if self.hflip and self.vflip:
                 out = (out + oh + ov) / 3
         coords = out.numpy()
-        return float(_eval.compute_theta(coords)[0]), coords[0].tolist()
+        return float(self._eval.compute_theta(coords)[0]), coords[0].tolist()
