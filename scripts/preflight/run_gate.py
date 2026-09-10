@@ -37,6 +37,36 @@ def resolve_reference_root(manifest, override=None):
     return override or manifest.get("reference_source", {}).get("path") or "/reference"
 
 
+def reference_image_bytes(data, stratum):
+    """Independently canonicalize only the reference's wrapper-fixture input.
+
+    Use imageio for decoding, as both inference paths do (including EXIF
+    handling), then Pillow for independent channel conversion. Restrict the
+    wrapper fixtures to 8-bit L/RGBA to avoid lossy 16-bit conversions.
+    """
+    import io
+    import imageio.v2 as imageio
+    from PIL import Image
+
+    with Image.open(io.BytesIO(data)) as original:
+        if stratum != "canonicalization_wrapper":
+            if original.mode != "RGB":
+                raise ValueError(f"stratum {stratum} is RGB-only; fixture is mode {original.mode}")
+            return data
+        if original.mode not in ("L", "RGBA"):
+            raise ValueError(
+                "canonicalization_wrapper requires 8-bit grayscale (L) or RGBA; "
+                f"got {original.mode}"
+            )
+    decoded = imageio.imread(io.BytesIO(data))
+    if decoded.dtype.name != "uint8":
+        raise ValueError("canonicalization_wrapper requires 8-bit decoded pixels")
+    with Image.fromarray(decoded).convert("RGB") as rgb:
+        output = io.BytesIO()
+        rgb.save(output, format="PNG")
+        return output.getvalue()
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--manifest", required=True)
@@ -76,7 +106,12 @@ def main(argv=None) -> int:
             if fx.get("sha256") not in (None, "", "<fixture byte hash>") and got != fx["sha256"]:
                 failures.append(f"fixture {img} hash mismatch (manifest identity broken)")
                 continue
-            t_ref, c_ref = ref.theta(data, fx["bbox"])
+            try:
+                reference_data = reference_image_bytes(data, fx.get("stratum"))
+            except (OSError, ValueError) as exc:
+                failures.append(f"fixture {img}: {exc}")
+                continue
+            t_ref, c_ref = ref.theta(reference_data, fx["bbox"])
             r = port.predict_batch(data, [fx["bbox"]])[0]
             e_t = circular_error(t_ref, r["theta"])
             e_c = max(abs(a - b) for a, b in zip(c_ref, r["coords_normalized"]))
