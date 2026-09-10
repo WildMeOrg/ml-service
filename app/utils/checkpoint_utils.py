@@ -70,9 +70,12 @@ def _fetch_to_cache(url: str, cache_dir: str, local_path: str) -> str:
     The socket read timeout only limits per-read inactivity — a server that
     keeps trickling bytes can hold a blocking read far past any deadline
     checked between reads. So the fetch runs in a worker thread and the
-    caller waits at most DOWNLOAD_TOTAL_DEADLINE, closing the response to
-    abort the worker on expiry. An aborted worker may linger until its
-    socket timeout fires, but the caller always regains control on time.
+    caller waits at most DOWNLOAD_TOTAL_DEADLINE. Response cleanup also runs
+    off the caller: requests/urllib3 close() can block behind an active
+    buffered read. Cancellation prevents a late cache install. A trickling
+    response can keep the worker and closer alive beyond the inactivity
+    timeout, but neither holds the caller or cache lock during cleanup.
+    This fetch deadline does not bound the preceding cross-process flock wait.
     """
     result_queue = queue.Queue(maxsize=1)
     response_holder = {}
@@ -104,8 +107,14 @@ def _fetch_to_cache(url: str, cache_dir: str, local_path: str) -> str:
             cancel.set()
         response = response_holder.get("response")
         if response is not None:
-            with contextlib.suppress(Exception):
-                response.close()
+            # BufferedReader.close can wait for the downloading thread to
+            # release its read lock. Never put that wait on the deadline path.
+            def close_response():
+                with contextlib.suppress(Exception):
+                    response.close()
+
+            threading.Thread(target=close_response, daemon=True,
+                             name="checkpoint-close").start()
         logger.error(
             f"Download of {url} exceeded {DOWNLOAD_TOTAL_DEADLINE}s deadline"
         )
