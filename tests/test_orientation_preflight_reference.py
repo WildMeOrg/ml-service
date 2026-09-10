@@ -1,5 +1,6 @@
 import subprocess
 import sys
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -59,3 +60,19 @@ def test_failed_import_cleans_up_module_namespace(tmp_path):
     with pytest.raises(RuntimeError, match='broken'):
         runner.load_reference(tmp_path)
     assert {name for name in sys.modules if name.startswith('wd_')} == before
+
+
+def test_identity_hashes_the_executed_source_and_survives_cached_file_edits(tmp_path):
+    checkout(tmp_path)
+    loaded = runner.load_reference(tmp_path)
+    original_hashes = {}
+    for key, module in loaded.items():
+        original_hashes[key] = hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
+        assert module.__source_sha256__ == original_hashes[key]
+    # Later edits must not relabel already-loaded code with new hashes.
+    source = tmp_path / 'wbia_orientation/config/default.py'
+    source.write_text('SOURCE = "edited after import"\n')
+    cached = runner.load_reference(tmp_path)
+    assert cached['cfg'].SOURCE == str(tmp_path)
+    assert cached['cfg'].__source_sha256__ == original_hashes['cfg']
+    assert cached['cfg'].__source_sha256__ != hashlib.sha256(source.read_bytes()).hexdigest()

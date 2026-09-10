@@ -1,7 +1,9 @@
 # wbia-orientation host preflight
 
 Release-blocking. **Run on the ml-service host**, with its real `/datasets` mount
-and GPU, before `wbia-orientation` config is deployed.
+before `wbia-orientation` config is deployed. This gate validates CPU inference
+with 224×224 inputs and both flips enabled. It does not certify GPU kernels or
+custom `imsize`/TTA deployment settings.
 
 Not CI: the checkpoints are hundreds of MB and cannot be committed — and a
 *skipped* test is not a safeguard.
@@ -45,7 +47,7 @@ docker build -t ml-service -f docker/dockerfile .
 docker build -t ml-service-preflight -f scripts/preflight/Dockerfile .
 mkdir -p preflight-artifacts
 
-docker run --rm --gpus all \
+docker run --rm \
   -v "$MODELS_DIR:/datasets:ro" \
   -v "$PWD/fixtures:/fixtures:ro" \
   -v /path/to/wbia-plugin-orientation:/reference:ro \
@@ -108,3 +110,33 @@ grayscale channels are replicated and alpha is dropped, without compositing.
 EXIF handling follows the same decoder as inference. Ordinary fidelity strata
 require RGB and receive the original bytes unchanged. Other wrapper modes,
 including 16-bit grayscale, are rejected rather than silently converted lossily.
+
+## Acceptance and batch fixtures
+
+Each fixture supplies either `bbox: [x, y, w, h]` or
+`bboxes: [[x, y, w, h], ...]`. A `multi_detection` fixture must have at least two
+distinct effective crops. Its reference predictions must be separated by more
+than twice the maximum theta or coordinate tolerance for every pair, so swapping
+predictions can actually be detected. The reference evaluates each crop separately;
+the port receives all boxes in a single `predict_batch` call. Fractional bbox values
+are truncated toward zero before the reference's native NumPy slice is taken.
+
+All five coordinates and theta must be finite; effective bboxes must match exactly,
+as must batch count and order. Both maximum and mean errors are enforced for each
+checkpoint. Theta mean is the mean absolute circular error; coordinate mean is
+across all five components of every comparison, not a mean of per-row maxima.
+Equality with a threshold passes. Existing thresholds are unchanged; measure the
+real-checkpoint baseline before proposing any tolerance changes.
+
+Each declared stratum needs a positive `min_samples`, met separately for every
+checkpoint by unique image-byte/effective-crop sets. Duplicate files and extra rows
+in a batch do not inflate coverage. Empty manifests, malformed results, failed
+loads and inference exceptions fail the gate. An atomic JSON artifact records
+failures as well as successful comparisons, all four metrics, coverage, actual
+checkpoint/fixture hashes, environment and observed model configuration per checkpoint.
+It also preserves the manifest's claimed reference revision and hashes the exact source
+bytes executed for all four standalone reference modules. These hashes remain tied to
+the loaded code even if files change later in the process. Artifacts are written with
+mode 0644 so a container-root run produces host-readable release evidence. The artifact's parent
+directory must exist and be writable. Earlier numerical measurements above are
+historical context; rerun the populated gate with real weights in the built image.

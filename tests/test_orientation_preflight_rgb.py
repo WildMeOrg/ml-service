@@ -70,18 +70,22 @@ def test_gate_keeps_original_for_port_and_converts_only_reference(mode, tmp_path
 
     class Reference:
         def __init__(self, *args, **kwargs):
-            pass
+            assert kwargs['reference_root'] == '/selected/reference'
+            self.source_identity = {'root': kwargs['reference_root'], 'modules': {'stub': 'test'}}
 
-        def theta(self, data, bbox):
+        def predict(self, data, bbox):
             calls.append('reference')
             with Image.open(io.BytesIO(data)) as rgb, Image.open(io.BytesIO(original)) as source:
                 assert rgb.mode == 'RGB'
                 np.testing.assert_array_equal(np.asarray(rgb), np.asarray(source.convert('RGB')))
-            return 0.0, [0.5] * 5
+            return {'theta': 0.0, 'coords_normalized': [0.5] * 5, 'effective_bbox': bbox}
 
     class Port:
         def load(self, **kwargs):
             pass
+
+        def get_model_info(self):
+            return {'fixture_stub': True}
 
         def predict_batch(self, data, bboxes):
             calls.append('port')
@@ -91,12 +95,19 @@ def test_gate_keeps_original_for_port_and_converts_only_reference(mode, tmp_path
     monkeypatch.setitem(sys.modules, 'reference_runner', types.SimpleNamespace(Reference=Reference))
     monkeypatch.setitem(sys.modules, 'app.models.wbia_orientation', types.SimpleNamespace(WbiaOrientationModel=Port))
     monkeypatch.setattr(gate, 'environment', lambda: {})
-    manifest = {'thresholds': {'theta_circular_max_rad': 1e-5, 'coords_elementwise_max': 1e-6},
+    manifest = {'thresholds': {'theta_circular_max_rad': 1e-5, 'coords_elementwise_max': 1e-6,
+                               'theta_circular_mean_rad': 1e-6, 'coords_elementwise_mean': 1e-7,
+                               'effective_bbox': 'exact', 'predict_batch': 'exact count and order'},
                 'checkpoints': [{'model_id': 'test', 'path': str(weights)}],
                 'fixtures': [{'file': 'image.png', 'bbox': [0, 0, 8, 8], 'stratum': 'canonicalization_wrapper'}],
                 'strata': {'canonicalization_wrapper': {'min_samples': 1}}}
     path = tmp_path / 'manifest.json'
+    manifest['reference_source'] = {'path': '/manifest/reference', 'commit': 'recorded-commit'}
     path.write_text(json.dumps(manifest))
     assert gate.main(['--manifest', str(path), '--fixtures', str(tmp_path),
+                      '--reference-root', '/selected/reference',
                       '--artifact', str(tmp_path / 'artifact.json')]) == 0
     assert calls == ['reference', 'port']
+    artifact = json.loads((tmp_path / 'artifact.json').read_text())
+    assert artifact['reference_source'] == manifest['reference_source']
+    assert artifact['checkpoints'][0]['reference_source']['root'] == '/selected/reference'

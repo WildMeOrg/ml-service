@@ -6,35 +6,99 @@
     "_note": "record the commit hash of the reference checkout used for the gate run"
   },
   "thresholds": {
-    "theta_circular_max_rad": 1e-5,
-    "theta_circular_mean_rad": 1e-6,
-    "coords_elementwise_max": 1e-6,
-    "coords_elementwise_mean": 1e-7,
+    "theta_circular_max_rad": 1e-05,
+    "theta_circular_mean_rad": 1e-06,
+    "coords_elementwise_max": 1e-06,
+    "coords_elementwise_mean": 1e-07,
     "effective_bbox": "exact",
     "predict_batch": "exact count and order"
   },
   "checkpoints": [
-    {"model_id": "whaleshark_v3-theta",
-     "path": "/datasets/orientation.whaleshark.v3.pth",
-     "sha256": "<record at preflight>"},
-    {"model_id": "leopard_shark_v0-theta",
-     "path": "/datasets/orientation.leopard_shark.v0.pth",
-     "sha256": "<record at preflight>"},
-    {"model_id": "salamander_fire_v2-theta",
-     "path": "/datasets/orientation.salamander_fire_adult.v2.pth",
-     "sha256": "<record at preflight>"}
+    {
+      "model_id": "whaleshark_v3-theta",
+      "path": "/datasets/orientation.whaleshark.v3.pth",
+      "sha256": "<record at preflight>"
+    },
+    {
+      "model_id": "leopard_shark_v0-theta",
+      "path": "/datasets/orientation.leopard_shark.v0.pth",
+      "sha256": "<record at preflight>"
+    },
+    {
+      "model_id": "salamander_fire_v2-theta",
+      "path": "/datasets/orientation.salamander_fire_adult.v2.pth",
+      "sha256": "<record at preflight>"
+    }
   ],
   "strata": {
-    "_note": "Each stratum can independently break the port. Fidelity strata are RGB-only: the reference RAISES on grayscale/RGBA, so there is no reference angle to compare against. The RGB-canonicalization wrapper is validated separately by converting the fixture to RGB externally and running the reference on that.",
-    "rgb_jpeg_downscale": {"min_samples": 20, "_why": "crop >> 224; skimage's anti-alias prefilter only engages downscaling"},
-    "rgb_jpeg_upscale": {"min_samples": 10, "_why": "crop << 224; different interpolation regime"},
-    "extreme_aspect": {"min_samples": 10, "_why": "resize distortion feeds theta"},
-    "bbox_edge_degenerate": {"min_samples": 10, "_why": "exercises the reload-full-image fallback and NumPy's non-clamping slice"},
-    "multi_detection": {"min_samples": 10, "_why": "exercises orientation batching and row/bbox alignment"},
-    "canonicalization_wrapper": {"min_samples": 10, "_why": "grayscale/RGBA: port on the original vs reference on an externally RGB-converted copy"}
+    "_note": "Each stratum can independently break the port. Fidelity strata are RGB-only: the reference RAISES on grayscale/RGBA, so there is no reference angle to compare against. The RGB-canonicalization wrapper is validated separately by converting the fixture to RGB externally and running the reference on that. Minimum samples are unique image/effective-crop sets PER CHECKPOINT, not rows or duplicate files.",
+    "rgb_jpeg_downscale": {
+      "min_samples": 20,
+      "_why": "crop >> 224; skimage's anti-alias prefilter only engages downscaling"
+    },
+    "rgb_jpeg_upscale": {
+      "min_samples": 10,
+      "_why": "crop << 224; different interpolation regime"
+    },
+    "extreme_aspect": {
+      "min_samples": 10,
+      "_why": "resize distortion feeds theta"
+    },
+    "bbox_edge_degenerate": {
+      "min_samples": 10,
+      "_why": "exercises the reload-full-image fallback and NumPy's non-clamping slice; include fractional bboxes to check truncate-toward-zero"
+    },
+    "multi_detection": {
+      "min_samples": 10,
+      "_why": "exercises orientation batching and row/bbox alignment; use bboxes with distinct effective crops and distinguishable reference predictions"
+    },
+    "canonicalization_wrapper": {
+      "min_samples": 10,
+      "_why": "grayscale/RGBA: port on the original vs reference on an externally RGB-converted copy"
+    }
   },
   "fixtures": [
-    {"_note": "populate with production image byte hashes + exact bboxes + stratum tag",
-     "sha256": "<fixture byte hash>", "bbox": [0, 0, 0, 0], "stratum": "rgb_jpeg_downscale"}
-  ]
+    {
+      "_note": "populate with production image byte hashes + exact bboxes + stratum tag",
+      "sha256": "<fixture byte hash>",
+      "bbox": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "stratum": "rgb_jpeg_downscale"
+    }
+  ],
+  "_fixture_formats": {
+    "single": {
+      "file": "example.png",
+      "bbox": [
+        0,
+        0,
+        100,
+        100
+      ],
+      "stratum": "rgb_jpeg_downscale"
+    },
+    "batch": {
+      "file": "example.png",
+      "bboxes": [
+        [
+          0,
+          0,
+          100,
+          100
+        ],
+        [
+          150,
+          50,
+          100,
+          100
+        ]
+      ],
+      "stratum": "multi_detection"
+    },
+    "_note": "Examples only; populate fixtures with production images and hashes. Gate validates CPU, 224x224, both flips enabled, not custom deployment configurations."
+  }
 }
