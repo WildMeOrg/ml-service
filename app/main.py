@@ -37,12 +37,20 @@ def _int_env(name: str, fallback: int, minimum: int = 1, maximum: int = None) ->
     value = os.environ.get(name)
     if value is None or not value.strip():
         return fallback
-    if (not (value.isascii() and value.isdecimal())
-            or int(value) < minimum
-            or (maximum is not None and int(value) > maximum)):
+    try:
+        if not (value.isascii() and value.isdecimal()):
+            raise ValueError(value)
+        number = int(value)
+    except ValueError:
+        # int() raises on its own for a digit string past CPython's
+        # integer-string conversion limit, which .isdecimal() happily
+        # accepts -- the shell probe falls back there, so this must too.
         logger.warning(f"Ignoring invalid {name}={value!r}; using {fallback}")
         return fallback
-    return int(value)
+    if number < minimum or (maximum is not None and number > maximum):
+        logger.warning(f"Ignoring out-of-range {name}={value!r}; using {fallback}")
+        return fallback
+    return number
 
 # Create FastAPI app
 app = FastAPI()

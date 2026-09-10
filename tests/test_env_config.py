@@ -5,8 +5,10 @@ injects PORT, RunPod/VMs set DEVICE etc. Env vars supply argparse defaults;
 explicit CLI flags still win. app.main parses sys.argv at import time, so
 each probe runs in a subprocess.
 """
+import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -105,36 +107,83 @@ def test_limit_concurrency_of_one_falls_back():
 # --- server/probe agreement -------------------------------------------------
 #
 # The image healthcheck re-implements _int_env in shell. The two must agree on
-# every input or the probe kills a server that bound a different port, so pin
-# them against one shared matrix -- reading the shell out of the dockerfile so
-# an edit there cannot drift away from the Python.
+# every input or the probe targets a port the server never bound, so pin them
+# against one shared matrix -- reading the shell out of the dockerfile and
+# calling the real _int_env, so an edit to either side cannot drift.
 
-PORT_MATRIX = ["6050", "8888", "1", "65535", "", "   ", "tcp://10.0.0.1:80",
-               " 7777 ", "0", "65536", "07777", "abc", "-1", "1e3"]
+PORT_MATRIX = [
+    "6050", "8888", "1", "65535",       # valid
+    "", "   ", "\t7777\n", " 7777 ",    # empty / whitespace
+    "tcp://10.0.0.1:80", "abc", "1e3", "-1", "+7777",  # not a bare integer
+    "٧٧٧٧",                              # decimal but not ASCII
+    "0", "65536",                        # out of range
+    "9" * 5000,                          # past CPython's int-conversion limit
+    "07777",                             # zero-padded
+]
 
 
-def _healthcheck_port_script():
-    """The dockerfile HEALTHCHECK's port resolution, with curl swapped out."""
+def _int_env_matrix():
+    """The real _int_env's verdict on every matrix input, in one subprocess."""
+    code = (
+        "import json, os, sys; "
+        "sys.argv = ['app.main']; "
+        "from app import main; "
+        "vals = json.loads(sys.stdin.read()); "
+        "out = [];\n"
+        "for v in vals:\n"
+        "    os.environ['PORT'] = v\n"
+        "    out.append(main._int_env('PORT', 8888, maximum=65535))\n"
+        "print('MATRIX:' + json.dumps(out))"
+    )
+    child_env = {k: v for k, v in os.environ.items()
+                 if k not in ("PORT", "HOST", "DEVICE", "WORKERS",
+                              "LIMIT_CONCURRENCY")}
+    result = subprocess.run(
+        [sys.executable, "-c", code], input=json.dumps(PORT_MATRIX),
+        capture_output=True, text=True, env=child_env, cwd=REPO_ROOT,
+        timeout=300,
+    )
+    assert result.returncode == 0, result.stderr
+    for line in result.stdout.splitlines():
+        if line.startswith("MATRIX:"):
+            return json.loads(line[len("MATRIX:"):])
+    raise AssertionError(f"matrix output missing: {result.stdout!r}")
+
+
+def _healthcheck_command():
+    """The dockerfile HEALTHCHECK's shell command, continuations joined."""
     text = pathlib.Path(REPO_ROOT, "docker", "dockerfile").read_text()
     joined = text.replace("\\\n", " ")
     line = next(l for l in joined.splitlines() if l.startswith("HEALTHCHECK"))
-    body = line.split("CMD", 1)[1]
-    resolution = body.split("curl", 1)[0].rstrip().rstrip(";")
-    assert "case" in resolution and "8888" in resolution, resolution
-    return resolution + '; echo "${p}"'
+    command = line.split("CMD", 1)[1].strip()
+    assert "curl" in command, command
+    return command
 
 
-def test_healthcheck_mirrors_int_env_on_every_input():
-    script = _healthcheck_port_script()
-    for value in PORT_MATRIX:
-        shell = subprocess.run(
-            ["sh", "-c", script], capture_output=True, text=True,
-            env={"PORT": value, "PATH": os.environ.get("PATH", "")}, timeout=30)
-        assert shell.returncode == 0, f"PORT={value!r}: {shell.stderr}"
-        # Compared numerically: the shell echoes the literal string, so a
-        # zero-padded "07777" is the same port as argparse's int 7777.
-        probe = _probe("port", env={"PORT": value})
-        assert int(shell.stdout.strip()) == int(probe), (
-            f"PORT={value!r}: probe resolves {shell.stdout.strip()}, "
-            f"server resolves {probe}"
-        )
+def _probe_target_port(command, stub_dir, value):
+    """Run the real healthcheck with a curl stub; return the port it hit."""
+    result = subprocess.run(
+        ["sh", "-c", command], capture_output=True, text=True, timeout=30,
+        env={"PORT": value, "PATH": f"{stub_dir}:{os.environ.get('PATH', '')}"})
+    assert result.returncode == 0, f"PORT={value!r}: {result.stderr}"
+    urls = re.findall(r"http://localhost:([^/]*)/health", result.stdout)
+    assert len(urls) == 1, f"PORT={value!r}: curl got {result.stdout!r}"
+    return urls[0]
+
+
+def test_healthcheck_probes_the_port_the_server_binds(tmp_path):
+    """Runs the whole HEALTHCHECK, not just its port arithmetic: a curl stub
+    records the URL actually requested, so hardcoding a port back into the
+    curl line would fail here even though the case/range logic still ran."""
+    stub = tmp_path / "curl"
+    stub.write_text('#!/bin/sh\nfor a in "$@"; do echo "$a"; done\n')
+    stub.chmod(0o755)
+
+    command = _healthcheck_command()
+    expected = _int_env_matrix()
+    for value, want in zip(PORT_MATRIX, expected):
+        got = _probe_target_port(command, str(tmp_path), value)
+        assert got.isascii() and got.isdecimal(), (
+            f"PORT={value!r}: probe built a non-numeric port {got!r}")
+        assert int(got) == want, (
+            f"PORT={value!r}: probe hits {got}, server binds {want}")
