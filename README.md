@@ -725,7 +725,40 @@ container behavior is unchanged unless the platform injects its own values.
 | `--limit-concurrency` | `LIMIT_CONCURRENCY` | `32` | Max concurrent connections per worker; excess get 503 before their bodies are read |
 | `--reload` | — | off | Auto-reload on code changes (development only) |
 
-Malformed integer values (e.g. a Kubernetes service-link `PORT=tcp://...`)
-are ignored with a warning rather than crashing startup; the image health
-check applies the same fallback so it always probes the port the server
-actually bound.
+Malformed integer values are ignored with a warning rather than crashing
+startup; the image health check applies the same fallback, so it always
+probes the port the server actually bound. `LIMIT_CONCURRENCY` is floored at
+2 — uvicorn counts the connection it is serving, so a limit of 1 would 503
+every request, `/health` included, and the probe would kill a healthy server.
+
+#### Upgrading an existing deployment
+
+Before this change the image's `CMD` hardcoded `--host 0.0.0.0 --port 6050`,
+so container environment variables named `PORT`/`HOST`/`DEVICE`/`WORKERS`
+were ignored. They are now read as defaults. **An existing install is
+unaffected if it launches the container with explicit flags** — both compose
+files in `docker/` do, so a deployment using them needs no change.
+
+Deployments that rely on the image's own `CMD` should check, before pulling,
+whether the *container* environment already defines any of these names for an
+unrelated purpose:
+
+| Variable | If already set to something unrelated |
+|----------|----------------------------------------|
+| `PORT` | The listener moves. Published ports, reverse-proxy upstreams and probes do **not** follow. A malformed or out-of-range value binds 8888, not 6050. |
+| `HOST` | A loopback or unreachable address makes the service unreachable from outside the container. |
+| `DEVICE` | Model loading may fail or silently fall to CPU. |
+| `WORKERS` | Extra workers each load a full model copy — VRAM exhaustion. |
+| `LIMIT_CONCURRENCY` | Low values 503 real traffic; high values weaken the body-size memory bound. |
+
+Check the effective container environment, not the host shell: a compose
+`.env` file feeds variable *substitution* and does not by itself become
+container environment. Audit `environment:`/`env_file:` blocks and any
+overlay files, `docker run -e/--env-file`, Kubernetes `env`/`envFrom`, and
+`ENV` in any derived image.
+
+One asymmetry to know about: if you override the port with an explicit
+`--port` flag while leaving `PORT` unset, the server moves but the image
+healthcheck still resolves from `PORT` and probes 6050. Set `PORT` instead of
+passing `--port`, or override the healthcheck too (both compose files
+override it already).

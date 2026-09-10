@@ -26,8 +26,10 @@ logger = logging.getLogger(__name__)
 def _int_env(name: str, fallback: int, minimum: int = 1, maximum: int = None) -> int:
     """Integer from the environment, tolerating provider-injected junk.
 
-    Some platforms set unusable values (e.g. Kubernetes service-link vars
-    like PORT=tcp://10.0.0.1:80); a config oddity must not crash startup.
+    PORT in particular is set by the platform on PaaS providers (Cloud Run,
+    Fly, Railway), and an operator's env file can carry a stale or malformed
+    value, or a link-style URL copied from a prefixed variable such as
+    REDIS_PORT=tcp://10.0.0.1:6379. A config oddity must not crash startup.
     Bare ASCII digits within [minimum, maximum] only — exactly what the
     image healthcheck's shell validation accepts, so server and probe never
     disagree about the port.
@@ -65,8 +67,11 @@ parser.add_argument('--reload', action='store_true',
                    help='Enable auto-reload')
 parser.add_argument('--workers', type=int, default=_int_env('WORKERS', 1),
                    help='Number of worker processes (keep at 1 per GPU)')
+# minimum=2: uvicorn rejects when len(connections) >= limit and counts the
+# connection being served, so a limit of 1 503s every request including
+# /health -- the probe then kills a server that is otherwise fine.
 parser.add_argument('--limit-concurrency', type=int,
-                   default=_int_env('LIMIT_CONCURRENCY', 32),
+                   default=_int_env('LIMIT_CONCURRENCY', 32, minimum=2),
                    help='Max concurrent connections per worker; excess get 503 '
                         'before their bodies are read (bounds parse-time memory)')
 args = parser.parse_args()
