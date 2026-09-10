@@ -134,14 +134,17 @@ def evaluate(manifest, fixtures_dir, reference_root, reference_cls, port_cls):
         model_rows = []
         coverage = {name: set() for name in strata}
         try:
-            path = ck['path']
-            digest = sha256(path)
-            if ck.get('sha256') not in (None, '', '<record at preflight>', digest):
+            checkpoint_path = ck['path']
+            checkpoint_digest = sha256(checkpoint_path)
+            if ck.get('sha256') not in (None, '', '<record at preflight>', checkpoint_digest):
                 raise ValueError('checkpoint hash mismatch (manifest identity broken)')
-            checkpoints.append({'model_id': model_id, 'path': path, 'sha256': digest})
-            reference = reference_cls(path, reference_root=reference_root)
+            checkpoint = {'model_id': model_id, 'path': checkpoint_path, 'sha256': checkpoint_digest}
+            checkpoints.append(checkpoint)
+            reference = reference_cls(checkpoint_path, reference_root=reference_root)
+            checkpoint['reference_source'] = reference.source_identity
             port = port_cls()
-            port.load(model_id=model_id, checkpoint_path=path, device='cpu')
+            port.load(model_id=model_id, checkpoint_path=checkpoint_path, device='cpu')
+            checkpoint['port_config'] = port.get_model_info()
         except Exception as exc:
             failures.append(f'{model_id}: checkpoint load failed: {exc}')
             continue
@@ -153,6 +156,8 @@ def evaluate(manifest, fixtures_dir, reference_root, reference_cls, port_cls):
                 stratum = fixture.get('stratum')
                 if stratum not in strata:
                     raise ValueError(f'undeclared stratum {stratum!r}')
+                if not isinstance(fixture.get('file'), str) or not fixture['file']:
+                    raise ValueError("fixture must declare a nonempty 'file' path")
                 boxes = fixture_bboxes(fixture)
                 path = os.path.join(fixtures_dir, fixture['file'])
                 with open(path, 'rb') as stream:
@@ -214,6 +219,7 @@ def evaluate(manifest, fixtures_dir, reference_root, reference_cls, port_cls):
         summaries[model_id] = {**metrics, 'comparisons': len(model_rows),
                                'coverage': {name: len(samples) for name, samples in coverage.items()}}
         for name, value in metrics.items():
+            print(f'{model_id}: {name} {value:.3e} (limit {thresholds[name]:.3e})')
             if value > thresholds[name]:
                 failures.append(f'{model_id}: {name} {value:.3e} > {thresholds[name]:.3e}')
         rows.extend(model_rows)
@@ -228,6 +234,9 @@ def write_artifact(path, artifact):
                                          suffix='.tmp', delete=False) as stream:
             temporary = stream.name
             json.dump(artifact, stream, indent=2, allow_nan=False)
+        # The container may run as root while release evidence is consumed
+        # by the host user or CI. Artifacts are intentionally readable by both.
+        os.chmod(temporary, 0o644)
         os.replace(temporary, path)
     finally:
         if temporary is not None and os.path.exists(temporary):
@@ -243,13 +252,15 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     started = time.monotonic()
     artifact = {'environment': {}, 'results': [], 'failures': [], 'summaries': {},
-                'started_at_unix': time.time(),
-                'port_config': {'device': 'cpu', 'imsize': [224, 224], 'hflip': True, 'vflip': True}}
+                'started_at_unix': time.time()}
     try:
         with open(args.manifest) as stream:
             manifest = json.load(stream)
         reference_root = resolve_reference_root(manifest, args.reference_root)
         artifact['reference_root'] = reference_root
+        source_claim = manifest.get('reference_source', {})
+        json.dumps(source_claim, allow_nan=False)
+        artifact['reference_source'] = source_claim
         raw_thresholds = manifest.get('thresholds', {})
         artifact['thresholds'] = ({k: v if finite_number(v) or isinstance(v, str) else repr(v)
                                    for k, v in raw_thresholds.items()}

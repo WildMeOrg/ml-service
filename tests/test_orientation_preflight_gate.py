@@ -13,7 +13,7 @@ from scripts.preflight import run_gate as gate
 
 class Reference:
     def __init__(self, *args, **kwargs):
-        pass
+        self.source_identity = {'root': kwargs.get('reference_root'), 'modules': {'stub': 'test'}}
 
     def predict(self, data, bbox):
         return {'theta': bbox[0] / 10, 'coords_normalized': [0.25] * 5,
@@ -26,6 +26,9 @@ class Port:
 
     def load(self, **kwargs):
         pass
+
+    def get_model_info(self):
+        return {'device': 'cpu', 'fixture_stub': True}
 
     def predict_batch(self, data, bboxes):
         self.calls.append(bboxes)
@@ -64,6 +67,8 @@ def test_matching_outputs_pass(case):
     assert len(rows) == 1
     assert all(summaries['test'][key] == 0 for key in gate.ERROR_LIMITS)
     assert checkpoints[0]['sha256'] == gate.sha256(case[1] / 'weights.pth')
+    assert checkpoints[0]['reference_source'] == {'root': '/reference', 'modules': {'stub': 'test'}}
+    assert checkpoints[0]['port_config'] == {'device': 'cpu', 'fixture_stub': True}
 
 
 @pytest.mark.parametrize('metric', ['theta_circular_mean_rad', 'coords_elementwise_mean'])
@@ -136,6 +141,26 @@ def test_single_crop_cannot_claim_multi_detection(case):
     assert any('two distinct' in f for f in evaluate(case)[1])
 
 
+@pytest.mark.parametrize('boxes', [{}, {'bbox': [0, 0, 1, 1], 'bboxes': [[0, 0, 1, 1]]},
+    {'bbox': [0, 0, 1]}, {'bbox': 'wrong'}, {'bboxes': []}, {'bboxes': 'wrong'},
+    {'bbox': [True, 0, 1, 1]}, {'bbox': [float('nan'), 0, 1, 1]},
+    {'bbox': [float('inf'), 0, 1, 1]}])
+def test_invalid_fixture_boxes_fail_before_inference(case, boxes):
+    fixture = case[0]['fixtures'][0]
+    fixture.pop('bbox')
+    fixture.update(boxes)
+    assert evaluate(case)[1]
+    assert Port.calls == []
+
+
+@pytest.mark.parametrize('field,value,message', [('stratum', 'unknown', 'undeclared stratum'),
+                                                ('file', None, "nonempty 'file' path")])
+def test_invalid_fixture_identity_has_clear_failure(case, field, value, message):
+    case[0]['fixtures'][0][field] = value
+    assert any(message in failure for failure in evaluate(case)[1])
+    assert Port.calls == []
+
+
 def test_indistinguishable_predictions_do_not_certify_batch_order(case):
     batch(case)
     class Same(Reference):
@@ -179,7 +204,8 @@ def test_invalid_numeric_thresholds_fail(case, value):
 
 
 def test_exact_thresholds_pass_and_coord_mean_uses_all_five_components(case, monkeypatch):
-    case[0]['thresholds'].update(theta_circular_max_rad=0.125, theta_circular_mean_rad=0.125,
+    boundary = gate.circular_error(0.0, 0.125)
+    case[0]['thresholds'].update(theta_circular_max_rad=boundary, theta_circular_mean_rad=boundary,
                                  coords_elementwise_max=0.125, coords_elementwise_mean=0.025)
     def change(rows):
         rows[0]['theta'] = 0.125
@@ -238,13 +264,24 @@ def test_atomic_artifact_preserves_previous_json_on_serialization_error(tmp_path
     assert not list(tmp_path.glob('*.tmp'))
 
 
+def test_artifact_can_be_read_by_host_user(tmp_path):
+    import stat
+    path = tmp_path / 'artifact.json'
+    gate.write_artifact(path, {'results': []})
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
+
+
 @pytest.mark.parametrize('kind', ['theta', 'grayscale'])
 def test_gate_detects_mutations_in_actual_port_without_real_weights(case, monkeypatch, kind):
     import torch
     from app.models import wbia_orientation as model
     class Backbone(torch.nn.Module):
         def forward(self, x):
-            return torch.logit(torch.tensor([[0.5, 0.5, 0.75, 0.5, 0.125]])).repeat(len(x), 1)
+            logits = torch.logit(torch.tensor([[0.5, 0.5, 0.75, 0.5, 0.125]])).repeat(len(x), 1)
+            if kind == 'grayscale':
+                expected_blue = (73 / 255 - 0.406) / 0.225
+                logits[:, 4] += (x[:, 2].mean(dim=(1, 2)) - expected_blue) * 0.01
+            return logits
     def load(self, **kwargs):
         self.model = Backbone()
         self.model_id = 'test'
@@ -263,5 +300,9 @@ def test_gate_detects_mutations_in_actual_port_without_real_weights(case, monkey
         original = model.compute_theta
         monkeypatch.setattr(model, 'compute_theta', lambda c: original(c) - math.pi / 2)
     else:
-        monkeypatch.setattr(model, '_canonicalize_rgb', lambda image: image[:, :, None])
-    assert evaluate(case, model.WbiaOrientationModel, Oracle)[1]
+        monkeypatch.setattr(model, '_canonicalize_rgb',
+                            lambda image: np.stack([image, image, np.zeros_like(image)], axis=-1))
+    rows, failures, _, _ = evaluate(case, model.WbiaOrientationModel, Oracle)
+    assert rows, 'mutation must reach numerical comparison, not fail preprocessing'
+    metric = 'theta_circular_max_rad' if kind == 'theta' else 'coords_elementwise_max'
+    assert any(metric in failure for failure in failures)

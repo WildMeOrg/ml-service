@@ -133,6 +133,10 @@ checkpoint by unique image-byte/effective-crop sets. Duplicate files and extra r
 in a batch do not inflate coverage. Empty manifests, malformed results, failed
 loads and inference exceptions fail the gate. An atomic JSON artifact records
 failures as well as successful comparisons, all four metrics, coverage, actual
-checkpoint/fixture hashes, environment and CPU configuration. The artifact's parent
+checkpoint/fixture hashes, environment and observed model configuration per checkpoint.
+It also preserves the manifest's claimed reference revision and hashes the exact source
+bytes executed for all four standalone reference modules. These hashes remain tied to
+the loaded code even if files change later in the process. Artifacts are written with
+mode 0644 so a container-root run produces host-readable release evidence. The artifact's parent
 directory must exist and be writable. Earlier numerical measurements above are
 historical context; rerun the populated gate with real weights in the built image.

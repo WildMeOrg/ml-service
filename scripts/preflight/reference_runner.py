@@ -19,7 +19,12 @@ from torchvision import transforms
 def _load(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
     m = importlib.util.module_from_spec(spec); sys.modules[name] = m
-    spec.loader.exec_module(m); return m
+    # Execute and hash the same bytes, even if an old .pyc or a later source
+    # edit exists. Cached modules retain the identity of the code they ran.
+    source = Path(path).read_bytes()
+    exec(compile(source, path, "exec"), m.__dict__)
+    m.__source_sha256__ = hashlib.sha256(source).hexdigest()
+    return m
 
 def load_reference(reference_root):
     """Load only the standalone modules, isolated and cached per checkout root."""
@@ -68,6 +73,11 @@ def reference_crop(image, bbox):
 class Reference:
     def __init__(self, ckpt, reference_root="/reference"):
         source = load_reference(reference_root)
+        self.source_identity = {
+            "root": str(Path(reference_root).resolve()),
+            "modules": {str(Path(module.__file__).relative_to(Path(reference_root).resolve())):
+                        module.__source_sha256__ for module in source.values()},
+        }
         cfg = source["cfg"]._C.clone()
         self._utils, self._eval = source["utils"], source["eval"]
         m = source["hrnet"].HighResolutionNet(cfg)

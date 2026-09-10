@@ -70,7 +70,8 @@ def test_gate_keeps_original_for_port_and_converts_only_reference(mode, tmp_path
 
     class Reference:
         def __init__(self, *args, **kwargs):
-            pass
+            assert kwargs['reference_root'] == '/selected/reference'
+            self.source_identity = {'root': kwargs['reference_root'], 'modules': {'stub': 'test'}}
 
         def predict(self, data, bbox):
             calls.append('reference')
@@ -82,6 +83,9 @@ def test_gate_keeps_original_for_port_and_converts_only_reference(mode, tmp_path
     class Port:
         def load(self, **kwargs):
             pass
+
+        def get_model_info(self):
+            return {'fixture_stub': True}
 
         def predict_batch(self, data, bboxes):
             calls.append('port')
@@ -98,7 +102,12 @@ def test_gate_keeps_original_for_port_and_converts_only_reference(mode, tmp_path
                 'fixtures': [{'file': 'image.png', 'bbox': [0, 0, 8, 8], 'stratum': 'canonicalization_wrapper'}],
                 'strata': {'canonicalization_wrapper': {'min_samples': 1}}}
     path = tmp_path / 'manifest.json'
+    manifest['reference_source'] = {'path': '/manifest/reference', 'commit': 'recorded-commit'}
     path.write_text(json.dumps(manifest))
     assert gate.main(['--manifest', str(path), '--fixtures', str(tmp_path),
+                      '--reference-root', '/selected/reference',
                       '--artifact', str(tmp_path / 'artifact.json')]) == 0
     assert calls == ['reference', 'port']
+    artifact = json.loads((tmp_path / 'artifact.json').read_text())
+    assert artifact['reference_source'] == manifest['reference_source']
+    assert artifact['checkpoints'][0]['reference_source']['root'] == '/selected/reference'
