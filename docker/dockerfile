@@ -45,12 +45,14 @@ ENV HOST=0.0.0.0
 
 EXPOSE 6050
 
-# Mirror app/main.py's _int_env: a non-numeric or out-of-range PORT makes
-# the server fall back to 8888, so the probe must follow it or a healthy
-# server gets killed.
+# Mirror app/main.py's _int_env: a non-numeric, over-long or out-of-range
+# PORT makes the server fall back to 8888, so the probe must follow it or a
+# healthy container is marked unhealthy and autoheal restarts it. The ${#p}
+# bound pairs with _int_env's len(value) check -- without it a padded value
+# like 000...07777 passes here but not there.
 HEALTHCHECK --interval=30s --timeout=15s --start-period=90s --retries=3 \
     CMD case "${PORT}" in ''|*[!0-9]*) p=8888;; *) p="${PORT}";; esac; \
-        { [ "${p}" -ge 1 ] && [ "${p}" -le 65535 ]; } || p=8888; \
+        { [ "${#p}" -le 5 ] && [ "${p}" -ge 1 ] && [ "${p}" -le 65535 ]; } || p=8888; \
         curl -f "http://localhost:${p}/health" || exit 1
 
 CMD ["python3", "-m", "app.main"]

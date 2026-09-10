@@ -722,12 +722,14 @@ container behavior is unchanged unless the platform injects its own values.
 | `--host` | `HOST` | `0.0.0.0` | Bind address |
 | `--port` | `PORT` | `8888` (bare) / `6050` (image) | Listen port |
 | `--workers` | `WORKERS` | `1` | Uvicorn worker count (use 1 for GPU to avoid VRAM contention) |
-| `--limit-concurrency` | `LIMIT_CONCURRENCY` | `32` | Max concurrent connections per worker; excess get 503 before their bodies are read |
+| `--limit-concurrency` | `LIMIT_CONCURRENCY` | `32` | Max concurrent connections per worker; excess get 503 without reaching the application |
 | `--reload` | — | off | Auto-reload on code changes (development only) |
 
 Malformed integer values are ignored with a warning rather than crashing
-startup; the image health check applies the same fallback, so it always
-probes the port the server actually bound. A `LIMIT_CONCURRENCY` below 2 is
+startup; the image health check applies the same validation and fallback, so
+whenever the listen port comes from `PORT` it probes the port the server
+actually bound. (Overriding the port with an explicit `--port` flag instead
+breaks that pairing — see below.) A `LIMIT_CONCURRENCY` below 2 is
 rejected with a warning and falls back to the default 32 — uvicorn counts
 the connection it is serving, so a limit of 1 would 503 every request,
 `/health` included, marking the container unhealthy (and, under the

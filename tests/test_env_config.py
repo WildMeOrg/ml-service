@@ -99,7 +99,8 @@ def test_malformed_limit_concurrency_env_falls_back():
 def test_limit_concurrency_of_one_falls_back():
     """uvicorn 503s when len(connections) >= limit and counts the connection
     it is serving, so a limit of 1 rejects every request -- /health included,
-    which makes the probe kill a healthy server. Floor the env at 2."""
+    marking a healthy container unhealthy for autoheal to restart. Values
+    below 2 are refused, which means the fallback 32, not a clamp to 2."""
     assert _probe("limit_concurrency", env={"LIMIT_CONCURRENCY": "1"}) == "32"
     assert _probe("limit_concurrency", env={"LIMIT_CONCURRENCY": "2"}) == "2"
 
@@ -118,7 +119,8 @@ PORT_MATRIX = [
     "٧٧٧٧",                              # decimal but not ASCII
     "0", "65536",                        # out of range
     "9" * 5000,                          # past CPython's int-conversion limit
-    "07777",                             # zero-padded
+    "0" * 5000 + "7777",                 # ... and numerically in range once parsed
+    "07777", "007777",                   # zero-padded, at and over five digits
 ]
 
 

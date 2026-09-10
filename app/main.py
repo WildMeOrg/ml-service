@@ -40,11 +40,16 @@ def _int_env(name: str, fallback: int, minimum: int = 1, maximum: int = None) ->
     try:
         if not (value.isascii() and value.isdecimal()):
             raise ValueError(value)
+        if maximum is not None and len(value) > len(str(maximum)):
+            # More digits than the ceiling can have, rejected before int().
+            # The bound is explicit so it mirrors the probe's ${#p} check:
+            # left to CPython's integer-string conversion limit, a padded
+            # PORT like "0"*5000 + "7777" would fall back here while the
+            # shell accepted it, sending the probe after a port the server
+            # never bound.
+            raise ValueError(value)
         number = int(value)
     except ValueError:
-        # int() raises on its own for a digit string past CPython's
-        # integer-string conversion limit, which .isdecimal() happily
-        # accepts -- the shell probe falls back there, so this must too.
         logger.warning(f"Ignoring invalid {name}={value!r}; using {fallback}")
         return fallback
     if number < minimum or (maximum is not None and number > maximum):
@@ -77,11 +82,12 @@ parser.add_argument('--workers', type=int, default=_int_env('WORKERS', 1),
                    help='Number of worker processes (keep at 1 per GPU)')
 # minimum=2: uvicorn rejects when len(connections) >= limit and counts the
 # connection being served, so a limit of 1 503s every request including
-# /health -- the probe then kills a server that is otherwise fine.
+# /health, marking a healthy container unhealthy for autoheal to restart.
 parser.add_argument('--limit-concurrency', type=int,
                    default=_int_env('LIMIT_CONCURRENCY', 32, minimum=2),
                    help='Max concurrent connections per worker; excess get 503 '
-                        'before their bodies are read (bounds parse-time memory)')
+                        'without reaching the application (bounds parse-time '
+                        'memory)')
 args = parser.parse_args()
 
 if __name__ == "__main__":
