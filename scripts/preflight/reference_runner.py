@@ -51,6 +51,20 @@ def _load_reference(reference_root):
 _T = transforms.Compose([transforms.ToTensor(),
      transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])])
 
+def reference_crop(image, bbox):
+    """Take the native reference slice and report its actual origin and size.
+
+    Integerize fractional detector boxes as the service does before cropping.
+    This oracle deliberately does not call the port's bbox resolver.
+    """
+    x, y, w, h = map(int, bbox)
+    crop = image[y:y+h, x:x+w]
+    if min(crop.shape[:2]) < 1:
+        return image, [0, 0, image.shape[1], image.shape[0]]
+    xs, ys = range(image.shape[1])[x:x+w], range(image.shape[0])[y:y+h]
+    return crop, [xs.start, ys.start, crop.shape[1], crop.shape[0]]
+
+
 class Reference:
     def __init__(self, ckpt, reference_root="/reference"):
         source = load_reference(reference_root)
@@ -67,12 +81,13 @@ class Reference:
         self.hflip, self.vflip = cfg.TEST.HFLIP, cfg.TEST.VFLIP
 
     def theta(self, image_bytes, bbox):
+        result = self.predict(image_bytes, bbox)
+        return result["theta"], result["coords_normalized"]
+
+    def predict(self, image_bytes, bbox):
         # --- AnimalWbiaDataset.__getitem__ ---
         image = imageio.imread(io.BytesIO(image_bytes))
-        x1, y1, w, h = bbox
-        crop = image[y1:y1+h, x1:x1+w]
-        if min(crop.shape) < 1:                       # animal_wbia.py:25-28
-            crop = image
+        crop, effective_bbox = reference_crop(image, bbox)
         crop = sk_resize(crop, self.imsize, order=3, anti_aliasing=True)
         x = _T(crop).unsqueeze(0).float()             # _plugin.py:272 .float()
         # --- OrientationNet.forward ---
@@ -87,4 +102,5 @@ class Reference:
             if self.hflip and self.vflip:
                 out = (out + oh + ov) / 3
         coords = out.numpy()
-        return float(self._eval.compute_theta(coords)[0]), coords[0].tolist()
+        return {"theta": float(self._eval.compute_theta(coords)[0]),
+                "coords_normalized": coords[0].tolist(), "effective_bbox": effective_bbox}

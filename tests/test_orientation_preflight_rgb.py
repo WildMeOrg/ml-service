@@ -72,12 +72,12 @@ def test_gate_keeps_original_for_port_and_converts_only_reference(mode, tmp_path
         def __init__(self, *args, **kwargs):
             pass
 
-        def theta(self, data, bbox):
+        def predict(self, data, bbox):
             calls.append('reference')
             with Image.open(io.BytesIO(data)) as rgb, Image.open(io.BytesIO(original)) as source:
                 assert rgb.mode == 'RGB'
                 np.testing.assert_array_equal(np.asarray(rgb), np.asarray(source.convert('RGB')))
-            return 0.0, [0.5] * 5
+            return {'theta': 0.0, 'coords_normalized': [0.5] * 5, 'effective_bbox': bbox}
 
     class Port:
         def load(self, **kwargs):
@@ -91,7 +91,9 @@ def test_gate_keeps_original_for_port_and_converts_only_reference(mode, tmp_path
     monkeypatch.setitem(sys.modules, 'reference_runner', types.SimpleNamespace(Reference=Reference))
     monkeypatch.setitem(sys.modules, 'app.models.wbia_orientation', types.SimpleNamespace(WbiaOrientationModel=Port))
     monkeypatch.setattr(gate, 'environment', lambda: {})
-    manifest = {'thresholds': {'theta_circular_max_rad': 1e-5, 'coords_elementwise_max': 1e-6},
+    manifest = {'thresholds': {'theta_circular_max_rad': 1e-5, 'coords_elementwise_max': 1e-6,
+                               'theta_circular_mean_rad': 1e-6, 'coords_elementwise_mean': 1e-7,
+                               'effective_bbox': 'exact', 'predict_batch': 'exact count and order'},
                 'checkpoints': [{'model_id': 'test', 'path': str(weights)}],
                 'fixtures': [{'file': 'image.png', 'bbox': [0, 0, 8, 8], 'stratum': 'canonicalization_wrapper'}],
                 'strata': {'canonicalization_wrapper': {'min_samples': 1}}}
