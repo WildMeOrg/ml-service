@@ -217,9 +217,10 @@ revisions, where pbil is an Apache index whose files can be replaced in place.
 6. Label validation: neither/both label forms, sparse or out-of-range
    `label_map` keys, `"1"`/`"01"` coercion collision, a string passed as
    `labels`, non-string values.
-7. `label_mode`: `species` emits `species=label` with `viewpoint=None`,
-   `viewpoint` the inverse, `compound` delegates to `parse_class_label`
-   including sentinel suppression.
+7. `label_mode`: `species` emits `species=label` and **omits** `viewpoint`
+   entirely, `viewpoint` the inverse, `compound` delegates to
+   `parse_class_label` including sentinel suppression. Entry key sets are
+   compared against a real `EfficientNetModel` in both of its modes.
 8. Preprocessing at tensor level against an explicit torchvision reference:
    bicubic vs bilinear, custom mean/std, square-crop geometry including
    clipping at image borders, non-square and partially out-of-frame bboxes,
@@ -301,3 +302,18 @@ Deliberately **not** done: extracting the ImageNet constants into a shared
 module. They are duplicated across four wrappers, but deduplicating means
 editing three other models' preprocessing, which this PR explicitly does not
 touch.
+
+## Review round 3
+
+- **Checkpoint transform verification was superficial.** It accepted a scalar
+  `Resize(224)`, which torchvision treats as aspect-ratio preserving -- on a
+  64x48 image that is 224x298, not the 224x224 this module always produces --
+  and it ignored interpolation entirely. Both now raise. `antialias` is
+  deliberately *not* compared: torchvision ignores it for PIL input (it warns
+  as much, and identical tensors were measured for `None`/`True`/`False`), and
+  this module resizes PIL images.
+- **`str.isdigit()` accepts Unicode digits.** `int("\u0661")` is `1`, so a
+  non-ASCII key could reindex the label map. ASCII digits only.
+- **Removed an unreachable guard.** After the pre-expansion overlap check,
+  clipping cannot empty the box, so the second overlap check was dead code --
+  the same reasoning that removed the post-strip duplicate-key branch.

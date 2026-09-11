@@ -159,7 +159,8 @@ class TimmClassifierModel(BaseModel):
                 f"{num_classes} labels were configured for '{model_id}'")
 
         if verify_checkpoint_transform:
-            self._check_checkpoint_transform(checkpoint, img_size, self.mean, self.std)
+            self._check_checkpoint_transform(
+                checkpoint, img_size, self.mean, self.std, interpolation)
 
         if strip_prefix:
             state = self._strip_prefix(state, strip_prefix)
@@ -222,7 +223,8 @@ class TimmClassifierModel(BaseModel):
                                      f"got {raw_key!r}")
                 if isinstance(raw_key, int):
                     key = raw_key
-                elif isinstance(raw_key, str) and raw_key.isdigit() \
+                elif isinstance(raw_key, str) and raw_key.isascii() \
+                        and raw_key.isdigit() \
                         and (raw_key == "0" or not raw_key.startswith("0")):
                     key = int(raw_key)
                 else:
@@ -302,7 +304,8 @@ class TimmClassifierModel(BaseModel):
         return {k[len(prefix):]: v for k, v in state.items()}
 
     @staticmethod
-    def _check_checkpoint_transform(checkpoint, img_size, mean, std) -> None:
+    def _check_checkpoint_transform(checkpoint, img_size, mean, std,
+                                    interpolation) -> None:
         """Cross-check configured preprocessing against any the checkpoint
         carries.
 
@@ -322,13 +325,35 @@ class TimmClassifierModel(BaseModel):
             name = type(step).__name__
             if name == "Resize":
                 size = getattr(step, "size", None)
-                sizes = [size] if isinstance(size, int) else list(size or [])
-                if sizes and any(int(s) != int(img_size) for s in sizes):
+                # A scalar Resize(224) is aspect-ratio preserving -- on a 64x48
+                # image it yields 224x298, not the 224x224 this module always
+                # produces. Accepting it would pass verification while doing
+                # materially different preprocessing.
+                if isinstance(size, int) or (size is not None and len(size) == 1):
                     raise ValueError(
-                        f"Checkpoint transform resizes to {size} but img_size="
-                        f"{img_size} is configured. Set img_size to match, or "
-                        f"pass verify_checkpoint_transform=false if the "
-                        f"difference is intentional.")
+                        f"Checkpoint transform resizes with a scalar size "
+                        f"({size}), which preserves aspect ratio, but this "
+                        f"model always resizes to a square "
+                        f"({img_size}x{img_size}). Pass "
+                        f"verify_checkpoint_transform=false if that is "
+                        f"intentional.")
+                if size is not None and \
+                        [int(v) for v in size] != [int(img_size), int(img_size)]:
+                    raise ValueError(
+                        f"Checkpoint transform resizes to {list(size)} but "
+                        f"img_size={img_size} is configured. Set img_size to "
+                        f"match, or pass verify_checkpoint_transform=false if "
+                        f"the difference is intentional.")
+                found_interp = getattr(step, "interpolation", None)
+                found_name = getattr(found_interp, "value", found_interp)
+                if found_name is not None and str(found_name) != interpolation:
+                    raise ValueError(
+                        f"Checkpoint transform interpolates with "
+                        f"{found_name!r} but interpolation={interpolation!r} "
+                        f"is configured.")
+                # antialias is deliberately NOT compared: torchvision ignores it
+                # for PIL input (it warns as much), and this module resizes PIL
+                # images, so a difference there changes nothing.
             elif name == "Normalize":
                 for label, configured, found in (
                         ("mean", mean, getattr(step, "mean", None)),
@@ -395,10 +420,10 @@ class TimmClassifierModel(BaseModel):
                 elif h > w:
                     expand = int((h - w) / 2)
                     x1, x2 = x1 - expand, x2 + expand
+            # Clipping cannot empty the box: the pre-check established overlap
+            # and expansion only grows it, so no second guard is reachable here.
             x1, y1 = max(0, x1), max(0, y1)
             x2, y2 = min(x2, width), min(y2, height)
-            if x2 <= x1 or y2 <= y1:
-                raise ValueError(f"bbox {bbox} does not overlap the image")
             image = image.crop((x1, y1, x2, y2))
 
         if theta:

@@ -677,3 +677,56 @@ def test_checkpoint_sha256_match_loads(tmp_path):
            img_size=224, global_pool="token", strip_prefix="base_model.",
            labels=["cat", "dog", "emu"], checkpoint_sha256=digest)
     assert m.model is not None
+
+
+# --- 13. guards added after review round 3 ----------------------------------
+
+def _ckpt_scalar_resize(size=224):
+    from torchvision.transforms import InterpolationMode, transforms
+    ck = _ckpt()
+    ck["transform"] = transforms.Compose([
+        transforms.Resize(size=size, interpolation=InterpolationMode.BICUBIC),
+        transforms.ToTensor(),
+    ])
+    return ck
+
+
+def test_scalar_resize_in_checkpoint_is_rejected():
+    """torchvision reads a scalar Resize(224) as aspect-ratio preserving --
+    224x298 for a 64x48 image -- while this module always squares. Accepting
+    it would pass verification while preprocessing differently."""
+    with pytest.raises(ValueError, match="scalar size"):
+        _load(ckpt=_ckpt_scalar_resize(224), img_size=224)
+
+
+def test_checkpoint_interpolation_mismatch_is_rejected():
+    with pytest.raises(ValueError, match="interpolates with"):
+        _load(ckpt=_ckpt_with_transform(), interpolation="bilinear")
+
+
+def test_matching_interpolation_passes():
+    m = _load(ckpt=_ckpt_with_transform(), interpolation="bicubic")
+    assert m.interpolation == "bicubic"
+
+
+def test_antialias_difference_is_not_treated_as_a_mismatch():
+    """torchvision ignores antialias for PIL input (measured: identical
+    tensors for None/True/False), so comparing it would be a false positive."""
+    from torchvision.transforms import InterpolationMode, transforms
+    ck = _ckpt()
+    ck["transform"] = transforms.Compose([
+        transforms.Resize(size=(224, 224), interpolation=InterpolationMode.BICUBIC,
+                          antialias=True),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=torch.tensor([0.485, 0.456, 0.406]),
+                             std=torch.tensor([0.229, 0.224, 0.225])),
+    ])
+    m = _load(ckpt=ck, img_size=224)
+    assert m.img_size == 224
+
+
+@pytest.mark.parametrize("unicode_key", ["١", "１"])
+def test_unicode_digit_label_map_keys_are_rejected(unicode_key):
+    """int('١') == 1, so a non-ASCII key would silently reindex labels."""
+    with pytest.raises(ValueError, match="integer indices"):
+        _load(labels=None, label_map={0: "a", unicode_key: "b", 2: "c"})
