@@ -77,7 +77,32 @@ Grouperspotter ports queue up behind the same type.
 | `square_crop` | `False` | expand the short side of the bbox, then clip — DeepFaune's `cropSquareCVtoPIL` |
 | `multi_label` | `False` | `False` = softmax + argmax; `True` = sigmoid + threshold |
 | `threshold` | `0.5` | multi-label only |
-| `parse_compound_labels` / `sentinel_prefixes` | as `efficientnetv2` | shared `parse_class_label` |
+| `label_mode` | `species` | `species` -> emit `species=label`, `viewpoint=None`; `viewpoint` -> the inverse; `compound` -> delegate to `parse_class_label` |
+| `sentinel_prefixes` | `None` | `compound` mode only; passed through to `parse_class_label` |
+
+Unknown keys are a **load-time error**. `app/main.py:87` forwards every
+config key except `model_id`/`model_type` into `load(**kwargs)`, so a
+misspelled `global_pool` would be swallowed, timm would silently fall back to
+`"avg"`, and the strict state-dict load would still succeed — the headline
+failure mode reached by typo. Any leftover `kwargs` raises, naming the unknown
+keys. Keys beginning with `_` are exempt, matching the `_note` convention the
+tracked `model_config.json` already uses for comments.
+
+`label_mode` exists because `/pipeline/` promotes a classification to an
+annotation's `iaClass` **only** from `predictions[0]['species']`
+(`app/routers/pipeline_router.py:456-457`), and the existing wrappers populate
+`species` only under `parse_compound_labels=True` — a path that assumes
+`species:viewpoint` labels and treats a colon-free label as a *viewpoint*.
+DeepFaune's labels are bare species names, so reusing that flag would emit
+`species=None, viewpoint="red deer"`: backwards, and `iaClass` would never be
+set. `label_mode: species` is the fix.
+
+Label validation, before the model is built: exactly one of `labels` /
+`label_map` (both, or neither, is an error); `labels` must be a real
+list/tuple of non-empty strings, never a bare string; `label_map` keys must
+coerce to exactly `0..N-1` with no duplicates after coercion (`"1"` and `"01"`
+collide and are rejected). Loading must not be able to produce a label map
+that silently mis-associates an output index.
 
 Load sequence:
 
@@ -174,14 +199,55 @@ revisions, where pbil is an Apache index whose files can be replaced in place.
 
 1. `global_pool` reaches `timm.create_model` verbatim (mocked) — the headline
    failure mode.
-2. `torch.load` is called with `map_location='cpu'` (mocked) — the 2.3 GiB trap.
-3. `state_dict` extraction across the three layouts + `strip_prefix`.
-4. `args['num_classes']` disagreeing with the label count raises.
-5. Label-count vs head-width mismatch raises.
-6. softmax/argmax vs sigmoid/threshold output shapes.
-7. Square-crop geometry matches upstream `cropSquareCVtoPIL` (including
-   clipping at image borders).
-8. Registry lookup and pipeline-router classify-slot acceptance.
+2. Unknown/misspelled config keys raise at load, naming the offenders;
+   `_`-prefixed keys are accepted. Covers misspelled `global_pool`,
+   preprocessing keys and label keys.
+3. `torch.load` is called with `map_location='cpu'` (mocked) — the 2.3 GiB trap.
+4. `state_dict` extraction across the three layouts + `strip_prefix`; the raw
+   fallback is accepted only when the object really is a tensor state dict.
+5. `args['num_classes']` disagreeing with the label count raises; head-width
+   mismatch raises under strict loading.
+6. Label validation: neither/both label forms, sparse or out-of-range
+   `label_map` keys, `"1"`/`"01"` coercion collision, a string passed as
+   `labels`, non-string values.
+7. `label_mode`: `species` emits `species=label` with `viewpoint=None`,
+   `viewpoint` the inverse, `compound` delegates to `parse_class_label`
+   including sentinel suppression.
+8. Preprocessing at tensor level against an explicit torchvision reference:
+   bicubic vs bilinear, custom mean/std, square-crop geometry including
+   clipping at image borders, non-square and partially out-of-frame bboxes,
+   and theta ordering relative to the crop.
+9. Scalar config validation: `img_size`, interpolation name, mean/std lengths,
+   `threshold`, boolean fields.
+10. Registry lookup and `/pipeline/` classify-slot acceptance.
+11. **Integration fixture**: a tiny timm arch with a DeepFaune-shaped
+    checkpoint (`args` + `base_model.`-prefixed `state_dict` + an unrelated
+    pickled `transform`), loaded through `ModelHandler` using the real config
+    surface, driven through both `/classify/` and `/pipeline/`, asserting a
+    plain species label arrives as top-level `iaClass`.
 
 Real ViT-L weights are never built in tests; a tiny arch plus mocks covers all
 of it.
+
+## Verification evidence
+
+Gathered against the real 1.2 GB checkpoint (SHA-256
+`4f937643...63d0`, matching the SHA-256 Hugging Face publishes for the LFS
+object) before implementation:
+
+- **Checkpoint structure is as assumed.** Top-level keys `args`, `state_dict`,
+  `transform`; `args == {'backbone': 'vit_large_patch16_dinov3.lvd1689m',
+  'num_classes': 40}`; 320 state-dict keys, every one prefixed `base_model.`;
+  head `(40, 1024)`; fp32. The pickled `transform` is exactly
+  `Resize((224, 224), bicubic)` + `ToTensor` + `Normalize(ImageNet)`, matching
+  the preprocessing this design specifies.
+- **The `global_pool` failure mode is real, on these weights.** Loading them
+  into `global_pool="token"` and `global_pool="avg"` both succeed *strictly*,
+  0 missing and 0 unexpected keys. On four fixed random crops the two
+  disagree on top-1 for **3 of 4**, with probabilities up to **0.254** apart.
+  Nothing raises. This is why the load is strict, why `global_pool` is
+  explicit in config, and why unknown keys are rejected rather than ignored.
+- **The timm bump is safe for existing checkpoints.**
+  `efficientnetv2_rw_m`, `hrnet_w32`, `tf_efficientnet_b4_ns` and
+  `densenet201` produce identical state-dict key/shape signatures under
+  1.0.19 and 1.0.25.
