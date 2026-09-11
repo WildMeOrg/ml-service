@@ -564,11 +564,13 @@ config entry, not a new module.
 - `sentinel_prefixes`: `compound` mode only; suppresses placeholder species
 - `state_dict_key`: wrapper key holding the weights (default: try `state_dict`, `state`, `model`, then the raw dict)
 - `strip_prefix`: prefix to strip from state-dict keys (e.g. `base_model.`)
-- `interpolation`: `bicubic` (default), `bilinear` or `nearest`
+- `interpolation`: `bicubic` (default) or `bilinear`
 - `mean` / `std`: per-channel normalization (default: ImageNet)
 - `square_crop`: expand the short side of the bbox to a square before cropping, then clip at the image border (default: false)
 - `multi_label`: sigmoid + threshold (true) or softmax + argmax (false) (default: false)
 - `threshold`: multi-label threshold (default: 0.5)
+- `checkpoint_sha256`: optional digest, verified against the resolved file at load
+- `verify_checkpoint_transform`: cross-check `img_size` and `mean`/`std` against any preprocessing the checkpoint itself carries (default: true)
 
 Unknown keys are rejected at load with the offending names. Every config key is
 forwarded into the loader, so a silently ignored typo would change model
@@ -598,6 +600,11 @@ Example — DeepFaune v1.5 (European camera-trap species):
                "arctic fox", "reindeer", "wild boar", "cow"]
 }
 ```
+
+What config alone cannot catch, the checkpoint can: DeepFaune pickles its own
+preprocessing, so `img_size: 256` or swapped `mean`/`std` are rejected at load
+rather than quietly degrading predictions. Label *order* has no such check —
+it is part of the model's contract, so keep the list as published.
 
 `global_pool: "token"` is **required** for this checkpoint — DeepFaune trained
 on the class token while timm's DINOv3 default is `"avg"`. Both load strictly

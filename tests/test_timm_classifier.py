@@ -40,6 +40,11 @@ def _load(model=None, ckpt=None, **overrides):
                strip_prefix="base_model.", labels=["cat", "dog", "emu"])
     cfg.update(overrides)
     m = model or TimmClassifierModel()
+    if ckpt is None and cfg["checkpoint_path"] != "/fake/ck.pt":
+        # a real file on disk: let torch.load actually read it
+        with patch(_PATCH_CKPT, side_effect=lambda p: p):
+            m.load(**cfg)
+        return m
     with patch("torch.load", return_value=ckpt if ckpt is not None else _ckpt()), \
          patch(_PATCH_CKPT, side_effect=lambda p: p):
         m.load(**cfg)
@@ -146,10 +151,20 @@ def test_checkpoint_args_num_classes_mismatch_raises():
         _load(ckpt=_ckpt(num_classes=3), labels=["a", "b"])
 
 
-def test_head_width_mismatch_raises_under_strict_load():
+def test_head_width_mismatch_raises():
     ck = _ckpt(num_classes=3, args=False)
     with pytest.raises(RuntimeError):
         _load(ckpt=ck, labels=["a", "b", "c", "d"])
+
+
+def test_incomplete_state_dict_raises_only_because_load_is_strict():
+    """A shape mismatch raises either way; a MISSING key is what proves
+    strict=True. Flipping the implementation to strict=False passes the
+    head-width test but fails this one."""
+    state = _tiny_state(3)
+    state.pop("base_model.norm.weight")
+    with pytest.raises(RuntimeError, match="[Mm]issing"):
+        _load(ckpt={"state_dict": state})
 
 
 # --- 6. label validation -----------------------------------------------------
@@ -170,7 +185,7 @@ def test_label_map_with_sparse_keys_raises():
 
 
 def test_label_map_coercion_collision_raises():
-    with pytest.raises(ValueError, match="duplicate|collision"):
+    with pytest.raises(ValueError, match="integer indices"):
         _load(labels=None, label_map={"1": "a", "01": "b", "0": "c"})
 
 
@@ -200,29 +215,35 @@ def test_label_mode_species_emits_species_and_no_viewpoint():
     m = _load(label_mode="species")
     top = _predict_once(m)["predictions"][0]
     assert top["species"] == top["label"]
-    assert top["viewpoint"] is None
+    assert "viewpoint" not in top
 
 
 def test_label_mode_viewpoint_emits_viewpoint_and_no_species():
     m = _load(label_mode="viewpoint", labels=["up", "down", "left"])
     top = _predict_once(m)["predictions"][0]
     assert top["viewpoint"] == top["label"]
-    assert top["species"] is None
+    assert "species" not in top
 
 
 def test_label_mode_compound_delegates_to_parse_class_label():
+    """Not just 'produces a split' -- it must go through the shared helper,
+    so compound semantics cannot drift between model types."""
     m = _load(label_mode="compound",
               labels=["zebra:left", "zebra:right", "giraffe:up"])
-    top = _predict_once(m)["predictions"][0]
-    assert top["species"] in {"zebra", "giraffe"}
-    assert top["viewpoint"] in {"left", "right", "up"}
+    with patch("app.models.timm_classifier.parse_class_label",
+               return_value=("sentinel-species", "sentinel-viewpoint")) as spy:
+        top = _predict_once(m)["predictions"][0]
+    assert spy.called
+    assert spy.call_args.kwargs["compound_labels"] is True
+    assert top["species"] == "sentinel-species"
+    assert top["viewpoint"] == "sentinel-viewpoint"
 
 
 def test_label_mode_compound_honours_sentinel_prefixes():
     m = _load(label_mode="compound", sentinel_prefixes=["species"],
               labels=["species:left", "species:right", "species:up"])
     top = _predict_once(m)["predictions"][0]
-    assert top["species"] is None
+    assert "species" not in top
     assert top["viewpoint"] in {"left", "right", "up"}
 
 
@@ -300,11 +321,40 @@ def test_bbox_partially_out_of_frame_is_clipped_not_wrapped():
     assert torch.allclose(got, _reference_tensor(arr[40:48, 50:64]), atol=1e-5)
 
 
-def test_degenerate_bbox_raises():
+def test_degenerate_bbox_raises_before_any_transform_runs():
     m = _load()
     png, _ = _png_bytes(seed=8)
-    with pytest.raises(ValueError):
+    m.transforms = MagicMock(side_effect=AssertionError("transforms must not run"))
+    with pytest.raises(ValueError, match="positive width and height"):
         m._preprocess_image(png, (10, 10, 0, 5), 0.0)
+    m.transforms.assert_not_called()
+
+
+def test_fully_out_of_frame_bbox_raises_even_with_square_crop():
+    """Square expansion must not drag an off-image box back over the image:
+    on 64x48, bbox (70, 4, 10, 40) expands x to 55..95 and would otherwise
+    clip to 55..64 and classify a strip that was never requested."""
+    m = _load(square_crop=True)
+    png, _ = _png_bytes(w=64, h=48, seed=11)
+    with pytest.raises(ValueError, match="does not overlap"):
+        m._preprocess_image(png, (70, 4, 10, 40), 0.0)
+
+
+def test_already_square_bbox_is_untouched_by_square_crop():
+    m = _load(square_crop=True)
+    png, arr = _png_bytes(w=64, h=48, seed=12)
+    got = m._preprocess_image(png, (10, 8, 16, 16), 0.0)
+    assert torch.allclose(got, _reference_tensor(arr[8:24, 10:26]), atol=1e-5)
+
+
+def test_square_crop_with_odd_side_difference_floors_the_expansion():
+    """int((w-h)/2) each side: an odd difference leaves a 1px shortfall,
+    exactly as upstream does."""
+    m = _load(square_crop=True)
+    png, arr = _png_bytes(w=64, h=48, seed=13)
+    # w=21 h=10 -> expand = int(11/2) = 5 -> y 3..23 (20 tall, not 21)
+    got = m._preprocess_image(png, (10, 8, 21, 10), 0.0)
+    assert torch.allclose(got, _reference_tensor(arr[3:23, 10:31]), atol=1e-5)
 
 
 def test_theta_rotation_is_applied_after_the_crop():
@@ -332,13 +382,50 @@ def test_invalid_scalar_config_raises(bad):
 
 # --- 10. output contract, registry and router wiring ------------------------
 
-def test_predict_output_matches_efficientnet_contract():
-    m = _load()
-    out = _predict_once(m)
-    assert set(out) >= {"model_id", "predictions", "all_probabilities",
-                        "threshold", "bbox", "theta"}
-    assert set(out["predictions"][0]) >= {"label", "index", "probability"}
-    assert len(out["all_probabilities"]) == 3
+def _efficientnet_reference(**kw):
+    """A real EfficientNetModel (tiny arch, empty state dict -- it loads
+    non-strict) to compare response shapes against."""
+    from app.models.efficientnet import EfficientNetModel
+    kw.setdefault("label_map", {0: "cat", 1: "dog", 2: "emu"})
+    e = EfficientNetModel()
+    with patch("torch.load", return_value={}), \
+         patch("app.models.efficientnet.get_checkpoint_path", side_effect=lambda p: p):
+        e.load(model_id="e", device="cpu", checkpoint_path="/fake/e.pt",
+               model_arch="efficientnet_b0", img_size=64, multi_label=False, **kw)
+    return e
+
+
+def test_top_level_keys_match_efficientnet_exactly():
+    png, _ = _png_bytes(seed=20)
+    mine = _load().predict(png)
+    theirs = _efficientnet_reference().predict(png)
+    assert set(mine) == set(theirs)
+
+
+def test_prediction_entry_keys_match_efficientnet_in_each_label_mode():
+    """EfficientNet omits species/viewpoint unless compound parsing is on.
+    A consumer that distinguishes an absent key from a null one must see the
+    same shape from both models."""
+    png, _ = _png_bytes(seed=21)
+    plain = set(_efficientnet_reference().predict(png)["predictions"][0])
+    compound = set(_efficientnet_reference(
+        parse_compound_labels=True,
+        label_map={0: "cat:left", 1: "dog:right", 2: "emu:up"},
+    ).predict(png)["predictions"][0])
+
+    assert plain == {"label", "index", "probability"}
+    assert compound == plain | {"species", "viewpoint"}
+
+    species_mode = set(_load(label_mode="species").predict(png)["predictions"][0])
+    viewpoint_mode = set(_load(label_mode="viewpoint").predict(png)["predictions"][0])
+    compound_mode = set(_load(
+        label_mode="compound",
+        labels=["cat:left", "dog:right", "emu:up"]).predict(png)["predictions"][0])
+
+    assert species_mode == plain | {"species"}
+    assert viewpoint_mode == plain | {"viewpoint"}
+    assert compound_mode == compound
+    assert len(_load().predict(png)["all_probabilities"]) == 3
 
 
 def test_softmax_single_label_returns_exactly_one_prediction():
@@ -348,11 +435,21 @@ def test_softmax_single_label_returns_exactly_one_prediction():
     assert abs(sum(out["all_probabilities"]) - 1.0) < 1e-5
 
 
-def test_multi_label_uses_sigmoid_and_threshold():
-    m = _load(multi_label=True, threshold=0.0)
+def test_multi_label_applies_a_nontrivial_threshold():
+    """Fixed logits -> sigmoid [0.881, 0.119, 0.622]. At threshold 0.5 exactly
+    two classes qualify, so an implementation ignoring the threshold fails."""
+    m = _load(multi_label=True, threshold=0.5)
+    m.model = lambda t: torch.tensor([[2.0, -2.0, 0.5]])
     out = _predict_once(m)
-    assert len(out["predictions"]) == 3          # every class clears 0.0
-    assert sum(out["all_probabilities"]) != pytest.approx(1.0, abs=1e-5)
+    assert [p["index"] for p in out["predictions"]] == [0, 2]
+    assert out["all_probabilities"] == pytest.approx([0.8808, 0.1192, 0.6225], abs=1e-3)
+
+
+def test_softmax_mode_ignores_threshold_and_takes_argmax():
+    m = _load(multi_label=False, threshold=0.99)
+    m.model = lambda t: torch.tensor([[0.1, 3.0, 0.2]])
+    out = _predict_once(m)
+    assert [p["index"] for p in out["predictions"]] == [1]
 
 
 def test_registry_exposes_timm_classifier():
@@ -360,12 +457,25 @@ def test_registry_exposes_timm_classifier():
     assert MODEL_REGISTRY["timm-classifier"]["class"] == "TimmClassifierModel"
 
 
-def test_pipeline_router_accepts_timm_classifier_in_classify_slot():
-    import inspect
+def test_pipeline_router_rejects_a_non_classifier_in_the_classify_slot():
+    """Guards the allowlist from the other side: if the check were removed
+    entirely, this would 200 instead of 400."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.models.miewid import MiewidModel
     from app.routers import pipeline_router
-    from app.models.timm_classifier import TimmClassifierModel
-    src = inspect.getsource(pipeline_router)
-    assert "TimmClassifierModel" in src
+
+    wrong = MagicMock(spec=MiewidModel)
+    app = FastAPI()
+    app.include_router(pipeline_router.router)
+    handler = MagicMock()
+    handler.get_model.side_effect = lambda mid: wrong
+    handler.list_models.return_value = {"c": {}}
+    app.state.model_handler = handler
+    r = TestClient(app).post("/pipeline/", json={
+        "image_uri": VALID_PNG_DATA_URI, "predict_model_id": "p",
+        "classify_model_id": "c", "extract_model_id": "e"})
+    assert r.status_code == 400
 
 
 # --- 11. end-to-end through ModelHandler into both endpoints ----------------
@@ -447,3 +557,123 @@ def test_end_to_end_pipeline_promotes_species_to_iaclass(tmp_path):
     result = r.json()["results"][0]
     assert result["iaClass"] in {"red deer", "wolf", "bird"}
     assert "viewpoint" not in result
+
+
+# --- 12. guards added after adversarial review ------------------------------
+
+@pytest.mark.parametrize("bad", [
+    {"multi_label": "false"}, {"square_crop": "false"},
+    {"multi_label": 1}, {"square_crop": "true"},
+    {"verify_checkpoint_transform": "no"},
+])
+def test_stringy_booleans_are_rejected(bad):
+    """bool("false") is True -- a stringy config would silently swap sigmoid
+    for softmax, or expand every crop."""
+    with pytest.raises(ValueError, match="boolean"):
+        _load(**bad)
+
+
+@pytest.mark.parametrize("bad", [
+    {"std": [0.0, 1.0, 1.0]}, {"std": [-0.2, 0.2, 0.2]},
+    {"mean": [float("nan"), 0.0, 0.0]}, {"std": [float("inf"), 1.0, 1.0]},
+])
+def test_degenerate_normalization_is_rejected(bad):
+    with pytest.raises(ValueError, match="finite|positive"):
+        _load(**bad)
+
+
+def test_nearest_interpolation_is_not_offered():
+    with pytest.raises(ValueError, match="interpolation"):
+        _load(interpolation="nearest")
+
+
+@pytest.mark.parametrize("bad_key", [0.9, True, "01", " 1", "1.0"])
+def test_non_canonical_label_map_keys_are_rejected(bad_key):
+    """int(0.9) == 0 and int(True) == 1 would quietly reindex the map."""
+    with pytest.raises(ValueError, match="integer indices|duplicate"):
+        _load(labels=None, label_map={0: "a", bad_key: "b", 2: "c"})
+
+
+def test_whitespace_only_label_is_rejected():
+    with pytest.raises(ValueError, match="non-empty"):
+        _load(labels=["cat", "   ", "emu"])
+
+
+def test_strip_prefix_matching_only_some_keys_is_rejected():
+    """A prefix that matches part of the checkpoint means the prefix is wrong
+    or the layout is mixed -- either way, not something to guess at."""
+    state = _tiny_state(3)
+    state["head_extra.weight"] = torch.zeros(1)
+    with pytest.raises(ValueError, match="does not match"):
+        _load(ckpt={"state_dict": state})
+
+
+def test_mixed_prefixed_and_bare_keys_are_rejected():
+    """Bare + prefixed copies of one tensor would collapse last-writer-wins
+    and still load strictly. Rejecting the mixed layout is the guard -- once
+    every key must carry the prefix, a post-strip collision is impossible."""
+    state = _tiny_state(3)
+    state["head.weight"] = torch.zeros(3, 192)
+    with pytest.raises(ValueError, match="does not match"):
+        _load(ckpt={"state_dict": state}, strip_prefix="base_model.")
+
+
+def _ckpt_with_transform(size=224, mean=None, std=None, num_classes=3):
+    from torchvision.transforms import InterpolationMode, transforms
+    ck = _ckpt(num_classes=num_classes)
+    ck["transform"] = transforms.Compose([
+        transforms.Resize(size=(size, size), interpolation=InterpolationMode.BICUBIC),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=torch.tensor(mean or [0.485, 0.456, 0.406]),
+                             std=torch.tensor(std or [0.229, 0.224, 0.225])),
+    ])
+    return ck
+
+
+def test_img_size_disagreeing_with_checkpoint_transform_raises():
+    """Config alone cannot know 256 is wrong for a 224px checkpoint -- it
+    loads strictly and merely predicts worse. The checkpoint knows."""
+    with pytest.raises(ValueError, match="img_size"):
+        _load(ckpt=_ckpt_with_transform(size=224), img_size=256)
+
+
+def test_swapped_mean_and_std_are_caught_by_the_checkpoint_transform():
+    with pytest.raises(ValueError, match="normalizes with"):
+        _load(ckpt=_ckpt_with_transform(),
+              mean=[0.229, 0.224, 0.225], std=[0.485, 0.456, 0.406])
+
+
+def test_matching_checkpoint_transform_loads_cleanly():
+    m = _load(ckpt=_ckpt_with_transform(), img_size=224)
+    assert m.img_size == 224
+
+
+def test_checkpoint_transform_check_can_be_disabled_deliberately():
+    m = _load(ckpt=_ckpt_with_transform(size=224), img_size=256,
+              verify_checkpoint_transform=False)
+    assert m.img_size == 256
+
+
+def test_checkpoint_without_transform_is_not_blocked():
+    m = _load(ckpt=_ckpt(), img_size=256)
+    assert m.img_size == 256
+
+
+def test_checkpoint_sha256_mismatch_raises(tmp_path):
+    ck = tmp_path / "ck.pt"
+    torch.save(_ckpt(), ck)
+    with pytest.raises(ValueError, match="digest mismatch"):
+        _load(ckpt=None, checkpoint_path=str(ck), checkpoint_sha256="00" * 32)
+
+
+def test_checkpoint_sha256_match_loads(tmp_path):
+    import hashlib
+    ck = tmp_path / "ck.pt"
+    torch.save(_ckpt(), ck)
+    digest = hashlib.sha256(ck.read_bytes()).hexdigest()
+    from app.models.timm_classifier import TimmClassifierModel
+    m = TimmClassifierModel()
+    m.load(model_id="t", device="cpu", checkpoint_path=str(ck), model_arch=TINY,
+           img_size=224, global_pool="token", strip_prefix="base_model.",
+           labels=["cat", "dog", "emu"], checkpoint_sha256=digest)
+    assert m.model is not None

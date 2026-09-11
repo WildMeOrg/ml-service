@@ -73,6 +73,8 @@ Grouperspotter ports queue up behind the same type.
 | `state_dict_key` | auto | tries `state_dict`, `state`, `model`, then the raw dict |
 | `strip_prefix` | `None` | e.g. `base_model.` |
 | `interpolation` | `bicubic` | `bicubic` or `bilinear` |
+| `checkpoint_sha256` | `None` | optional digest verified against the resolved file |
+| `verify_checkpoint_transform` | `True` | cross-check `img_size`/`mean`/`std` against preprocessing the checkpoint carries |
 | `mean` / `std` | ImageNet | per-channel |
 | `square_crop` | `False` | expand the short side of the bbox, then clip — DeepFaune's `cropSquareCVtoPIL` |
 | `multi_label` | `False` | `False` = softmax + argmax; `True` = sigmoid + threshold |
@@ -155,8 +157,13 @@ Regression evidence for the bump: `efficientnetv2_rw_m` (miewid), `hrnet_w32`
 so existing checkpoints keep loading strictly.
 
 Torch is untouched: `docker/dockerfile:27` pins torch 2.1.2 / torchvision
-0.16.2, timm 1.0.20+ declares no torch floor, and the DINOv3 path uses only
-`scaled_dot_product_attention` (torch 2.0+). To be confirmed in the built image.
+0.16.2 and timm 1.0.20+ declares no torch floor. Checked at module level:
+`vit_large_patch16_dinov3` instantiates only `Conv2d`, `Linear`, `LayerNorm`,
+`GELU`, `Mlp`, `PatchEmbed` and `RotaryEmbeddingDinoV3` — no RMSNorm, so
+timm's `F.rms_norm` path (torch >= 2.4, and runtime-guarded by
+`has_torch_rms_norm` in any case) is never reached; attention is
+`scaled_dot_product_attention` (torch 2.0+). Final confirmation is the docker
+image build in CI.
 
 ## Resource cost
 
@@ -251,3 +258,46 @@ object) before implementation:
   `efficientnetv2_rw_m`, `hrnet_w32`, `tf_efficientnet_b4_ns` and
   `densenet201` produce identical state-dict key/shape signatures under
   1.0.19 and 1.0.25.
+
+## Review round 2
+
+Codex reviewed the implementation. Changes made in response:
+
+- **Out-of-frame bbox could be resurrected by square expansion.** On a 64x48
+  image `bbox=(70, 4, 10, 40)` lies wholly off it, but expanding the short
+  side moved x to `55..95`, which clipped back to `55..64` and classified an
+  unrelated strip. The requested box is now checked for overlap *before*
+  expansion.
+- **Booleans and normalization stats are validated properly.**
+  `bool("false")` is `True`, so a stringy config value silently selected
+  sigmoid over softmax; real `bool`s are now required. Means must be finite
+  and standard deviations finite and strictly positive (a zero std divides the
+  image by zero and still yields a classifiable tensor). `nearest`
+  interpolation was dropped so code and design agree.
+- **Checkpoint metadata is now cross-checked.** Config alone cannot know that
+  `img_size: 256` or swapped `mean`/`std` are wrong -- they load strictly and
+  merely predict worse -- but DeepFaune pickles its own transform, so both are
+  now rejected at load, with `verify_checkpoint_transform: false` as the
+  deliberate opt-out. An optional `checkpoint_sha256` authenticates the file
+  itself. **Label order remains unverifiable** and is documented as such: it
+  is part of the model contract, not something config can infer.
+- **Partial prefix stripping is rejected.** A checkpoint mixing bare and
+  prefixed copies of a tensor would collapse onto one key, last-writer-wins,
+  and still load strictly. Every key must now carry `strip_prefix`; once that
+  holds, a post-strip collision is impossible, so that is the entire guard.
+- **`species`/`viewpoint` are emitted only when meaningful.** Always emitting
+  them, including JSON `null`, differed from `EfficientNetModel`, which omits
+  them unless compound parsing is on. Tests now compare exact key sets against
+  a real `EfficientNetModel` in both modes rather than asserting a subset.
+- **Label-map keys must be canonical.** `int(0.9) == 0` and `int(True) == 1`
+  would quietly reindex the map.
+- **Vacuous tests replaced.** The router test grepped source (the import alone
+  made it pass); the multi-label test used a threshold of `0.0`; the strict-load
+  test would have passed under `strict=False`; the compound test proved
+  semantics rather than delegation. Each now fails if the behaviour it names
+  is removed.
+
+Deliberately **not** done: extracting the ImageNet constants into a shared
+module. They are duplicated across four wrappers, but deduplicating means
+editing three other models' preprocessing, which this PR explicitly does not
+touch.

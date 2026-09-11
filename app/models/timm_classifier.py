@@ -17,8 +17,10 @@ typo would otherwise be swallowed into that same silent fallback.
 
 Design: docs/plans/2026-09-11-timm-classifier-design.md
 """
+import hashlib
 import io
 import logging
+import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -38,7 +40,6 @@ IMAGENET_STD = [0.229, 0.224, 0.225]
 INTERPOLATIONS = {
     "bicubic": InterpolationMode.BICUBIC,
     "bilinear": InterpolationMode.BILINEAR,
-    "nearest": InterpolationMode.NEAREST,
 }
 STATE_DICT_KEYS = ("state_dict", "state", "model")
 LABEL_MODES = ("species", "viewpoint", "compound")
@@ -85,6 +86,8 @@ class TimmClassifierModel(BaseModel):
              square_crop: bool = False,
              multi_label: bool = False,
              threshold: float = 0.5,
+             checkpoint_sha256: Optional[str] = None,
+             verify_checkpoint_transform: bool = True,
              **kwargs) -> None:
         # `model_path` is always forwarded by ModelHandler.load_model and is
         # meaningless here; every *other* leftover key is an operator typo.
@@ -115,8 +118,15 @@ class TimmClassifierModel(BaseModel):
         if not isinstance(threshold, (int, float)) or isinstance(threshold, bool) \
                 or not 0.0 <= float(threshold) <= 1.0:
             raise ValueError(f"threshold must be within [0, 1], got {threshold!r}")
+        # Real booleans only: bool("false") is True, so a stringy config value
+        # would silently select sigmoid over softmax, or expand every crop.
+        for name, value in (("square_crop", square_crop),
+                            ("multi_label", multi_label),
+                            ("verify_checkpoint_transform", verify_checkpoint_transform)):
+            if not isinstance(value, bool):
+                raise ValueError(f"{name} must be a boolean, got {value!r}")
         self.mean = self._validate_channel_stat(mean, IMAGENET_MEAN, "mean")
-        self.std = self._validate_channel_stat(std, IMAGENET_STD, "std")
+        self.std = self._validate_channel_stat(std, IMAGENET_STD, "std", positive=True)
 
         self.model_id = model_id
         self.device = torch.device(device)
@@ -133,6 +143,8 @@ class TimmClassifierModel(BaseModel):
         num_classes = len(self.label_map)
 
         actual_path = get_checkpoint_path(checkpoint_path)
+        if checkpoint_sha256:
+            self._verify_digest(actual_path, checkpoint_sha256)
         # map_location='cpu', never the target device: torch.load materialises
         # every tensor *before* load_state_dict copies into the already
         # allocated parameters. Straight to CUDA, a 1.2 GB checkpoint peaks at
@@ -146,9 +158,11 @@ class TimmClassifierModel(BaseModel):
                 f"Checkpoint declares num_classes={ckpt_classes} but "
                 f"{num_classes} labels were configured for '{model_id}'")
 
+        if verify_checkpoint_transform:
+            self._check_checkpoint_transform(checkpoint, img_size, self.mean, self.std)
+
         if strip_prefix:
-            state = {k[len(strip_prefix):] if k.startswith(strip_prefix) else k: v
-                     for k, v in state.items()}
+            state = self._strip_prefix(state, strip_prefix)
 
         create_kwargs = {"pretrained": False, "num_classes": num_classes}
         if global_pool is not None:
@@ -167,16 +181,23 @@ class TimmClassifierModel(BaseModel):
             label_mode, self.square_crop)
 
     @staticmethod
-    def _validate_channel_stat(value, default, name) -> List[float]:
+    def _validate_channel_stat(value, default, name, positive=False) -> List[float]:
         if value is None:
             return list(default)
         if isinstance(value, (str, bytes)) or not isinstance(value, Sequence) \
                 or len(value) != 3:
             raise ValueError(f"{name} must be a sequence of 3 floats, got {value!r}")
         try:
-            return [float(v) for v in value]
+            floats = [float(v) for v in value]
         except (TypeError, ValueError):
             raise ValueError(f"{name} must contain numbers, got {value!r}")
+        if any(not math.isfinite(v) for v in floats):
+            raise ValueError(f"{name} must be finite, got {value!r}")
+        # A zero or negative std divides the image by zero (or flips its sign)
+        # and still produces a tensor the model happily classifies.
+        if positive and any(v <= 0 for v in floats):
+            raise ValueError(f"{name} must be strictly positive, got {value!r}")
+        return floats
 
     @staticmethod
     def _build_label_map(labels, label_map) -> Dict[int, str]:
@@ -194,9 +215,17 @@ class TimmClassifierModel(BaseModel):
                 raise ValueError(f"label_map must be a mapping, got {label_map!r}")
             resolved = {}
             for raw_key, value in label_map.items():
-                try:
+                # int(0.9) == 0 and int(True) == 1: both would quietly reindex
+                # the label map. Accept only real ints and canonical decimals.
+                if isinstance(raw_key, bool):
+                    raise ValueError(f"label_map keys must be integer indices, "
+                                     f"got {raw_key!r}")
+                if isinstance(raw_key, int):
+                    key = raw_key
+                elif isinstance(raw_key, str) and raw_key.isdigit() \
+                        and (raw_key == "0" or not raw_key.startswith("0")):
                     key = int(raw_key)
-                except (TypeError, ValueError):
+                else:
                     raise ValueError(
                         f"label_map keys must be integer indices, got {raw_key!r}")
                 if key in resolved:
@@ -214,7 +243,7 @@ class TimmClassifierModel(BaseModel):
                 f"label indices must be exactly 0..{len(resolved) - 1}, got "
                 f"{sorted(resolved)}")
         for index, value in resolved.items():
-            if not isinstance(value, str) or not value:
+            if not isinstance(value, str) or not value.strip():
                 raise ValueError(
                     f"label at index {index} must be a non-empty string, "
                     f"got {value!r}")
@@ -241,6 +270,78 @@ class TimmClassifierModel(BaseModel):
             f"Could not find a state dict in the checkpoint: no {STATE_DICT_KEYS} "
             f"key and the top level is not a tensor state dict "
             f"(keys: {sorted(checkpoint)})")
+
+    @staticmethod
+    def _verify_digest(path: str, expected: str) -> None:
+        digest = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(chunk)
+        actual = digest.hexdigest()
+        if actual != expected.lower():
+            raise ValueError(
+                f"Checkpoint digest mismatch for {path}: configured "
+                f"{expected.lower()}, found {actual}")
+
+    @staticmethod
+    def _strip_prefix(state, prefix) -> Dict[str, torch.Tensor]:
+        """Strip `prefix` from every key, refusing a partial match.
+
+        A checkpoint holding both a bare and a prefixed copy of a tensor would
+        collapse onto one key, last-writer-wins, and still load strictly.
+        Requiring *every* key to carry the prefix rules that out: stripping a
+        fixed-length prefix from distinct keys cannot produce a collision, so
+        rejecting the mixed layout is the whole guard.
+        """
+        missing = [k for k in state if not k.startswith(prefix)]
+        if missing:
+            raise ValueError(
+                f"strip_prefix '{prefix}' does not match {len(missing)} of "
+                f"{len(state)} state-dict keys (e.g. {missing[:3]}). Either the "
+                f"prefix is wrong or the checkpoint mixes layouts.")
+        return {k[len(prefix):]: v for k, v in state.items()}
+
+    @staticmethod
+    def _check_checkpoint_transform(checkpoint, img_size, mean, std) -> None:
+        """Cross-check configured preprocessing against any the checkpoint
+        carries.
+
+        DeepFaune pickles its own torchvision Compose under 'transform'. Config
+        alone cannot tell that img_size=256 or swapped mean/std are wrong --
+        they load strictly and merely predict badly -- but the checkpoint can.
+        """
+        transform = checkpoint.get("transform") if isinstance(checkpoint, dict) else None
+        steps = getattr(transform, "transforms", None)
+        if not steps:
+            return
+
+        def _as_list(v):
+            return [round(float(x), 6) for x in (v.tolist() if hasattr(v, "tolist") else v)]
+
+        for step in steps:
+            name = type(step).__name__
+            if name == "Resize":
+                size = getattr(step, "size", None)
+                sizes = [size] if isinstance(size, int) else list(size or [])
+                if sizes and any(int(s) != int(img_size) for s in sizes):
+                    raise ValueError(
+                        f"Checkpoint transform resizes to {size} but img_size="
+                        f"{img_size} is configured. Set img_size to match, or "
+                        f"pass verify_checkpoint_transform=false if the "
+                        f"difference is intentional.")
+            elif name == "Normalize":
+                for label, configured, found in (
+                        ("mean", mean, getattr(step, "mean", None)),
+                        ("std", std, getattr(step, "std", None))):
+                    if found is None:
+                        continue
+                    if _as_list(found) != [round(float(v), 6) for v in configured]:
+                        raise ValueError(
+                            f"Checkpoint transform normalizes with {label}="
+                            f"{_as_list(found)} but {label}="
+                            f"{[round(float(v), 6) for v in configured]} is "
+                            f"configured. Set them to match, or pass "
+                            f"verify_checkpoint_transform=false.")
 
     @staticmethod
     def _checkpoint_num_classes(checkpoint) -> Optional[int]:
@@ -277,6 +378,13 @@ class TimmClassifierModel(BaseModel):
             if w <= 0 or h <= 0:
                 raise ValueError(f"bbox must have positive width and height, got {bbox}")
             x1, y1, x2, y2 = x, y, x + w, y + h
+            width, height = image.size
+            # Check the REQUESTED box overlaps the image before expanding it.
+            # Square expansion can otherwise drag a wholly out-of-frame box
+            # back over the image and classify an unrelated strip.
+            if x2 <= 0 or y2 <= 0 or x1 >= width or y1 >= height:
+                raise ValueError(
+                    f"bbox {bbox} does not overlap the {width}x{height} image")
             if self.square_crop:
                 # Upstream DeepFaune cropSquareCVtoPIL: grow the short side by
                 # int(diff/2) each way, then clip -- so a crop near a border
@@ -287,7 +395,6 @@ class TimmClassifierModel(BaseModel):
                 elif h > w:
                     expand = int((h - w) / 2)
                     x1, x2 = x1 - expand, x2 + expand
-            width, height = image.size
             x1, y1 = max(0, x1), max(0, y1)
             x2, y2 = min(x2, width), min(y2, height)
             if x2 <= x1 or y2 <= y1:
@@ -331,13 +438,19 @@ class TimmClassifierModel(BaseModel):
         for i in indices:
             label = self.label_map[int(i)]
             species, viewpoint = self._label_fields(label)
-            results.append({
+            entry = {
                 "label": label,
                 "index": int(i),
                 "probability": float(probs[i]),
-                "species": species,
-                "viewpoint": viewpoint,
-            })
+            }
+            # Emit only meaningful fields. EfficientNetModel omits these unless
+            # compound parsing is on, and a consumer that distinguishes an
+            # absent key from a null one would see a different contract.
+            if species is not None:
+                entry["species"] = species
+            if viewpoint is not None:
+                entry["viewpoint"] = viewpoint
+            results.append(entry)
         results.sort(key=lambda r: r["probability"], reverse=True)
 
         return {
