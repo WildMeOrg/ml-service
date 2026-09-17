@@ -88,10 +88,20 @@ def get_chip_from_img(img, bbox, theta):
     xm = (x1 + x2) // 2
     ym = (y1 + y2) // 2
 
-    # Do a faster, regular crop if theta is negligible
-    if abs(theta) < 0.1:
-        x1, y1, w, h = [max(0, int(x)) for x in bbox]
-        cropped_image = img[y1 : y1 + h, x1 : x1 + w]
+    # Fast path only for a box that is genuinely axis-aligned AND wholly inside
+    # the frame. The old `abs(theta) < 0.1` tolerance silently discarded up to
+    # 5.7 degrees of rotation -- enough to clip a long, narrow animal -- and
+    # clamping a negative origin with max(0, ...) while keeping the full width
+    # SHIFTS the window onto a different region rather than padding it. An
+    # object-aligned box legitimately overhangs the frame, so both cases now go
+    # through crop_rect, which samples the requested rectangle off a padded
+    # canvas. Detector boxes carry theta of exactly 0.0 and are already clamped
+    # in-frame, so they keep the cheap slice.
+    img_h, img_w = img.shape[0], img.shape[1]
+    wholly_inside = (x1 >= 0 and y1 >= 0 and x2 <= img_w and y2 <= img_h)
+    if theta == 0.0 and wholly_inside:
+        xi, yi, wi, hi = [int(v) for v in bbox]
+        cropped_image = img[yi : yi + hi, xi : xi + wi]
     else:
         cropped_image = crop_rect(img, ((xm, ym), (x2-x1, y2-y1), theta))[0]
 

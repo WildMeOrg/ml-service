@@ -200,11 +200,14 @@ def test_predict_returns_theta_and_never_a_label():
     for a viewpoint classification."""
     m = _model()
     r = m.predict_batch(RGB, [[10, 10, 100, 100]])[0]
-    assert set(r) == {"model_id", "theta", "coords_normalized", "effective_bbox"}
+    assert set(r) == {"model_id", "theta", "theta_oriented", "oriented_bbox",
+                      "coords_normalized", "effective_bbox"}
     for forbidden in ("label", "probability", "class_id", "class", "predictions"):
         assert forbidden not in r
     assert math.isfinite(r["theta"])
     assert len(r["coords_normalized"]) == 5
+    assert math.isfinite(r["theta_oriented"])
+    assert len(r["oriented_bbox"]) == 4
 
 
 def test_predict_batch_is_ordered_one_per_bbox():

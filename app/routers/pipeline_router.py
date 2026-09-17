@@ -259,6 +259,7 @@ async def run_pipeline(
                     # a malformed row N run classify/extract for rows 0..N-1 before the
                     # request failed -- request-level fail-closed must mean no consumer
                     # runs at all.
+                    oriented_bbox_ints = [None] * len(wbia_orientation_results)
                     for idx, ori in enumerate(wbia_orientation_results):
                         if not isinstance(ori, dict):
                             raise HTTPException(
@@ -279,6 +280,43 @@ async def run_pipeline(
                                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                                 detail=f"Orientation result {idx} has a malformed "
                                        f"effective_bbox: {eb!r}")
+                        if (not isinstance(eb, (list, tuple)) or len(eb) != 4
+                                or eb[2] <= 0 or eb[3] <= 0):
+                            raise HTTPException(
+                                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                                detail=f"Orientation result {idx} has a non-positive "
+                                       f"effective_bbox: {eb!r}")
+                        # The object-aligned box is what gets persisted AND
+                        # cropped, so it is validated as strictly as theta --
+                        # and integerized HERE, before any consumer runs. A
+                        # width of 0.4 is positive but rounds to 0, which would
+                        # make get_chip_from_img silently return the whole image
+                        # and persist a zero-width box beside that embedding.
+                        ob, ot = ori.get('oriented_bbox'), ori.get('theta_oriented')
+                        if (not isinstance(ob, (list, tuple)) or len(ob) != 4
+                                or not all(isinstance(v, (int, float))
+                                           and not isinstance(v, bool)
+                                           and math.isfinite(float(v)) for v in ob)):
+                            raise HTTPException(
+                                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                                detail=f"Orientation result {idx} has a malformed "
+                                       f"oriented_bbox: {ob!r}")
+                        if (not isinstance(ot, (int, float)) or isinstance(ot, bool)
+                                or not math.isfinite(float(ot))):
+                            raise HTTPException(
+                                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                                detail=f"Orientation result {idx} has a non-finite "
+                                       f"theta_oriented: {ot!r}")
+                        rounded = [int(round(float(v))) for v in ob]
+                        # Origin may legitimately be negative -- a rotated box
+                        # can overhang the frame -- but a sub-pixel side is not
+                        # a box. Checked AFTER rounding, which is what ships.
+                        if rounded[2] < 1 or rounded[3] < 1:
+                            raise HTTPException(
+                                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                                detail=f"Orientation result {idx} rounds to a "
+                                       f"sub-pixel oriented_bbox: {ob!r} -> {rounded!r}")
+                        oriented_bbox_ints[idx] = rounded
 
                 # Step 3: Run classification and extraction for each filtered bbox
                 pipeline_results = []
@@ -300,14 +338,20 @@ async def run_pipeline(
 
                     if wbia_orientation_results is not None:
                         ori = wbia_orientation_results[i]
-                        theta = float(ori['theta'])
                         theta_source = 'orientation'
-                        # effective_bbox is the slice orientation ACTUALLY used (NumPy
-                        # slicing does not clamp, and a degenerate crop falls back to
-                        # the full frame). classify, extract and the emitted result
-                        # must all use it, or theta describes a region other than the
-                        # crop it rotates.
-                        bbox_list = list(ori['effective_bbox'])
+                        # The regressor's OBJECT-ALIGNED box and its long-axis
+                        # angle. These two describe the SAME rectangle, which is
+                        # the whole point: the reference `theta` rotates the
+                        # animal upright and belongs to the object-aligned box,
+                        # not to the detector's axis-aligned crop region. Pairing
+                        # it with effective_bbox (what this did before) persisted
+                        # a rectangle a quarter turn off the animal AND handed
+                        # get_chip_from_img a window that clipped the animal once
+                        # it was rotated. Validated and integerized above, before
+                        # any consumer ran, so there is nothing left to check or
+                        # fall back to here.
+                        bbox_list = list(oriented_bbox_ints[i])
+                        theta = float(ori['theta_oriented'])
                         bbox_coords = bbox_list
                     elif bbox_list[2] <= 0 or bbox_list[3] <= 0:
                         # Guard AFTER integerization: a raw width of 0.5 passes
