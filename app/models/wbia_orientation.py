@@ -169,35 +169,42 @@ def compute_theta(coords: Sequence[float]) -> float:
 
 
 def oriented_box(coords: Sequence[float], effective_bbox: Sequence[int]):
-    """Image-space oriented box from the regressor's normalized coords.
+    """Persisted (bbox, theta) for the regressor's prediction.
 
-    `compute_theta` is faithful to the reference, but the reference's theta is
-    only half of what WBIA derived from these coordinates: the other half is the
-    OBJECT-ALIGNED BOX itself, built by `utils/data_manipulation.py:47`
-    (`get_object_aligned_box`), whose docstring defines the 5 outputs as
-    "the center point (xc, yc), the side point (xt, yt) and HALF width w".
-    So, in the crop's normalized frame:
+    This reproduces WBIA's OWN construction rather than inventing one. The
+    authoritative reference is `wbia/core_annots.py:2467`:
 
-        long side  = 2 * |(xt, yt) - (xc, yc)|      (centre to side point)
-        short side = 2 * w                          (w is a HALF width)
-        angle      = atan2(yt - yc, xt - xc)        (of the LONG axis)
+        predicted_verts  = get_object_aligned_box(xc, yc, xt, yt, w)
+        calculated_theta = arctan2(yt - yc, xt - xc) + deg2rad(90)
+        predicted_rot    = rotation_around_mat3x3(calculated_theta * -1.0, xc, yc)
+        aligned_verts    = transform_points_with_homography(predicted_rot, verts)
+        predicted_bbox   = bboxes_from_vert_list([aligned_verts])[0]
 
-    Porting only theta left the angle paired with the detector's AXIS-ALIGNED
-    crop region, which is not the same rectangle -- so the persisted geometry
-    named one box while theta described another, and Wildbook drew the box a
-    quarter turn out. `compute_theta`'s +90deg is the reference's convention for
-    rotating the animal UPRIGHT; the annotation convention Wildbook draws (and
-    `get_chip_from_img` crops) wants the LONG axis angle, which is that value
-    without the +90 -- i.e. plain arctan2, as returned here.
+    i.e. build the four corners of the object-aligned box, DE-ROTATE them by
+    -theta about the centre, and persist the axis-aligned bound of the result.
+    Width and height fall out of that construction -- there is no convention to
+    choose and, importantly, NO SORTING: the reference never guarantees that
+    width is the shorter side, so forcing that would introduce a fresh error.
 
-    Rescaling mirrors `resize_oa_box`: the perpendicular endpoint is
-    reconstructed in NORMALIZED space, all three points are scaled
-    anisotropically into the crop, and the width is re-measured afterwards.
-    (The reference truncates with int() for plotting; we keep float precision.)
+    Two things this gets right that a hand-rolled "long side as width" does not:
 
-    Returns ([x, y, width, height], theta) in the annotation convention: the
-    axis-aligned (width, height) rectangle rotated about its own centre.
-    Returns (None, None) for a degenerate box the caller should not persist.
+      * theta carries the reference's +90. That is not a bug in `compute_theta`
+        (an earlier revision of this function removed it as if it were): it is
+        the convention every catalog built through WBIA was stored in. Dropping
+        it rotates the MiewID crop by a quarter turn, so new embeddings stop
+        matching the existing catalog even though the drawn box looks correct.
+      * theta is computed in IMAGE space, after the anisotropic rescale. An
+        angle is not preserved by non-uniform scaling -- a -45deg axis in a
+        400x100 crop is -45deg normalized but -75.96deg in image space -- so
+        adding the +90 to the normalized angle would be wrong.
+
+    Rescaling into image space mirrors `resize_oa_box`: the perpendicular
+    endpoint is reconstructed in NORMALIZED space, all three points scale
+    anisotropically, and the half-width is re-measured afterwards. (The
+    reference truncates with int() for plotting; we keep float precision.)
+
+    Returns ([x, y, width, height], theta), or (None, None) for a degenerate
+    prediction the caller must not persist.
     """
     xc, yc, xt, yt, w = (float(c) for c in coords)
     x1, y1, bw, bh = (float(v) for v in effective_bbox)
@@ -206,22 +213,45 @@ def oriented_box(coords: Sequence[float], effective_bbox: Sequence[int]):
     norm = math.hypot(dx, dy)
     if norm == 0.0 or bw <= 0.0 or bh <= 0.0:
         # Centre and side point coincide: no axis, so no angle. The caller
-        # falls back rather than persisting a fabricated orientation.
+        # fails closed rather than persisting a fabricated orientation.
         return None, None
     ux, uy = dx / norm, dy / norm
     # add_dict_perpendicular_vector([xc,yc], [xt,yt], w) -> p1 + w * (-uy, ux)
     xw_end, yw_end = xt + w * -uy, yt + w * ux
 
+    # --- into image space (orientation_post_proc: resize_oa_box, then shift) ---
     cx, cy = xc * bw + x1, yc * bh + y1
     tx, ty = xt * bw + x1, yt * bh + y1
     wx, wy = xw_end * bw + x1, yw_end * bh + y1
-
-    length = 2.0 * math.hypot(tx - cx, ty - cy)
-    width = 2.0 * math.hypot(wx - tx, wy - ty)
-    if length <= 0.0 or width <= 0.0:
+    half_w = math.hypot(wx - tx, wy - ty)          # re-measured, as resize_oa_box does
+    half_l = math.hypot(tx - cx, ty - cy)
+    if half_w <= 0.0 or half_l <= 0.0:
         return None, None
-    theta = math.atan2(ty - cy, tx - cx)
-    return [cx - length / 2.0, cy - width / 2.0, length, width], theta
+
+    # --- get_object_aligned_box (data_manipulation.py:47), in image space ------
+    ax, ay = (tx - cx) / half_l, (ty - cy) / half_l   # unit vector centre -> side point
+    px, py = -ay, ax                                  # its perpendicular
+    tx2, ty2 = tx + 2.0 * half_l * -ax, ty + 2.0 * half_l * -ay   # tip reflected through centre
+    verts = [
+        (tx + half_w * px, ty + half_w * py),
+        (tx - half_w * px, ty - half_w * py),
+        (tx2 + half_w * px, ty2 + half_w * py),
+        (tx2 - half_w * px, ty2 - half_w * py),
+    ]
+
+    # --- theta, then de-rotate the corners about the centre -------------------
+    theta = math.atan2(ty - cy, tx - cx) + math.radians(90)
+    ct, st = math.cos(-theta), math.sin(-theta)
+    rot = [((vx - cx) * ct - (vy - cy) * st + cx,
+            (vx - cx) * st + (vy - cy) * ct + cy) for vx, vy in verts]
+
+    xs = [p[0] for p in rot]
+    ys = [p[1] for p in rot]
+    bx, by = min(xs), min(ys)
+    bw_out, bh_out = max(xs) - bx, max(ys) - by
+    if bw_out <= 0.0 or bh_out <= 0.0:
+        return None, None
+    return [bx, by, bw_out, bh_out], theta
 
 
 class WbiaOrientationModel(BaseModel):
