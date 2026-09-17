@@ -496,18 +496,38 @@ def test_axis_less_prediction_raises_and_takes_the_whole_batch_with_it():
         m.predict_batch(RGB, [[10, 10, 100, 100], [50, 50, 60, 60]])
 
 
-def test_zero_angle_overhang_is_padded_not_shifted():
-    """A zero-angle box that runs off the frame must be PADDED at its requested
-    size, not silently slid back inside (which would crop a region the caller
-    never asked for)."""
+@pytest.mark.parametrize("bbox", [
+    [-1, 0, 4, 3],        # Codex's example: even width, one column overhanging
+    [-20, -20, 40, 30],   # both origins negative
+    [-5, 50, 31, 17],     # odd dimensions
+    [150, 110, 40, 30],   # right/bottom overrun
+    [200, 200, 5, 5],     # entirely outside the frame
+    [-3, -3, 2, 2],       # even, tiny
+])
+def test_zero_angle_overhang_matches_crop_rect_exactly(bbox):
+    """The zero-angle overhang branch is a FAST path, not a behaviour change.
+
+    getRectSubPix samples from center - (size-1)/2, so an integer centre with an
+    even dimension lands on a half-pixel and interpolates against the white
+    border. A plain slice would return solid padding there instead of the blend.
+    """
+    import numpy as np
+    from app.utils.helpers import crop_rect, get_chip_from_img
+
+    img = np.random.RandomState(0).randint(0, 255, (120, 160, 3), dtype=np.uint8)
+    x, y, w, h = bbox
+    x2, y2 = x + w, y + h
+    expected = crop_rect(img, (((x + x2) // 2, (y + y2) // 2), (x2 - x, y2 - y), 0.0))[0]
+    actual = get_chip_from_img(img, bbox, 0.0)
+
+    assert actual.shape == expected.shape
+    assert np.array_equal(actual, expected)
+
+
+def test_zero_angle_overhang_handles_a_grayscale_frame():
+    """A plain (H, W) frame has no channel axis; `img.shape[2]` would raise."""
     import numpy as np
     from app.utils.helpers import get_chip_from_img
 
-    img = np.zeros((100, 100, 3), np.uint8)
-    img[0:10, 0:10] = 255                       # marker in the top-left corner
-    chip = get_chip_from_img(img, [-20, -20, 50, 50], 0.0)
-
-    assert chip.shape[:2] == (50, 50)           # requested size preserved
-    # the marker sits 20px in, exactly where the overhang puts it
-    assert chip[20:30, 20:30].max() == 255
-    assert chip[0, 0].tolist() == [255, 255, 255]   # padding, not image content
+    assert get_chip_from_img(np.zeros((50, 60), np.uint8), [-5, -5, 20, 20], 0.0).shape \
+        == (20, 20)

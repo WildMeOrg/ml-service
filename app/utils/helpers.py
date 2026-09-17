@@ -103,19 +103,32 @@ def get_chip_from_img(img, bbox, theta):
         xi, yi, wi, hi = [int(v) for v in bbox]
         cropped_image = img[yi : yi + hi, xi : xi + wi]
     elif theta == 0.0:
-        # Zero-angle overhang: pad, don't warp. crop_rect builds a
-        # diagonal-sized canvas AND warps the whole image -- about 156MB per
-        # buffer on a 6000x4000 RGB frame -- to produce what is really just a
-        # slice with white padding. These are not hypothetical: YOLO dilation
-        # is not clamped to the frame, so existing callers hit this.
-        ix1, iy1 = int(x1), int(y1)
-        ow, oh = int(x2) - ix1, int(y2) - iy1
-        cropped_image = np.full((oh, ow, img.shape[2]), 255, dtype=img.dtype)
-        sx1, sy1 = max(0, ix1), max(0, iy1)
-        sx2, sy2 = min(img_w, int(x2)), min(img_h, int(y2))
-        if sx2 > sx1 and sy2 > sy1:
-            cropped_image[sy1 - iy1 : sy2 - iy1, sx1 - ix1 : sx2 - ix1] = \
-                img[sy1:sy2, sx1:sx2]
+        # Zero-angle overhang. crop_rect would produce the right pixels, but it
+        # builds a diagonal-sized canvas AND warps the whole image to do it --
+        # about 156MB per buffer on a 6000x4000 RGB frame. YOLO dilation is not
+        # clamped to the frame, so existing callers really do land here.
+        #
+        # We keep cv2.getRectSubPix and only shrink what it reads from. A plain
+        # slice is NOT equivalent: getRectSubPix samples from
+        # center - (size-1)/2, so an integer centre with an EVEN dimension
+        # lands on a half-pixel and interpolates against the white border.
+        # Sizes and centre are derived exactly as crop_rect derives them.
+        iw, ih = int(x2 - x1), int(y2 - y1)
+        cx, cy = int(xm), int(ym)
+        # The window getRectSubPix will read, plus one pixel for the
+        # interpolation tap on each side.
+        sx = cx - (iw - 1) / 2.0
+        sy = cy - (ih - 1) / 2.0
+        px0, py0 = int(np.floor(sx)) - 1, int(np.floor(sy)) - 1
+        px1, py1 = int(np.ceil(sx + iw)) + 1, int(np.ceil(sy + ih)) + 1
+        # `img.shape[2:]` not `img.shape[2]`: a plain (H, W) grayscale frame has
+        # no channel axis and would raise.
+        patch = np.full((py1 - py0, px1 - px0) + img.shape[2:], 255, dtype=img.dtype)
+        ox1, oy1 = max(0, px0), max(0, py0)
+        ox2, oy2 = min(img_w, px1), min(img_h, py1)
+        if ox2 > ox1 and oy2 > oy1:
+            patch[oy1 - py0:oy2 - py0, ox1 - px0:ox2 - px0] = img[oy1:oy2, ox1:ox2]
+        cropped_image = cv2.getRectSubPix(patch, (iw, ih), (cx - px0, cy - py0))
     else:
         cropped_image = crop_rect(img, ((xm, ym), (x2-x1, y2-y1), theta))[0]
 
