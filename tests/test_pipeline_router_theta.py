@@ -134,7 +134,9 @@ def test_orientation_runs_before_classify_and_extract():
     om.predict_batch.side_effect = lambda **kw: (
         order.append("orientation"),
         [{"model_id": "o", "theta": 0.5, "coords_normalized": [0.5] * 5,
-          "effective_bbox": [10, 10, 50, 50]}])[1]
+          "effective_bbox": [10, 10, 50, 50],
+          "theta_oriented": 0.5 - math.pi / 2,
+          "oriented_bbox": [12.0, 14.0, 40.0, 20.0]}])[1]
     cm.predict.side_effect = lambda **kw: (order.append("classify"), {"predictions": []})[1]
     em.extract_embeddings.side_effect = lambda **kw: (
         order.append("extract"), np.zeros((1, 2152)))[1]
@@ -361,18 +363,52 @@ def test_classify_and_extract_crop_the_object_aligned_box():
     assert list(em.extract_embeddings.call_args.kwargs["bbox"]) == [12, 18, 44, 12]
 
 
-def test_no_object_axis_falls_back_to_no_rotation():
-    """A degenerate prediction carries no angle, so we say so rather than
-    invent one -- a fabricated theta is indistinguishable from a real one."""
+def test_no_object_axis_fails_closed_at_the_model():
+    """A prediction whose centre and side point coincide describes no axis.
+    The model raises rather than defaulting: a fabricated 0.0 is
+    indistinguishable from a real horizontal animal downstream."""
+    from app.models.wbia_orientation import OrientationInferenceError, oriented_box
+
+    assert oriented_box([0.5, 0.5, 0.5, 0.5, 0.1], [0, 0, 400, 400]) == (None, None)
+    assert OrientationInferenceError is not None
+
+
+def test_sub_pixel_oriented_box_is_rejected_before_any_consumer_runs():
+    """A width of 0.4 is positive but rounds to 0. Unchecked, get_chip_from_img
+    silently returns the WHOLE image and we persist a zero-width box beside
+    that embedding."""
     pm, cm, em = _models()
-    om = _orientation([0.2407], effective_bboxes=[[10, 10, 50, 50]],
-                      oriented_bboxes=[None])
+    om = _orientation([0.2407], oriented_bboxes=[[12.0, 18.0, 44.0, 0.4]])
+    r = _client(pm, cm, em, om).post("/pipeline/", json=_payload(orientation_model_id="o"))
+
+    assert r.status_code == 500
+    assert "sub-pixel" in r.json()["detail"].lower()
+    cm.predict.assert_not_called()
+    em.extract_embeddings.assert_not_called()
+
+
+def test_one_bad_row_stops_every_row_reaching_a_consumer():
+    """Request-level fail-closed: row 1 being unusable must not let row 0's
+    classify/extract run first."""
+    pm, cm, em = _models(n_bboxes=2)
+    om = _orientation([0.2, 0.3],
+                      oriented_bboxes=[[12.0, 18.0, 44.0, 20.0], [12.0, 18.0, 44.0, 0.2]])
+    r = _client(pm, cm, em, om).post("/pipeline/", json=_payload(orientation_model_id="o"))
+
+    assert r.status_code == 500
+    cm.predict.assert_not_called()
+    em.extract_embeddings.assert_not_called()
+
+
+def test_negative_origin_is_allowed():
+    """An object-aligned box legitimately overhangs the frame; only a sub-pixel
+    SIDE is invalid. Rejecting negative origins would drop edge animals."""
+    pm, cm, em = _models()
+    om = _orientation([0.2407], oriented_bboxes=[[-30.0, -12.0, 44.0, 20.0]])
     r = _client(pm, cm, em, om).post("/pipeline/", json=_payload(orientation_model_id="o"))
 
     assert r.status_code == 200, r.text
-    res = r.json()["results"][0]
-    assert res["theta"] == 0.0
-    assert res["bbox"] == [10, 10, 50, 50]
+    assert r.json()["results"][0]["bbox"] == [-30, -12, 44, 20]
 
 
 def test_half_an_oriented_box_is_rejected():
@@ -380,8 +416,8 @@ def test_half_an_oriented_box_is_rejected():
     contract, not something to paper over."""
     pm, cm, em = _models()
     om = _orientation([0.2407])
-    om.predict_batch.return_value[0]["theta_oriented"] = None
+    om.predict_batch.return_value[0]["oriented_bbox"] = None
     r = _client(pm, cm, em, om).post("/pipeline/", json=_payload(orientation_model_id="o"))
 
     assert r.status_code == 500
-    assert "half" in r.json()["detail"].lower()
+    assert "malformed oriented_bbox" in r.json()["detail"].lower()

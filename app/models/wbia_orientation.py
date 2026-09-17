@@ -411,6 +411,15 @@ class WbiaOrientationModel(BaseModel):
             # convention wants. `theta` above stays reference-faithful so the
             # host preflight keeps comparing like with like.
             oa_bbox, oa_theta = oriented_box(coords, eff)
+            if oa_bbox is None or oa_theta is None:
+                # Same stance as a non-finite theta: an unusable prediction is
+                # raised, not defaulted. A fabricated angle (or a fabricated
+                # 0.0) is indistinguishable from a real one downstream, which
+                # is the one failure mode this module exists to prevent.
+                raise OrientationInferenceError(
+                    f"wbia-orientation '{self.model_id}': coords describe no "
+                    f"object axis (coords={coords}, bbox={eff})"
+                )
             results.append({
                 "model_id": self.model_id,
                 "theta": float(th),
