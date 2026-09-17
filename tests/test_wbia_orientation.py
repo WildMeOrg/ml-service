@@ -471,3 +471,43 @@ def test_load_uses_strict_state_dict():
         with pytest.raises(RuntimeError, match="size mismatch"):
             WbiaOrientationModel().load(model_id="t", checkpoint_path="/x")
         assert backbone.load_state_dict.call_args.kwargs.get("strict") is True
+
+
+def test_axis_less_prediction_raises_and_takes_the_whole_batch_with_it():
+    """Centre == side point describes no object axis. predict_batch raises
+    rather than defaulting -- a fabricated angle is indistinguishable from a
+    real one downstream -- and a valid sibling row does NOT sneak through,
+    matching the module's atomic-failure contract."""
+    from app.models.wbia_orientation import OrientationInferenceError, WbiaOrientationModel
+
+    m = WbiaOrientationModel()
+    m.model_id, m.device, m.imsize = "t", "cpu", (224, 224)
+    m.hflip = m.vflip = False
+
+    def _logit(c, eps=1e-9):
+        c = min(max(c, eps), 1 - eps)
+        return math.log(c / (1 - c))
+
+    good = [_logit(c) for c in (0.5, 0.5, 1.0, 0.5, 0.1)]   # a real axis
+    bad = [_logit(c) for c in (0.5, 0.5, 0.5, 0.5, 0.1)]    # centre == tip
+    m.model = MagicMock(side_effect=lambda x, *a, **k: torch.tensor([good, bad])[: x.shape[0]])
+
+    with pytest.raises(OrientationInferenceError, match="no object axis"):
+        m.predict_batch(RGB, [[10, 10, 100, 100], [50, 50, 60, 60]])
+
+
+def test_zero_angle_overhang_is_padded_not_shifted():
+    """A zero-angle box that runs off the frame must be PADDED at its requested
+    size, not silently slid back inside (which would crop a region the caller
+    never asked for)."""
+    import numpy as np
+    from app.utils.helpers import get_chip_from_img
+
+    img = np.zeros((100, 100, 3), np.uint8)
+    img[0:10, 0:10] = 255                       # marker in the top-left corner
+    chip = get_chip_from_img(img, [-20, -20, 50, 50], 0.0)
+
+    assert chip.shape[:2] == (50, 50)           # requested size preserved
+    # the marker sits 20px in, exactly where the overhang puts it
+    assert chip[20:30, 20:30].max() == 255
+    assert chip[0, 0].tolist() == [255, 255, 255]   # padding, not image content

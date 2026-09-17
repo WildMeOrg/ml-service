@@ -102,6 +102,20 @@ def get_chip_from_img(img, bbox, theta):
     if theta == 0.0 and wholly_inside:
         xi, yi, wi, hi = [int(v) for v in bbox]
         cropped_image = img[yi : yi + hi, xi : xi + wi]
+    elif theta == 0.0:
+        # Zero-angle overhang: pad, don't warp. crop_rect builds a
+        # diagonal-sized canvas AND warps the whole image -- about 156MB per
+        # buffer on a 6000x4000 RGB frame -- to produce what is really just a
+        # slice with white padding. These are not hypothetical: YOLO dilation
+        # is not clamped to the frame, so existing callers hit this.
+        ix1, iy1 = int(x1), int(y1)
+        ow, oh = int(x2) - ix1, int(y2) - iy1
+        cropped_image = np.full((oh, ow, img.shape[2]), 255, dtype=img.dtype)
+        sx1, sy1 = max(0, ix1), max(0, iy1)
+        sx2, sy2 = min(img_w, int(x2)), min(img_h, int(y2))
+        if sx2 > sx1 and sy2 > sy1:
+            cropped_image[sy1 - iy1 : sy2 - iy1, sx1 - ix1 : sx2 - ix1] = \
+                img[sy1:sy2, sx1:sx2]
     else:
         cropped_image = crop_rect(img, ((xm, ym), (x2-x1, y2-y1), theta))[0]
 

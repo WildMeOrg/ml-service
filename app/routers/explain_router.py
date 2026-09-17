@@ -223,8 +223,12 @@ async def process_image(uri, bbox, theta, crop_bbox, model, device):
     # cv2.getRectSubPix with size (0, 0), which returns None and crashes
     # get_chip_from_img. Promote to a full-frame bbox so the canonical
     # helper rotates the whole image safely.
+    # Gate on theta != 0.0, matching get_chip_from_img exactly. The old
+    # `>= 0.1` tolerance now DISAGREES with the cropper: at theta=0.05
+    # extraction rotates and this would not, so the explanation would
+    # describe a different input than the model actually saw.
     has_bbox = len(bbox) == 4 and bbox[2] > 0 and bbox[3] > 0
-    if not has_bbox and abs(float(theta)) >= 0.1:
+    if not has_bbox and float(theta) != 0.0:
         h, w = image.shape[:2]
         bbox = [0, 0, w, h]
 
@@ -238,7 +242,7 @@ async def process_image(uri, bbox, theta, crop_bbox, model, device):
     # or a meaningful rotation was applied. Otherwise relevance pixels land
     # at the right location within the chip but on top of the wrong
     # (full-frame, un-rotated) display image.
-    if crop_bbox or has_bbox or abs(float(theta)) >= 0.1:
+    if crop_bbox or has_bbox or float(theta) != 0.0:
         image = chip
     img_size = tuple(transformed_image.shape[-2:])
     image = np.array(transforms.Resize(img_size)(Image.fromarray(image)))
