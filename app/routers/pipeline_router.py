@@ -279,6 +279,33 @@ async def run_pipeline(
                                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                                 detail=f"Orientation result {idx} has a malformed "
                                        f"effective_bbox: {eb!r}")
+                        # The object-aligned box is what actually gets persisted
+                        # and cropped, so it is validated as strictly as theta.
+                        # Both halves are optional together (a degenerate
+                        # prediction yields neither) but never one without the
+                        # other, and never non-finite.
+                        ob, ot = ori.get('oriented_bbox'), ori.get('theta_oriented')
+                        if (ob is None) != (ot is None):
+                            raise HTTPException(
+                                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                                detail=f"Orientation result {idx} has only half of "
+                                       f"the oriented box: bbox={ob!r} theta={ot!r}")
+                        if ob is not None:
+                            if (not isinstance(ob, (list, tuple)) or len(ob) != 4
+                                    or not all(isinstance(v, (int, float))
+                                               and not isinstance(v, bool)
+                                               and math.isfinite(float(v)) for v in ob)
+                                    or float(ob[2]) <= 0 or float(ob[3]) <= 0):
+                                raise HTTPException(
+                                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                                    detail=f"Orientation result {idx} has a malformed "
+                                           f"oriented_bbox: {ob!r}")
+                            if (not isinstance(ot, (int, float)) or isinstance(ot, bool)
+                                    or not math.isfinite(float(ot))):
+                                raise HTTPException(
+                                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                                    detail=f"Orientation result {idx} has a non-finite "
+                                           f"theta_oriented: {ot!r}")
 
                 # Step 3: Run classification and extraction for each filtered bbox
                 pipeline_results = []
@@ -300,14 +327,33 @@ async def run_pipeline(
 
                     if wbia_orientation_results is not None:
                         ori = wbia_orientation_results[i]
-                        theta = float(ori['theta'])
                         theta_source = 'orientation'
-                        # effective_bbox is the slice orientation ACTUALLY used (NumPy
-                        # slicing does not clamp, and a degenerate crop falls back to
-                        # the full frame). classify, extract and the emitted result
-                        # must all use it, or theta describes a region other than the
-                        # crop it rotates.
-                        bbox_list = list(ori['effective_bbox'])
+                        # The regressor's OBJECT-ALIGNED box and its long-axis
+                        # angle. These two describe the SAME rectangle, which is
+                        # the whole point: the reference `theta` rotates the
+                        # animal upright and belongs to the object-aligned box,
+                        # not to the detector's axis-aligned crop region. Pairing
+                        # it with effective_bbox (what this did before) persisted
+                        # a rectangle a quarter turn off the animal AND handed
+                        # get_chip_from_img a window that clipped the animal once
+                        # it was rotated. classify, extract and the emitted result
+                        # all use this one box, so theta never describes a region
+                        # other than the crop it rotates.
+                        oa_bbox = ori.get('oriented_bbox')
+                        oa_theta = ori.get('theta_oriented')
+                        if oa_bbox is not None and oa_theta is not None:
+                            bbox_list = [int(round(float(v))) for v in oa_bbox]
+                            theta = float(oa_theta)
+                        else:
+                            # Centre and side point coincided: the prediction
+                            # carries no axis. Keep the crop region and state no
+                            # rotation rather than invent an angle -- a fabricated
+                            # theta is indistinguishable from a real one downstream.
+                            logger.warning(
+                                "Orientation result %d has no object axis; falling "
+                                "back to the axis-aligned crop with theta=0.0", i)
+                            bbox_list = list(ori['effective_bbox'])
+                            theta = 0.0
                         bbox_coords = bbox_list
                     elif bbox_list[2] <= 0 or bbox_list[3] <= 0:
                         # Guard AFTER integerization: a raw width of 0.5 passes

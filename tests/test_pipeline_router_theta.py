@@ -13,6 +13,8 @@ bug in a new place:
 """
 from unittest.mock import MagicMock
 
+import math
+
 import numpy as np
 import pytest
 from fastapi import FastAPI
@@ -63,14 +65,27 @@ def _models(n_bboxes=1):
     return pm, cm, em
 
 
-def _orientation(thetas, effective_bboxes=None):
+def _orientation(thetas, effective_bboxes=None, oriented_bboxes=None):
+    """`thetas` are LONG-AXIS angles -- what the pipeline now emits.
+
+    The real model returns both halves: `theta` stays reference-faithful (the
+    upright-rotation angle, long axis + 90deg) and `theta_oriented`/
+    `oriented_bbox` carry the object-aligned box. Pass `oriented_bboxes=[None,
+    ...]` to simulate a degenerate prediction with no object axis.
+    """
     from app.models.wbia_orientation import WbiaOrientationModel
     om = MagicMock(spec=WbiaOrientationModel)
     effs = effective_bboxes or [[10, 10, 50, 50]] * len(thetas)
+    obs = oriented_bboxes if oriented_bboxes is not None \
+        else [[12.0, 14.0, 40.0, 20.0]] * len(thetas)
     om.predict_batch.return_value = [
-        {"model_id": "o", "theta": t, "coords_normalized": [0.5] * 5,
+        {"model_id": "o",
+         "theta": t + math.radians(90),
+         "theta_oriented": None if ob is None else t,
+         "oriented_bbox": ob,
+         "coords_normalized": [0.5] * 5,
          "effective_bbox": e}
-        for t, e in zip(thetas, effs)
+        for t, e, ob in zip(thetas, effs, obs)
     ]
     return om
 
@@ -141,25 +156,32 @@ def test_orientation_is_batched_once_for_all_bboxes():
 
 # ----------------------------------------------------------- effective_bbox
 
-def test_effective_bbox_is_emitted_as_the_persisted_bbox():
+def test_the_emitted_bbox_is_the_one_theta_describes():
     """Wildbook persists the result's bbox alongside theta
-    (MlServiceProcessor.featureParams). Emitting the detector's original while
-    theta describes effective_bbox would STORE a theta/region mismatch."""
+    (MlServiceProcessor.featureParams), so the two must name the SAME rectangle.
+    That rectangle is the regressor's object-aligned box -- neither the
+    detector's proposal nor the axis-aligned crop region orientation ran on."""
     pm, cm, em = _models()
-    om = _orientation([0.5], [[0, 0, 640, 480]])     # e.g. degenerate -> full frame
+    om = _orientation([0.5], effective_bboxes=[[0, 0, 640, 480]],
+                      oriented_bboxes=[[80.0, 60.0, 480.0, 120.0]])
     r = _client(pm, cm, em, om).post("/pipeline/", json=_payload(orientation_model_id="o"))
     assert r.status_code == 200, r.text
-    assert r.json()["results"][0]["bbox"] == [0, 0, 640, 480]   # not [10,10,50,50]
+    bbox = r.json()["results"][0]["bbox"]
+    assert bbox == [80, 60, 480, 120]
+    assert bbox != [10, 10, 50, 50]      # not the detector's
+    assert bbox != [0, 0, 640, 480]      # not the crop region
 
 
-def test_effective_bbox_is_what_classify_and_extract_receive():
-    """All three consumers must see the identical region."""
+def test_all_consumers_receive_the_identical_region():
+    """One authoritative box: whatever is persisted is what was cropped."""
     pm, cm, em = _models()
-    om = _orientation([0.5], [[0, 0, 640, 480]])
+    om = _orientation([0.5], effective_bboxes=[[0, 0, 640, 480]],
+                      oriented_bboxes=[[80.0, 60.0, 480.0, 120.0]])
     r = _client(pm, cm, em, om).post("/pipeline/", json=_payload(orientation_model_id="o"))
     assert r.status_code == 200, r.text
-    assert cm.predict.call_args.kwargs["bbox"] == [0, 0, 640, 480]
-    assert list(em.extract_embeddings.call_args.kwargs["bbox"]) == [0, 0, 640, 480]
+    emitted = r.json()["results"][0]["bbox"]
+    assert list(cm.predict.call_args.kwargs["bbox"]) == emitted
+    assert list(em.extract_embeddings.call_args.kwargs["bbox"]) == emitted
 
 
 def test_orientation_theta_is_passed_to_classify_and_extract():
@@ -278,14 +300,15 @@ def test_malformed_orientation_rows_fail_the_request(bad_row):
 
 
 def test_detector_bbox_is_retained_as_an_audit_field():
-    """effective_bbox becomes the persisted bbox, so what the detector actually
-    said must stay recoverable."""
+    """The object-aligned box replaces the detector's, so what the detector
+    actually said must stay recoverable."""
     pm, cm, em = _models()
-    om = _orientation([0.5], [[0, 0, 640, 480]])
+    om = _orientation([0.5], effective_bboxes=[[0, 0, 640, 480]],
+                      oriented_bboxes=[[80.0, 60.0, 480.0, 120.0]])
     r = _client(pm, cm, em, om).post("/pipeline/", json=_payload(orientation_model_id="o"))
     assert r.status_code == 200, r.text
     res = r.json()["results"][0]
-    assert res["bbox"] == [0, 0, 640, 480]          # what theta describes
+    assert res["bbox"] == [80, 60, 480, 120]         # what theta describes
     assert res["detector_bbox"] == [10, 10, 50, 50]  # what the detector proposed
 
 
@@ -307,3 +330,58 @@ def test_fractional_degenerate_bbox_is_skipped_on_the_non_regressor_path():
     assert r.status_code == 200, r.text
     assert r.json()["results"] == []
     cm.predict.assert_not_called()
+
+
+# ------------------------------------------------- object-aligned box (#beluga)
+
+def test_emitted_bbox_and_theta_are_the_object_aligned_box():
+    """The persisted pair must be the OBJECT-ALIGNED box and its long-axis
+    angle. Emitting the reference theta beside the axis-aligned crop region
+    stored a rectangle a quarter turn off the animal (beluga, Flukebook 10.14)."""
+    pm, cm, em = _models()
+    om = _orientation([0.2407], effective_bboxes=[[10, 10, 50, 50]],
+                      oriented_bboxes=[[12.0, 18.0, 44.0, 12.0]])
+    r = _client(pm, cm, em, om).post("/pipeline/", json=_payload(orientation_model_id="o"))
+
+    assert r.status_code == 200, r.text
+    res = r.json()["results"][0]
+    assert res["theta"] == pytest.approx(0.2407)          # long axis, NOT +90
+    assert res["bbox"] == [12, 18, 44, 12]                # oriented, not [10,10,50,50]
+    assert res["theta_source"] == "orientation"
+
+
+def test_classify_and_extract_crop_the_object_aligned_box():
+    """One box for all consumers: whatever is persisted is what was embedded."""
+    pm, cm, em = _models()
+    om = _orientation([0.2407], effective_bboxes=[[10, 10, 50, 50]],
+                      oriented_bboxes=[[12.0, 18.0, 44.0, 12.0]])
+    _client(pm, cm, em, om).post("/pipeline/", json=_payload(orientation_model_id="o"))
+
+    assert cm.predict.call_args.kwargs["bbox"] == [12, 18, 44, 12]
+    assert list(em.extract_embeddings.call_args.kwargs["bbox"]) == [12, 18, 44, 12]
+
+
+def test_no_object_axis_falls_back_to_no_rotation():
+    """A degenerate prediction carries no angle, so we say so rather than
+    invent one -- a fabricated theta is indistinguishable from a real one."""
+    pm, cm, em = _models()
+    om = _orientation([0.2407], effective_bboxes=[[10, 10, 50, 50]],
+                      oriented_bboxes=[None])
+    r = _client(pm, cm, em, om).post("/pipeline/", json=_payload(orientation_model_id="o"))
+
+    assert r.status_code == 200, r.text
+    res = r.json()["results"][0]
+    assert res["theta"] == 0.0
+    assert res["bbox"] == [10, 10, 50, 50]
+
+
+def test_half_an_oriented_box_is_rejected():
+    """Fail closed: a bbox without its angle (or vice versa) is a malformed
+    contract, not something to paper over."""
+    pm, cm, em = _models()
+    om = _orientation([0.2407])
+    om.predict_batch.return_value[0]["theta_oriented"] = None
+    r = _client(pm, cm, em, om).post("/pipeline/", json=_payload(orientation_model_id="o"))
+
+    assert r.status_code == 500
+    assert "half" in r.json()["detail"].lower()

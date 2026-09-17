@@ -8,6 +8,8 @@ field rejects a valid caller with a 422 before any work is done.
 """
 from unittest.mock import MagicMock
 import numpy as np
+import math
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -197,6 +199,8 @@ def test_pipeline_without_classifier_still_uses_the_theta_regressor():
     om.predict_batch.return_value = [{
         "model_id": "o", "theta": 1.25, "coords_normalized": [0.5] * 5,
         "effective_bbox": [12, 22, 96, 116],
+        # the object-aligned box is what gets persisted and cropped
+        "theta_oriented": 1.25 - math.pi / 2, "oriented_bbox": [14.0, 26.0, 88.0, 30.0],
     }]
     em = _extractor()
     client = _make_client(_detector(), em, orientation_model=om)
@@ -210,11 +214,11 @@ def test_pipeline_without_classifier_still_uses_the_theta_regressor():
 
     assert resp.status_code == 200, resp.text
     r = resp.json()["results"][0]
-    assert r["theta"] == 1.25
+    assert r["theta"] == pytest.approx(1.25 - math.pi / 2)
     assert r["theta_source"] == "orientation"
-    assert r["bbox"] == [12, 22, 96, 116]
+    assert r["bbox"] == [14, 26, 88, 30]
     assert r["classification"] is None
     # the crop MiewID embedded is the one orientation actually rotated
     _, kwargs = em.extract_embeddings.call_args
-    assert kwargs["bbox"] == (12, 22, 96, 116)
-    assert kwargs["theta"] == 1.25
+    assert list(kwargs["bbox"]) == [14, 26, 88, 30]
+    assert kwargs["theta"] == pytest.approx(1.25 - math.pi / 2)
