@@ -249,10 +249,16 @@ async def health_check():
 async def readiness_check():
     """Readiness probe: 200 only once every configured model is loaded.
 
-    Distinct from /health, which is the liveness check and reports "degraded"
-    rather than failing while models are still loading. Load balancers need a
-    probe that withholds traffic during the eager model load (tens of seconds
-    for the full registry), so this one returns 503 until startup completes.
+    The probe a load balancer should gate traffic on, in preference to /health
+    for two reasons. /health shells out to nvidia-smi on every call, which is
+    not something to run at the edge's probe interval across every worker; and
+    it answers 200 with status "degraded" when no models are loaded, so it
+    cannot fail closed on a container that came up without its registry.
+
+    Uvicorn does not accept connections until startup_event returns, so during
+    a normal eager load neither probe answers at all -- the pre-ready window
+    looks like a refused connection. This endpoint covers what happens after
+    that: it fails closed rather than admitting traffic to a model-less worker.
     """
     from fastapi import HTTPException
 

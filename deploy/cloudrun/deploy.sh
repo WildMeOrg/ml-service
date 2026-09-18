@@ -31,4 +31,11 @@ gcloud run deploy ml-service \
   --port 6050 \
   --set-env-vars "MODEL_BASE=https://storage.googleapis.com/${BUCKET}/models,WORKERS=1,DEVICE=cuda"
 
+# Two things this imperative path cannot express, both in service.yaml:
+#   - the /readyz startup probe (gcloud run deploy has no flag for it, so you
+#     get Cloud Run's default TCP check and traffic can reach a worker whose
+#     registry failed to load)
+#   - gpu-zonal-redundancy-disabled, needed in projects without L4 zonal quota
+# Apply service.yaml instead if either matters.
+#
 # For true scale-to-zero (cheapest, cold start on first hit): --min-instances 0

@@ -24,19 +24,27 @@ through environment variables (`app/main.py`):
 | `WORKERS` | `1` | **Keep at 1 per GPU.** Scale with replicas, not workers. |
 | `MODEL_BASE` | `/datasets` | Prefix for model weights in `app/model_config.json`. A filesystem path **or** an `https://` object-store prefix. |
 
-`MODEL_BASE` is expanded into the model config at startup
-(`app/utils/config_loader.py`). Because every model loader now resolves its
-path through `checkpoint_utils.get_checkpoint_path`, weights can live in:
+`MODEL_BASE` replaces the `${MODEL_BASE}` prefix in the model config's weight
+paths at startup (`app/utils/config_loader.py`). Weights can then live in:
 
 - a **mounted volume** — `/datasets` (VM bind mount) or `/runpod-volume/models`
   (RunPod network volume), or
 - an **object store** — `MODEL_BASE=https://storage.googleapis.com/your-bucket/models`,
   fetched and cached at boot.
 
+URL weights are fetched and cached by `checkpoint_utils.get_checkpoint_path`.
 The URL form is the most portable: identical config everywhere, no volume
-wiring, and workers need no cloud credentials when the bucket is public. The
-default (`/datasets`) is what the committed config and the production compose
-file already use, so expansion is a no-op for existing deployments.
+wiring, and workers need no cloud credentials when the bucket is public.
+
+**`MODEL_BASE` only moves paths that are written as `${MODEL_BASE}/...`.** The
+committed `app/model_config.json` is, and it defaults to `/datasets` — exactly
+what it resolved to before — so nothing changes for existing deployments. But
+production installs bind-mount their own registry over that file (see the
+`_note` at the top of it), and **a mounted registry with literal `/datasets/...`
+paths ignores `MODEL_BASE` entirely.** Deploying to a provider therefore means
+supplying a registry whose paths carry the prefix, not just setting the env var.
+Neither provider config in this directory ships one; that is a per-install
+decision about which models to load.
 
 ## Two load-balancing knobs
 
@@ -59,8 +67,10 @@ file already use, so expansion is a no-op for existing deployments.
    request after idle pays the full cold start.
 
 > **Do not raise `WORKERS`.** Multiple uvicorn workers on one GPU each load a
-> full copy of every model into the same VRAM (OOM risk) while the GPU still
-> executes serially, so there is no throughput gain. One worker per GPU;
+> full copy of every model into the same VRAM, which is an OOM risk that grows
+> with the size of the registry. The concurrency sweep above measured requests
+> against a single worker and does not by itself establish what extra workers
+> would do, so treat the VRAM duplication as the reason. One worker per GPU;
 > scale via replicas.
 
 ## Cold start and health checks
@@ -73,19 +83,23 @@ registry. A first pull of the image on a datacenter that has never seen it can
 take far longer (17.5 GB took over 2 hours once); layers cache per-datacenter
 afterwards.
 
-Three probes, and the difference matters:
+Uvicorn does not accept connections until startup has finished loading models,
+so during that window a probe of any path gets a refused connection rather than
+a response. What the three endpoints separate is the state *after* the port
+opens:
 
-- **`/health`** — liveness. Reports `degraded` rather than failing while models
-  are still loading, and runs GPU/torch checks. This is what Grafana and the
-  autoheal container watch. **Do not** route load-balancer traffic on it: it
-  returns 200 before the service can serve a request.
-- **`/readyz`** — readiness. 503 until every configured model is loaded, 200
-  after. This is the probe a load balancer should gate traffic on.
+- **`/health`** — liveness. Runs GPU/torch checks and shells out to
+  `nvidia-smi`; this is what Grafana and the autoheal container watch. **Do not
+  point a load balancer at it.** It runs a subprocess on every call, which is
+  wasteful at an edge probe interval across every worker, and it answers 200
+  with `status: degraded` when no models are loaded rather than failing closed.
+- **`/readyz`** — readiness. 503 unless every configured model is loaded, 200
+  otherwise, and cheap. This is the probe to gate traffic on.
 - **`/ping`** — an alias for `/readyz`, present for one reason: **RunPod's
   load-balancer edge health-probes `GET /ping` unconditionally and ignores the
-  documented `HEALTH_CHECK_PATH` setting.** Without it every worker reports
-  healthy while every request fails with `400 "timed out waiting for worker"`.
-  Never remove it.
+  documented `HEALTH_CHECK_PATH` setting.** Without it the edge gets a 404,
+  every worker reports healthy, and every request fails with
+  `400 "timed out waiting for worker"`. Never remove it.
 
 ## Per-provider files
 
@@ -94,9 +108,11 @@ Three probes, and the difference matters:
   before creating an endpoint; the GPU-pool exclusion in particular cannot be
   set at creation time.
 - **Cloud Run** — `cloudrun/service.yaml` (declarative) or `cloudrun/deploy.sh`
-  (imperative). NVIDIA L4, `min-instances=1`, `concurrency=1`, `timeout=300`,
-  startup probe on `/readyz`. Written and deployed during phase-0, but the
-  throughput numbers above were measured on RunPod, not here.
+  (imperative). NVIDIA L4, `min-instances=1`, `concurrency=1`, `timeout=300`.
+  Only `service.yaml` configures the `/readyz` startup probe — `gcloud run
+  deploy` has no flag for it, so the imperative path gets Cloud Run's default
+  TCP check. Apply `service.yaml` if you want the probe. Written and deployed
+  during phase-0, but the throughput numbers above were measured on RunPod.
 
 Both consume the same image. Moving providers rebuilds nothing: apply the other
 config file and point `MODEL_BASE` at that environment's model store.

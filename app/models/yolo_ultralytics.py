@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from PIL import Image
 from ultralytics import YOLO
 from .base_model import BaseModel
-from ..utils.checkpoint_utils import get_checkpoint_path
+from ..utils.checkpoint_utils import get_checkpoint_path, is_url
 import logging
 
 logger = logging.getLogger(__name__)
@@ -25,14 +25,18 @@ class YOLOUltralyticsModel(BaseModel):
                 - imgsz: Default image size for inference
                 - conf: Default confidence threshold
         """
-        # Resolve through the shared checkpoint resolver, as every other model
-        # type does. This was the last loader handing its path straight to the
-        # framework, so the detector weight was the one weight that could not
-        # live in an object store (and a missing local file surfaced as an
-        # opaque framework error rather than FileNotFoundError).
-        local_model_path = get_checkpoint_path(model_path)
-        logger.info(f"Loading YOLO model from {local_model_path} on device {device}")
-        self.model = YOLO(local_model_path)
+        # Fetch URL weights through the shared resolver, which caches them, so
+        # MODEL_BASE can point at an object store. This was the last loader
+        # handing its path straight to the framework, which made the detector
+        # the one weight that could not live outside the filesystem.
+        #
+        # Anything that is not a URL is passed through untouched. Ultralytics
+        # accepts bare hub names such as "yolov8n.pt" and downloads them
+        # itself; running those through the resolver would turn a working
+        # config into a FileNotFoundError.
+        resolved_path = get_checkpoint_path(model_path) if is_url(model_path) else model_path
+        logger.info(f"Loading YOLO model from {resolved_path} on device {device}")
+        self.model = YOLO(resolved_path)
         self.model.to(device)
         
         # Store model info
