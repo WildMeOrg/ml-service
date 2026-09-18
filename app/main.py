@@ -1,4 +1,3 @@
-import json
 import os
 import sys
 import logging
@@ -9,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'ven
 from fastapi import FastAPI
 from app.routers import predict_router, explain_router, extract_router, classify_router, pipeline_router, assign_router, wbia_compat_router
 from app.models.model_handler import ModelHandler
+from app.utils.config_loader import load_model_config
 
 # Configure logging
 logging.basicConfig(
@@ -114,10 +114,12 @@ async def startup_event():
     app.state.device = args.device
 
     try:
-        # Load model configuration
+        # Load model configuration. ${MODEL_BASE} in the config is expanded from
+        # the environment so the same file points at any model store: /datasets
+        # (the default, and what the committed config uses), a provider volume,
+        # or an https:// object-store prefix fetched and cached at load time.
         config_path = os.path.join(os.path.dirname(__file__), 'model_config.json')
-        with open(config_path, 'r') as f:
-            config = json.load(f)
+        config = load_model_config(config_path)
 
         logger.info(f"Loading models on device: {args.device}")
 
@@ -241,6 +243,30 @@ async def health_check():
         health_status["status"] = "degraded"
 
     return health_status
+
+
+@app.get("/readyz")
+async def readiness_check():
+    """Readiness probe: 200 only once every configured model is loaded.
+
+    Distinct from /health, which is the liveness check and reports "degraded"
+    rather than failing while models are still loading. Load balancers need a
+    probe that withholds traffic during the eager model load (tens of seconds
+    for the full registry), so this one returns 503 until startup completes.
+    """
+    from fastapi import HTTPException
+
+    handler = getattr(app.state, 'model_handler', None)
+    if handler is None or not handler.models:
+        raise HTTPException(status_code=503, detail={"ready": False, "models_loaded": 0})
+    return {"ready": True, "models_loaded": len(handler.models)}
+
+
+# RunPod's load-balancer edge health-probes GET /ping unconditionally and
+# ignores the documented HEALTH_CHECK_PATH setting. Without this alias every
+# worker reports healthy while every request fails with
+# 400 "timed out waiting for worker". Do not remove it.
+app.get("/ping")(readiness_check)
 
 app.include_router(predict_router.router)
 app.include_router(explain_router.router)

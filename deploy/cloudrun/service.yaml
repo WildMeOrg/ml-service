@@ -1,0 +1,62 @@
+# Cloud Run service for ml-service (NVIDIA L4).
+#
+# Deploy:  gcloud run services replace deploy/cloudrun/service.yaml --region=us-central1
+# Or use:  deploy/cloudrun/deploy.sh (imperative equivalent)
+#
+# Portability note: this runs the SAME image as RunPod and the VM. This file is
+# the only Cloud-Run-specific surface. The container reads PORT from the
+# environment (Cloud Run injects it) and pulls weights from ${MODEL_BASE}.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: ml-service
+  labels:
+    cloud.googleapis.com/location: us-central1
+spec:
+  template:
+    metadata:
+      annotations:
+        # Warm baseline + autoscale.
+        autoscaling.knative.dev/minScale: "1"      # keep 1 GPU warm; "0" for true scale-to-zero
+        autoscaling.knative.dev/maxScale: "5"      # burst ceiling across GPUs
+        run.googleapis.com/cpu-throttling: "false" # don't throttle between requests (models stay resident)
+        run.googleapis.com/startup-cpu-boost: "true"
+        run.googleapis.com/execution-environment: gen2  # required for GPU
+        # Set only if the project lacks zonal-redundant L4 quota (phase-0 did).
+        run.googleapis.com/gpu-zonal-redundancy-disabled: "true"
+    spec:
+      # One in-flight request per instance; Cloud Run routes the next to
+      # another GPU instance. See deploy/README.md for the measurement and its
+      # scope caveat.
+      containerConcurrency: 1
+      timeoutSeconds: 300          # /pipeline runs long (detect -> classify -> extract)
+      containers:
+        - image: REGION-docker.pkg.dev/PROJECT_ID/ml-service/ml-service:latest
+          ports:
+            # Cloud Run injects PORT to match this. PORT is a reserved env name
+            # there -- do not also set it in env below.
+            - containerPort: 6050
+          env:
+            - name: DEVICE
+              value: "cuda"
+            - name: WORKERS
+              value: "1"           # one worker per GPU; scale via instances
+            - name: MODEL_BASE
+              # Object-store prefix; weights are fetched and cached at startup.
+              value: "https://storage.googleapis.com/your-bucket/models"
+          resources:
+            limits:
+              cpu: "8"             # L4 requires >=4 CPU
+              memory: 32Gi         # >=16Gi required; sized for the 5-model default registry
+              nvidia.com/gpu: "1"
+          startupProbe:
+            # /readyz, not /health: /health returns 200 (degraded) while models
+            # are still loading, which would admit traffic too early.
+            httpGet:
+              path: /readyz
+              port: 6050
+            initialDelaySeconds: 60
+            periodSeconds: 5
+            failureThreshold: 30
+      nodeSelector:
+        run.googleapis.com/accelerator: nvidia-l4

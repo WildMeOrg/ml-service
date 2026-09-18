@@ -1,0 +1,31 @@
+{
+  "_comment": "RunPod LOAD_BALANCER endpoint config. These are the values the phase-0 validation endpoint was created and configured with (RTX A5000 / AMPERE_24, 2026-08), recorded here rather than invented -- the endpoint itself lives only in the RunPod console/API. Three things to know before creating one: (1) RunPod's LB edge health-probes GET /ping unconditionally, IGNORING the documented HEALTH_CHECK_PATH env -- ml-service serves /ping as a readiness alias for exactly this reason (app/main.py); remove it and every worker reports healthy while every request fails with 400 'timed out waiting for worker'. (2) Every data-plane request, including your own health checks, needs `Authorization: Bearer <RunPod API key>` -- the edge enforces this before routing. Never put the key in this file; read it from your own secret store, and never pass it in argv where ps can see it. (3) A private GHCR image needs a CLASSIC PAT with read:packages -- a fine-grained PAT passes token exchange and then 403s on the manifest, which RunPod surfaces as the misleading IMAGE_NOT_FOUND: manifest unknown.",
+
+  "name": "ml-service",
+  "endpointType": "LOAD_BALANCER",
+
+  "image": "ghcr.io/wildmeorg/ml-service@sha256:REPLACE_WITH_DIGEST",
+  "_image_comment": "Pin by digest, not by tag. Rolling a release = update-endpoint with the new digest.",
+  "containerDiskInGb": 50,
+  "ports": ["6050/http"],
+
+  "workersMin": 1,
+  "workersMax": 5,
+  "_workers_comment": "workersMin=1 keeps a GPU warm. Cold start with cached layers was 31.5s for a slim 2-model profile, so min=0 is not viable for interactive SLOs; the full 5-model registry is slower still. Idle and INITIALIZING workers do not bill. The reported worker count can briefly exceed workersMax -- cosmetic.",
+  "scalerType": "REQUEST_COUNT",
+
+  "gpuPoolIds": ["AMPERE_24"],
+  "_gpu_exclusion_comment": "create-endpoint's gpuPoolIds has NO exclusion field, so this exclusion is not applied at creation. Apply it afterward via set-endpoint-gpus (pools=['AMPERE_24'], excludeGpuTypeIds=[the id below]). Without it AMPERE_24 can schedule a Blackwell MIG slice; torch cu121 ships no sm_120 kernels, so the worker completes its image pull and then crashes at model load. L4 / RTX A5000 / RTX 3090 are safe.",
+  "excludeGpuTypeIds": ["NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 1g.24gb"],
+
+  "env": {
+    "PORT": "6050",
+    "PORT_HEALTH": "6050",
+    "MODEL_BASE": "https://storage.googleapis.com/your-bucket/models",
+    "_MODEL_BASE_comment": "A public https:// prefix means workers need zero cloud credentials; weights are fetched and cached at boot. A RunPod network volume mounted at /runpod-volume works too -- set /runpod-volume/models instead.",
+    "WORKERS": "1",
+    "DEVICE": "cuda"
+  },
+
+  "_invoke_comment": "Read invoke URLs from the create-endpoint reply's requestUrls field; do not construct them by hand."
+}
