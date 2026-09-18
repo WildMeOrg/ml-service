@@ -1,10 +1,19 @@
 # Deploying ml-service on on-demand GPU (provider-independent)
 
 The service is stateless and GPU-bound, which makes it a clean fit for
-serverless / on-demand GPU platforms: you pay per-second only while a GPU is
-processing, the platform autoscales across GPUs during bursts and back down to
-a warm baseline (or zero) when idle, and **the platform is the load balancer** —
+serverless / on-demand GPU platforms: they autoscale across GPUs during bursts
+and back down to a warm baseline (or zero) when idle, billing by the second
+rather than by the reserved VM, and **the platform is the load balancer** —
 there is no nginx/HAProxy to run yourself.
+
+Billing is per-provider and is not "only while processing": both configs here
+keep one worker warm, and a warm worker bills. On Cloud Run a GPU instance is
+charged while it is up, including the `min-instances=1` baseline. On RunPod,
+check the current serverless pricing terms for how idle and initializing
+workers are treated rather than assuming they are free — phase-0 observed no
+charge for them, but that is an observation from one endpoint in 2026-08, not a
+guarantee. Scale-to-zero is the only configuration that bills nothing at rest,
+and it pays the full cold start on the next request.
 
 The point of this directory is to stay provider-independent: one OCI image,
 built from the repo's existing `docker/dockerfile` and serving plain HTTP, runs
@@ -92,13 +101,15 @@ a response. What the three endpoints separate is the state *after* the port
 opens:
 
 - **`/health`** — liveness. This is what Grafana and the autoheal container
-  watch. **Do not point a load balancer at it.** On a GPU deployment (`DEVICE`
-  exactly `cuda`) it shells out to `nvidia-smi` on every call, which is wasteful
-  at an edge probe interval across every worker; and a worker holding an empty
-  registry still gets `status: healthy` with `models_loaded: 0`, so it never
-  fails closed on the case that matters.
-- **`/readyz`** — readiness. 503 unless every configured model is loaded, 200
-  otherwise, and cheap. This is the probe to gate traffic on.
+  watch. **Do not point a load balancer at it.** When `DEVICE` is exactly
+  `cuda` (the check is a string comparison, so `cuda:0` and `mps` skip it) it
+  shells out to `nvidia-smi` on every call, which is wasteful at an edge probe
+  interval across every worker; and a worker holding an empty registry still
+  gets `status: healthy` with `models_loaded: 0`, so it never fails closed on
+  the case that matters.
+- **`/readyz`** — readiness. 200 once a handler has been published holding at
+  least one model, 503 otherwise — including a registry that configured no
+  models at all. Cheap: no subprocess. This is the probe to gate traffic on.
 - **`/ping`** — an alias for `/readyz`, present for one reason: **RunPod's
   load-balancer edge health-probes `GET /ping` unconditionally and ignores the
   documented `HEALTH_CHECK_PATH` setting.** Without it the edge gets a 404,

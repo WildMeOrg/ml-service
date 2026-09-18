@@ -19,6 +19,8 @@ import pytest
 
 
 MODULE = "app.models.yolo_ultralytics"
+PACKAGE = "app.models"
+_SENTINEL = object()
 
 
 @pytest.fixture
@@ -33,32 +35,43 @@ def yolo_module(monkeypatch):
             captured["device"] = device
             return self
 
+    # Snapshot BEFORE stubbing. app/models/__init__.py does
+    # `from .yolo_ultralytics import YOLOUltralyticsModel`, so if the package
+    # itself is cold, importing it below would build it against the stub and
+    # leave a fake-backed class bound as app.models.YOLOUltralyticsModel for
+    # every later test. monkeypatch.delitem also records nothing to restore
+    # when a key was absent, so both entries are handled by hand.
+    saved = {name: sys.modules.get(name, _SENTINEL) for name in (PACKAGE, MODULE)}
+
     ultralytics = types.ModuleType("ultralytics")
     ultralytics.YOLO = FakeYOLO
     monkeypatch.setitem(sys.modules, "ultralytics", ultralytics)
 
-    # monkeypatch.delitem records nothing to restore when the key was absent,
-    # so a fake-backed module would stay cached in sys.modules (and bound on the
-    # parent package) for every later test. Restore both explicitly.
-    import app.models as package
-    sentinel = object()
-    previous_module = sys.modules.get(MODULE, sentinel)
-    previous_attr = getattr(package, "yolo_ultralytics", sentinel)
     sys.modules.pop(MODULE, None)
 
     try:
         import app.models.yolo_ultralytics as module
         yield module, captured
     finally:
-        if previous_module is sentinel:
-            sys.modules.pop(MODULE, None)
-        else:
-            sys.modules[MODULE] = previous_module
-        if previous_attr is sentinel:
-            if hasattr(package, "yolo_ultralytics"):
-                delattr(package, "yolo_ultralytics")
-        else:
-            setattr(package, "yolo_ultralytics", previous_attr)
+        for name, previous in saved.items():
+            if previous is _SENTINEL:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
+        # Rebind the parent's attribute to whatever module is authoritative now,
+        # so app.models.yolo_ultralytics and app.models.YOLOUltralyticsModel do
+        # not keep pointing at this test's stub-backed import.
+        package = sys.modules.get(PACKAGE)
+        restored = sys.modules.get(MODULE)
+        if package is not None:
+            if restored is None:
+                if hasattr(package, "yolo_ultralytics"):
+                    delattr(package, "yolo_ultralytics")
+            else:
+                setattr(package, "yolo_ultralytics", restored)
+                if hasattr(restored, "YOLOUltralyticsModel"):
+                    setattr(package, "YOLOUltralyticsModel",
+                            restored.YOLOUltralyticsModel)
 
 
 def test_url_weight_is_resolved_before_load(yolo_module, monkeypatch):
@@ -136,3 +149,25 @@ def test_model_info_records_the_configured_path(yolo_module, monkeypatch):
     model.load("https://example.invalid/models/d.pt", "cpu")
 
     assert model.model_info["model_path"] == "https://example.invalid/models/d.pt"
+
+
+def test_fixture_leaves_the_package_unstubbed(yolo_module):
+    """Guard the fixture itself: a later test must not inherit FakeYOLO.
+
+    app/models/__init__.py re-exports YOLOUltralyticsModel, so a fixture that
+    snapshotted after stubbing would leave that export bound to a fake-backed
+    module for the rest of the session.
+    """
+    module, _ = yolo_module
+    assert module.YOLO.__name__ == "FakeYOLO", "the stub is active inside the test"
+
+
+def test_package_export_is_not_fake_backed_afterwards():
+    """Runs after the fixture torn down above; ordering is intentional."""
+    package = sys.modules.get(PACKAGE)
+    if package is None or not hasattr(package, "YOLOUltralyticsModel"):
+        pytest.skip("app.models not imported in this session")
+
+    yolo = getattr(sys.modules[MODULE], "YOLO", None)
+    assert yolo is None or yolo.__name__ != "FakeYOLO", \
+        "the ultralytics stub leaked out of the fixture into the cached module"

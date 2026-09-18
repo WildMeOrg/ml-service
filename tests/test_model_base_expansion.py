@@ -226,3 +226,64 @@ def test_committed_default_config_resolves_to_the_legacy_paths(monkeypatch):
         assert path.startswith("/datasets/"), \
             f"default resolution changed for {path!r}; existing installs would break"
         assert "${" not in path
+
+
+# The recursion substitutes under a weight-location key at any depth. That is
+# deliberate: every such key in this system holds a weight location, and a new
+# nested model type is then covered without editing config_loader. The two
+# tests below pin the boundary of that choice.
+
+def test_substitution_requires_the_token(config_file, monkeypatch):
+    """Nothing is rewritten unless the author wrote ${MODEL_BASE} themselves."""
+    monkeypatch.setenv("MODEL_BASE", "/vol/models")
+    path = config_file([{
+        "model_id": "m",
+        "model_path": "/datasets/detect.pt",
+        "checkpoint_paths": ["/datasets/a.pt", "/datasets/b.pt"],
+    }])
+
+    model = load_model_config(path)["models"][0]
+
+    assert model["model_path"] == "/datasets/detect.pt"
+    assert model["checkpoint_paths"] == ["/datasets/a.pt", "/datasets/b.pt"], \
+        "a config that never mentions the token is returned verbatim"
+
+
+def test_a_weight_key_in_an_unrecognised_subtree_is_still_substituted(
+        config_file, monkeypatch):
+    """Documents the trade-off rather than hiding it.
+
+    Recursing by key name means a 'model_path' nested under some future or
+    unrecognised object is substituted too. That is the accepted cost of not
+    enumerating every nesting shape: it only ever fires on a value that already
+    contains ${MODEL_BASE}, and label_map cannot collide because its keys are
+    coerced with int().
+    """
+    monkeypatch.setenv("MODEL_BASE", "/vol/models")
+    path = config_file([{
+        "model_id": "m",
+        "metadata": {"model_path": "${MODEL_BASE}/example"},
+        "model_path": "${MODEL_BASE}/detect.pt",
+    }])
+
+    model = load_model_config(path)["models"][0]
+
+    assert model["model_path"] == "/vol/models/detect.pt"
+    assert model["metadata"]["model_path"] == "/vol/models/example"
+
+
+def test_dict_under_a_weight_key_is_left_alone(config_file, monkeypatch):
+    """Only strings and lists of strings are substitutable values."""
+    monkeypatch.setenv("MODEL_BASE", "/vol/models")
+    path = config_file([{
+        "model_id": "m",
+        "checkpoint_path": {"unexpected": "${MODEL_BASE}/x.pt"},
+        "conf": 0.5,
+        "version": None,
+    }])
+
+    model = load_model_config(path)["models"][0]
+
+    assert model["checkpoint_path"] == {"unexpected": "${MODEL_BASE}/x.pt"}
+    assert model["conf"] == 0.5
+    assert model["version"] is None

@@ -11,7 +11,7 @@
 
   "workersMin": 1,
   "workersMax": 5,
-  "_workers_comment": "workersMin=1 keeps a GPU warm. Cold start with cached layers was 31.5s for a slim 2-model profile, so min=0 is not viable for interactive SLOs; the full 5-model registry is slower still. Idle and INITIALIZING workers do not bill. The reported worker count can briefly exceed workersMax -- cosmetic.",
+  "_workers_comment": "workersMin=1 keeps a GPU warm. Cold start with cached layers was 31.5s for a slim 2-model profile, so min=0 is not viable for interactive SLOs; the full 5-model registry is slower still. Phase-0 observed no charge for idle or INITIALIZING workers on this endpoint in 2026-08; treat that as an observation, not a guarantee, and check RunPod's current serverless pricing terms before sizing on it. The reported worker count can briefly exceed workersMax -- cosmetic.",
   "scalerType": "REQUEST_COUNT",
 
   "gpuPoolIds": ["AMPERE_24"],

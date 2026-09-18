@@ -1,8 +1,9 @@
 """Tests for the /readyz readiness probe and its /ping alias.
 
-/health is the liveness check: it shells out to nvidia-smi and answers 200 with
-status "degraded" when no models are loaded, so it cannot gate routing. /readyz
-fails closed instead. /ping aliases it because RunPod's load-balancer edge
+/health is the liveness check. When DEVICE is exactly "cuda" it shells out to
+nvidia-smi on every call, and a handler holding an empty registry still gets
+status "healthy" with models_loaded 0 -- so it cannot gate routing. /readyz
+fails closed instead: 200 only for a published, non-empty handler. /ping aliases it because RunPod's load-balancer edge
 health-probes GET /ping unconditionally and ignores HEALTH_CHECK_PATH -- without
 the alias the edge gets a 404, every worker reports healthy, and every request
 fails with 400 "timed out waiting for worker".

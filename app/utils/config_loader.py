@@ -18,6 +18,15 @@ Traversal is recursive because weight locations are not all top-level strings:
 role objects. Recursing on the key name rather than enumerating those roles
 means a new nested model type is covered without touching this file.
 
+The trade-off that buys: a weight-location key in some subtree nobody thought
+of is substituted too. That is accepted rather than overlooked. Substitution
+only ever fires on a value that already contains the literal ``${MODEL_BASE}``,
+which an author writes precisely because they want it replaced; every key in
+``PATH_FIELDS`` names a weight location wherever it appears; and ``label_map``,
+the one free-form mapping in the schema, cannot collide because its keys are
+coerced with ``int()``. Enumerating nesting shapes instead would trade this for
+the worse failure of silently not substituting a new model type's weights.
+
 ``MODEL_BASE`` defaults to ``/datasets``, which is what the committed config
 already resolved to, so leaving it unset changes nothing.
 """
