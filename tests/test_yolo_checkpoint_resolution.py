@@ -42,6 +42,11 @@ def yolo_module(monkeypatch):
     # every later test. monkeypatch.delitem also records nothing to restore
     # when a key was absent, so both entries are handled by hand.
     saved = {name: sys.modules.get(name, _SENTINEL) for name in (PACKAGE, MODULE)}
+    # `import app.models` also binds a `models` attribute on the `app` package.
+    # Dropping the sys.modules entry alone leaves `from app import models`
+    # returning the discarded, stub-backed package object.
+    import app as app_pkg
+    saved_app_attr = getattr(app_pkg, "models", _SENTINEL)
 
     ultralytics = types.ModuleType("ultralytics")
     ultralytics.YOLO = FakeYOLO
@@ -58,6 +63,11 @@ def yolo_module(monkeypatch):
                 sys.modules.pop(name, None)
             else:
                 sys.modules[name] = previous
+        if saved_app_attr is _SENTINEL:
+            if hasattr(app_pkg, "models"):
+                delattr(app_pkg, "models")
+        else:
+            setattr(app_pkg, "models", saved_app_attr)
         # Rebind the parent's attribute to whatever module is authoritative now,
         # so app.models.yolo_ultralytics and app.models.YOLOUltralyticsModel do
         # not keep pointing at this test's stub-backed import.
@@ -162,12 +172,24 @@ def test_fixture_leaves_the_package_unstubbed(yolo_module):
     assert module.YOLO.__name__ == "FakeYOLO", "the stub is active inside the test"
 
 
-def test_package_export_is_not_fake_backed_afterwards():
-    """Runs after the fixture torn down above; ordering is intentional."""
-    package = sys.modules.get(PACKAGE)
-    if package is None or not hasattr(package, "YOLOUltralyticsModel"):
-        pytest.skip("app.models not imported in this session")
+def test_no_fake_backed_package_survives_teardown():
+    """Runs after the fixture torn down above; ordering is intentional.
 
-    yolo = getattr(sys.modules[MODULE], "YOLO", None)
-    assert yolo is None or yolo.__name__ != "FakeYOLO", \
-        "the ultralytics stub leaked out of the fixture into the cached module"
+    Checks the parent-attribute path as well as sys.modules: a cold import
+    inside the fixture binds `app.models`, and restoring only sys.modules would
+    leave `from app import models` handing back the stub-backed package.
+    """
+    import app as app_pkg
+
+    candidates = [sys.modules.get(MODULE), getattr(app_pkg, "models", None)]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        yolo = getattr(candidate, "YOLO", None)
+        assert yolo is None or yolo.__name__ != "FakeYOLO", \
+            f"the ultralytics stub leaked out of the fixture via {candidate!r}"
+        model_cls = getattr(candidate, "YOLOUltralyticsModel", None)
+        if model_cls is not None:
+            leaked = model_cls.load.__globals__.get("YOLO")
+            assert leaked is None or leaked.__name__ != "FakeYOLO", \
+                "a fake-backed YOLOUltralyticsModel survived teardown"
