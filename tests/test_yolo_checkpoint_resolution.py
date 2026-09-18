@@ -18,6 +18,9 @@ import types
 import pytest
 
 
+MODULE = "app.models.yolo_ultralytics"
+
+
 @pytest.fixture
 def yolo_module(monkeypatch):
     captured = {}
@@ -33,10 +36,29 @@ def yolo_module(monkeypatch):
     ultralytics = types.ModuleType("ultralytics")
     ultralytics.YOLO = FakeYOLO
     monkeypatch.setitem(sys.modules, "ultralytics", ultralytics)
-    monkeypatch.delitem(sys.modules, "app.models.yolo_ultralytics", raising=False)
 
-    import app.models.yolo_ultralytics as module
-    return module, captured
+    # monkeypatch.delitem records nothing to restore when the key was absent,
+    # so a fake-backed module would stay cached in sys.modules (and bound on the
+    # parent package) for every later test. Restore both explicitly.
+    import app.models as package
+    sentinel = object()
+    previous_module = sys.modules.get(MODULE, sentinel)
+    previous_attr = getattr(package, "yolo_ultralytics", sentinel)
+    sys.modules.pop(MODULE, None)
+
+    try:
+        import app.models.yolo_ultralytics as module
+        yield module, captured
+    finally:
+        if previous_module is sentinel:
+            sys.modules.pop(MODULE, None)
+        else:
+            sys.modules[MODULE] = previous_module
+        if previous_attr is sentinel:
+            if hasattr(package, "yolo_ultralytics"):
+                delattr(package, "yolo_ultralytics")
+        else:
+            setattr(package, "yolo_ultralytics", previous_attr)
 
 
 def test_url_weight_is_resolved_before_load(yolo_module, monkeypatch):

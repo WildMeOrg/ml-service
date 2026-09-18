@@ -137,6 +137,81 @@ def test_process_environment_is_not_mutated(config_file, monkeypatch):
         "the default must stay local; setting it in os.environ makes it inherited and sticky"
 
 
+def test_list_valued_checkpoint_paths_are_substituted(config_file, monkeypatch):
+    """DenseNet ensembles configure a list, not a single path."""
+    monkeypatch.setenv("MODEL_BASE", "/vol/models")
+    path = config_file([{
+        "model_id": "ensemble",
+        "checkpoint_paths": ["${MODEL_BASE}/a.pt", "${MODEL_BASE}/b.pt"],
+    }])
+
+    assert load_model_config(path)["models"][0]["checkpoint_paths"] == \
+        ["/vol/models/a.pt", "/vol/models/b.pt"]
+
+
+def test_lightnet_config_and_weight_paths_are_substituted(config_file, monkeypatch):
+    """LightNet names its two locations config_path and weight_path."""
+    monkeypatch.setenv("MODEL_BASE", "/vol/models")
+    path = config_file([{
+        "model_id": "ln",
+        "config_path": "${MODEL_BASE}/cfg.py",
+        "weight_path": "${MODEL_BASE}/w.weights",
+    }])
+
+    model = load_model_config(path)["models"][0]
+
+    assert model["config_path"] == "/vol/models/cfg.py"
+    assert model["weight_path"] == "/vol/models/w.weights"
+
+
+def test_nested_role_checkpoints_are_substituted(config_file, monkeypatch):
+    """The wild dog cascade nests a checkpoint under each role object."""
+    monkeypatch.setenv("MODEL_BASE", "/vol/models")
+    path = config_file([{
+        "model_id": "cascade",
+        "model_type": "densenet-wilddog-cascade",
+        "router": {"checkpoint_path": "${MODEL_BASE}/router.pt"},
+        "coat": {"checkpoint_paths": ["${MODEL_BASE}/coat1.pt", "${MODEL_BASE}/coat2.pt"]},
+        "viewpoint": {"checkpoint_path": "${MODEL_BASE}/vp.pt", "img_size": 224},
+    }])
+
+    model = load_model_config(path)["models"][0]
+
+    assert model["router"]["checkpoint_path"] == "/vol/models/router.pt"
+    assert model["coat"]["checkpoint_paths"] == \
+        ["/vol/models/coat1.pt", "/vol/models/coat2.pt"]
+    assert model["viewpoint"]["checkpoint_path"] == "/vol/models/vp.pt"
+    assert model["viewpoint"]["img_size"] == 224, "non-path keys survive the recursion"
+
+
+def test_unset_model_base_preserves_legacy_resolution_exactly(monkeypatch):
+    """The only backward-compatibility claim worth making: unset means unchanged."""
+    monkeypatch.delenv("MODEL_BASE", raising=False)
+
+    config = load_model_config("app/model_config.json")
+    resolved = {m[f] for m in config["models"]
+                for f in ("model_path", "checkpoint_path") if f in m}
+
+    assert resolved == {
+        "/datasets/detect.yolov11.msv3.pt",
+        "/datasets/miew_id.msv4_1_main.bin",
+        "/datasets/miewid_trout.bin",
+        "/datasets/vplabeler-msv3.pt",
+    }, "the shipped registry must resolve to the exact paths it used before"
+
+
+def test_setting_model_base_now_relocates_the_shipped_registry(monkeypatch):
+    """The flip side, stated plainly: a set value takes effect from now on."""
+    monkeypatch.setenv("MODEL_BASE", "https://example.invalid/weights")
+
+    config = load_model_config("app/model_config.json")
+    resolved = [m[f] for m in config["models"]
+                for f in ("model_path", "checkpoint_path") if f in m]
+
+    assert all(p.startswith("https://example.invalid/weights/") for p in resolved), \
+        "MODEL_BASE is new, so nothing set it before; from here it moves these paths"
+
+
 def test_committed_default_config_resolves_to_the_legacy_paths(monkeypatch):
     """Guard the real file: the shipped registry must resolve exactly as before."""
     monkeypatch.delenv("MODEL_BASE", raising=False)

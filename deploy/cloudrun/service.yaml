@@ -50,8 +50,9 @@ spec:
               memory: 32Gi         # >=16Gi required; sized for the 5-model default registry
               nvidia.com/gpu: "1"
           startupProbe:
-            # /readyz, not /health: /health returns 200 (degraded) while models
-            # are still loading, which would admit traffic too early.
+            # /readyz, not the default TCP check and not /health. A TCP probe
+            # passes the moment the port opens; /health answers 200 even when
+            # the registry loaded no models. Only /readyz fails closed.
             httpGet:
               path: /readyz
               port: 6050

@@ -29,13 +29,14 @@ gcloud run deploy ml-service \
   --no-cpu-throttling \
   --timeout 300 \
   --port 6050 \
+  --no-gpu-zonal-redundancy \
+  --startup-probe "httpGet.path=/readyz,httpGet.port=6050,initialDelaySeconds=60,periodSeconds=5,failureThreshold=30" \
   --set-env-vars "MODEL_BASE=https://storage.googleapis.com/${BUCKET}/models,WORKERS=1,DEVICE=cuda"
 
-# Two things this imperative path cannot express, both in service.yaml:
-#   - the /readyz startup probe (gcloud run deploy has no flag for it, so you
-#     get Cloud Run's default TCP check and traffic can reach a worker whose
-#     registry failed to load)
-#   - gpu-zonal-redundancy-disabled, needed in projects without L4 zonal quota
-# Apply service.yaml instead if either matters.
+# --startup-probe on /readyz rather than the default TCP check: a TCP probe
+# passes as soon as the port is open, which for a worker whose registry loaded
+# no models means traffic gets routed to something that cannot serve it.
+# --no-gpu-zonal-redundancy is required in projects without zonal-redundant L4
+# quota; drop it if yours has the quota.
 #
 # For true scale-to-zero (cheapest, cold start on first hit): --min-instances 0

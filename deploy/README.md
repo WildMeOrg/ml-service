@@ -37,8 +37,11 @@ The URL form is the most portable: identical config everywhere, no volume
 wiring, and workers need no cloud credentials when the bucket is public.
 
 **`MODEL_BASE` only moves paths that are written as `${MODEL_BASE}/...`.** The
-committed `app/model_config.json` is, and it defaults to `/datasets` — exactly
-what it resolved to before — so nothing changes for existing deployments. But
+committed `app/model_config.json` is. Leaving the variable unset (or setting it
+to `/datasets`) resolves those paths to exactly the filenames they resolved to
+before, so an existing deployment that sets nothing is unaffected — and nothing
+sets it today, because the variable is new here. Setting it takes effect from
+now on. But
 production installs bind-mount their own registry over that file (see the
 `_note` at the top of it), and **a mounted registry with literal `/datasets/...`
 paths ignores `MODEL_BASE` entirely.** Deploying to a provider therefore means
@@ -88,11 +91,12 @@ so during that window a probe of any path gets a refused connection rather than
 a response. What the three endpoints separate is the state *after* the port
 opens:
 
-- **`/health`** — liveness. Runs GPU/torch checks and shells out to
-  `nvidia-smi`; this is what Grafana and the autoheal container watch. **Do not
-  point a load balancer at it.** It runs a subprocess on every call, which is
-  wasteful at an edge probe interval across every worker, and it answers 200
-  with `status: degraded` when no models are loaded rather than failing closed.
+- **`/health`** — liveness. This is what Grafana and the autoheal container
+  watch. **Do not point a load balancer at it.** On a GPU deployment (`DEVICE`
+  exactly `cuda`) it shells out to `nvidia-smi` on every call, which is wasteful
+  at an edge probe interval across every worker; and a worker holding an empty
+  registry still gets `status: healthy` with `models_loaded: 0`, so it never
+  fails closed on the case that matters.
 - **`/readyz`** — readiness. 503 unless every configured model is loaded, 200
   otherwise, and cheap. This is the probe to gate traffic on.
 - **`/ping`** — an alias for `/readyz`, present for one reason: **RunPod's
@@ -108,11 +112,10 @@ opens:
   before creating an endpoint; the GPU-pool exclusion in particular cannot be
   set at creation time.
 - **Cloud Run** — `cloudrun/service.yaml` (declarative) or `cloudrun/deploy.sh`
-  (imperative). NVIDIA L4, `min-instances=1`, `concurrency=1`, `timeout=300`.
-  Only `service.yaml` configures the `/readyz` startup probe — `gcloud run
-  deploy` has no flag for it, so the imperative path gets Cloud Run's default
-  TCP check. Apply `service.yaml` if you want the probe. Written and deployed
-  during phase-0, but the throughput numbers above were measured on RunPod.
+  (imperative). NVIDIA L4, `min-instances=1`, `concurrency=1`, `timeout=300`,
+  `/readyz` startup probe. The two are equivalent; the script uses
+  `--startup-probe` and `--no-gpu-zonal-redundancy`. Written and deployed during
+  phase-0, but the throughput numbers above were measured on RunPod.
 
 Both consume the same image. Moving providers rebuilds nothing: apply the other
 config file and point `MODEL_BASE` at that environment's model store.

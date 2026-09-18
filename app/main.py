@@ -250,10 +250,11 @@ async def readiness_check():
     """Readiness probe: 200 only once every configured model is loaded.
 
     The probe a load balancer should gate traffic on, in preference to /health
-    for two reasons. /health shells out to nvidia-smi on every call, which is
-    not something to run at the edge's probe interval across every worker; and
-    it answers 200 with status "degraded" when no models are loaded, so it
-    cannot fail closed on a container that came up without its registry.
+    for two reasons. On a GPU deployment /health shells out to nvidia-smi on
+    every call, which is not something to run at the edge's probe interval
+    across every worker; and a handler holding an empty registry still reports
+    status "healthy" with models_loaded 0, so /health cannot fail closed on a
+    container that came up without its models.
 
     Uvicorn does not accept connections until startup_event returns, so during
     a normal eager load neither probe answers at all -- the pre-ready window

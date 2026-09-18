@@ -31,14 +31,14 @@ def client(monkeypatch):
     try:
         yield TestClient(main.app, raise_server_exceptions=False), main
     finally:
-        if previous is sentinel:
-            main.app.state.__dict__["_state"].pop("model_handler", None)
-        else:
-            main.app.state.model_handler = previous
-        if previous_device is sentinel:
-            main.app.state.__dict__["_state"].pop("device", None)
-        else:
-            main.app.state.device = previous_device
+        for name, value in (("model_handler", previous), ("device", previous_device)):
+            if value is sentinel:
+                try:
+                    delattr(main.app.state, name)
+                except (AttributeError, KeyError):
+                    pass
+            else:
+                setattr(main.app.state, name, value)
 
 
 class _Handler:
@@ -47,7 +47,11 @@ class _Handler:
 
 
 def _clear_handler(main):
-    main.app.state.__dict__["_state"].pop("model_handler", None)
+    """Starlette's State.__delattr__ raises KeyError when the key is absent."""
+    try:
+        delattr(main.app.state, "model_handler")
+    except (AttributeError, KeyError):
+        pass
 
 
 def test_readyz_503_when_handler_absent(client):
