@@ -10,6 +10,7 @@ A flexible FastAPI service for serving computer vision models used by the [Wildb
 | `megadetector` | MegaDetector (PytorchWildlife) | Animal/person/vehicle detection |
 | `lightnet` | PyDarknet YOLO v2/v3 | Species-specific detection (WBIA legacy models) |
 | `efficientnetv2` | EfficientNet-B4 (timm) | Species/viewpoint classification |
+| `timm-classifier` | Any single-head timm model (e.g. DINOv3 ViT-L) | Species classification; config-driven, no code per model |
 | `densenet-orientation` | DenseNet-201 (torchvision) | Orientation classification |
 | `miewid` | MiewID transformer | Embedding extraction for re-identification |
 
@@ -548,6 +549,69 @@ Models are configured in `app/model_config.json`:
 - `n_classes`: Optional explicit class count
 - `multi_label`: Use sigmoid + threshold (true) or softmax + argmax (false) (default: true)
 - `parse_compound_labels`: Split labels on `:` into species/viewpoint fields (default: false)
+
+**timm classifier** (`timm-classifier`):
+
+Generic wrapper for any single-head timm architecture. A new classifier is a
+config entry, not a new module.
+
+- `model_arch` (required): timm architecture name
+- `checkpoint_path` (required): path or URL to the checkpoint
+- `img_size`: input size (default: 224)
+- `global_pool`: pooling override passed straight to `timm.create_model`; omit to use timm's default for the architecture
+- `labels` / `label_map`: **exactly one** — an ordered list of class names, or `{index: "label"}` with indices exactly `0..N-1`
+- `label_mode`: `species` (default, label *is* the species), `viewpoint`, or `compound` (split on `:` via the shared parser)
+- `sentinel_prefixes`: `compound` mode only; suppresses placeholder species
+- `state_dict_key`: wrapper key holding the weights (default: try `state_dict`, `state`, `model`, then the raw dict)
+- `strip_prefix`: prefix to strip from state-dict keys (e.g. `base_model.`)
+- `interpolation`: `bicubic` (default) or `bilinear`
+- `mean` / `std`: per-channel normalization (default: ImageNet)
+- `square_crop`: expand the short side of the bbox to a square before cropping, then clip at the image border (default: false)
+- `multi_label`: sigmoid + threshold (true) or softmax + argmax (false) (default: false)
+- `threshold`: multi-label threshold (default: 0.5)
+- `checkpoint_sha256`: optional digest, verified against the resolved file at load
+- `verify_checkpoint_transform`: cross-check `img_size` and `mean`/`std` against any preprocessing the checkpoint itself carries (default: true)
+
+Unknown keys are rejected at load with the offending names. Every config key is
+forwarded into the loader, so a silently ignored typo would change model
+behaviour — most dangerously `global_pool`, where the wrong value still loads
+strictly and merely predicts the wrong species.
+
+Example — DeepFaune v1.5 (European camera-trap species):
+
+```json
+{
+    "model_id": "deepfaune-v1.5",
+    "model_type": "timm-classifier",
+    "model_arch": "vit_large_patch16_dinov3.lvd1689m",
+    "checkpoint_path": "https://huggingface.co/Addax-Data-Science/EUR-DF-v1-5/resolve/e5c04750c44cb2ecbfa4f86624c37ae438f0b3dd/deepfaune-vit_large_patch16_dinov3.lvd1689m.pt",
+    "img_size": 224,
+    "global_pool": "token",
+    "strip_prefix": "base_model.",
+    "square_crop": true,
+    "label_mode": "species",
+    "multi_label": false,
+    "labels": ["bison", "badger", "ibex", "beaver", "red deer", "golden jackal",
+               "chamois", "cat", "goat", "roe deer", "dog", "raccoon dog",
+               "fallow deer", "squirrel", "moose", "equid", "genet", "wolverine",
+               "hedgehog", "lagomorph", "wolf", "otter", "lynx", "mongoose",
+               "marmot", "micromammal", "mouflon", "sheep", "mustelid", "bird",
+               "bear", "porcupine", "nutria", "muskrat", "raccoon", "fox",
+               "arctic fox", "reindeer", "wild boar", "cow"]
+}
+```
+
+What config alone cannot catch, the checkpoint can: DeepFaune pickles its own
+preprocessing, so `img_size: 256` or swapped `mean`/`std` are rejected at load
+rather than quietly degrading predictions. Label *order* has no such check —
+it is part of the model's contract, so keep the list as published.
+
+`global_pool: "token"` is **required** for this checkpoint — DeepFaune trained
+on the class token while timm's DINOv3 default is `"avg"`. Both load strictly
+with zero missing or unexpected keys; the wrong one just predicts differently
+(measured: top-1 differs on 3 of 4 crops). The checkpoint URL is pinned to a
+commit SHA because `download_checkpoint` caches by URL. Resident cost is
+~1.2 GiB of VRAM, loaded at startup. The class list is ordered — do not sort it.
 
 **DenseNet Orientation** (`densenet-orientation`):
 - `checkpoint_path`: Path or URL to checkpoint (format: `{"state": state_dict, "classes": [...]}`)
