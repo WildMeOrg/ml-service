@@ -1,9 +1,29 @@
+import io
 import logging
 import cv2
 import numpy as np
+from PIL import Image, ImageOps
 from torchvision import transforms
 
 logger = logging.getLogger(__name__)
+
+
+def decode_image_rgb(image_bytes: bytes) -> np.ndarray:
+    """Decode image bytes to an RGB HWC uint8 array in the UPRIGHT frame.
+
+    Pillow does not apply the EXIF Orientation tag on open, so a portrait photo
+    shot on a camera that records rotation in EXIF decodes as the landscape
+    sensor frame. cv2.imdecode (used by the lightnet, efficientnet, densenet and
+    explain paths) DOES apply it, and Wildbook's displayed derivatives are
+    ImageMagick `-auto-orient`ed. Every PIL-decoding model must therefore go
+    through this helper so the pixel frame matches the frame the bounding boxes
+    are expressed in. Whiskerbook elephants (Sep 2026): 219 portrait photos had
+    upright boxes but MiewID crops cut from the un-rotated frame, i.e. a
+    sideways, mostly wrong region.
+    """
+    with Image.open(io.BytesIO(image_bytes)) as im:
+        ImageOps.exif_transpose(im, in_place=True)   # no-op copy avoided when untagged
+        return np.array(im.convert('RGB'))
 
 def unnormalize(img_base):
     aug_mean = np.array([0.485, 0.456, 0.406])

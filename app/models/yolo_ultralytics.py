@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from PIL import Image
 from ultralytics import YOLO
 from .base_model import BaseModel
+from app.utils.helpers import decode_image_rgb
 import logging
 
 logger = logging.getLogger(__name__)
@@ -60,8 +61,10 @@ class YOLOUltralyticsModel(BaseModel):
         device = self.model_info['device']
         dilation_factors = kwargs.get('dilation_factors', self.model_info['dilation_factors'])
         
-        # Run prediction
-        img = Image.open(BytesIO(image_bytes))
+        # Run prediction. Decode through decode_image_rgb so the EXIF
+        # Orientation tag is applied: ultralytics does not transpose PIL
+        # inputs itself, and boxes must be in the upright (displayed) frame.
+        img = Image.fromarray(decode_image_rgb(image_bytes))
         results = self.model.predict(img, save=False, imgsz=imgsz, conf=conf, 
                                    device=device, verbose=False)[0]
         
