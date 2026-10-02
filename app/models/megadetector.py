@@ -9,6 +9,7 @@ from PIL import Image
 
 from PytorchWildlife.models import detection as pw_detection
 from .base_model import BaseModel
+from app.utils.helpers import decode_image_rgb
 from ..utils.checkpoint_utils import get_checkpoint_path
 
 logger = logging.getLogger(__name__)
@@ -106,11 +107,9 @@ class MegaDetectorModel(BaseModel):
             np.ndarray: Image as a NumPy array in (H, W, C) BGR format, dtype=uint8
         """
         try:
-            # Convert bytes to PIL Image
-            img = Image.open(BytesIO(image_bytes)).convert("RGB")
-            
-            # Convert to NumPy array and BGR format (for OpenCV compatibility)
-            img_np = np.array(img, dtype=np.uint8)
+            # Decode in the upright frame (EXIF Orientation applied), matching
+            # cv2.imdecode and Wildbook's auto-oriented derivatives.
+            img_np = decode_image_rgb(image_bytes).astype(np.uint8, copy=False)
             img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
             
             return img_bgr

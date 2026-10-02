@@ -16,7 +16,7 @@ import numpy as np
 import io
 import threading
 from app.utils.checkpoint_utils import get_checkpoint_path
-from app.utils.helpers import get_chip_from_img
+from app.utils.helpers import get_chip_from_img, decode_image_rgb
 
 logger = logging.getLogger(__name__)
 
@@ -199,7 +199,9 @@ class MiewidModel(BaseModel):
             # The previous PIL crop-then-rotate(-theta) produced a different
             # chip whenever theta != 0, silently degrading embeddings for
             # every rotated annotation.
-            image_np = np.array(Image.open(io.BytesIO(image_bytes)).convert('RGB'))
+            # decode_image_rgb applies the EXIF Orientation tag so the crop is
+            # taken from the same upright frame the bbox was drawn in.
+            image_np = decode_image_rgb(image_bytes)
 
             if bbox is not None:
                 processed_np = get_chip_from_img(image_np, list(bbox), float(theta))
