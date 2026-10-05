@@ -8,6 +8,7 @@ from app.models.model_handler import ModelHandler
 from app.models.efficientnet import EfficientNetModel
 from app.models.densenet_classifier import DenseNetClassifierModel
 from app.models.densenet_wilddog_cascade import DenseNetWildDogCascadeModel
+from app.models.timm_classifier import TimmClassifierModel
 from app.models.miewid import MiewidModel
 from app.models.densenet_orientation import DenseNetOrientationModel
 from app.models.wbia_orientation import WbiaOrientationModel, OrientationInferenceError
@@ -25,7 +26,7 @@ pipeline_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PIPELINES)
 class PipelineRequest(BaseModel):
     """Request model for pipeline endpoint."""
     predict_model_id: str = Field(..., description="ID of the model to use for prediction (bbox detection)")
-    classify_model_id: Optional[str] = Field(None, description="ID of the classification model (EfficientNet or DenseNet-classifier). Optional: single-species configs with no labeler omit it")
+    classify_model_id: Optional[str] = Field(None, description="ID of the classification model (EfficientNet, DenseNet-classifier or timm-classifier). Optional: single-species configs with no labeler omit it")
     extract_model_id: str = Field(..., description="ID of the MiewID model to use for embeddings extraction")
     orientation_model_id: Optional[str] = Field(None, description="ID of the DenseNet orientation model (optional)")
     image_uri: str = Field(..., description="URI of the image to process (URL or file path)")
@@ -106,11 +107,13 @@ async def run_pipeline(
             # Validate model types
             if classify_model is not None and not isinstance(
                     classify_model, (EfficientNetModel, DenseNetClassifierModel,
-                                     DenseNetWildDogCascadeModel)):
+                                     DenseNetWildDogCascadeModel,
+                                     TimmClassifierModel)):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Model '{pipeline_request.classify_model_id}' must be "
-                           f"EfficientNet, DenseNet-classifier or DenseNet-wilddog-cascade "
+                           f"EfficientNet, DenseNet-classifier, DenseNet-wilddog-cascade "
+                           f"or timm-classifier "
                            f"for the classify slot."
                 )
             
