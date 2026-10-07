@@ -1,5 +1,24 @@
 ## [Unreleased]
 
+- `yolo-ultralytics` models gain an opt-in `obb_theta: "min_rotation"` config
+  key. The pinned ultralytics (8.3.139) runs `ops.regularize_rboxes` on every
+  oriented box: theta is forced into [0, pi/2) and w/h are swapped when it
+  wraps, so a face tilted -1 degree is reported as an 89 degree box with
+  swapped edges while +1 degree stays +1 degree. `get_chip_from_img` honours
+  theta, so the two representations of the same rectangle chip a quarter turn
+  apart -- measured on 77 PetFace dog detections, 27 (the ones with a slightly
+  negative raw tilt) came back sideways against an embedder trained on upright
+  faces. `min_rotation` picks the representation with the smallest |theta|
+  (theta in (-pi/4, pi/4], continuous through 0), before dilation so the
+  long/short factors follow the normalised edges. The default (`"raw"`) is the
+  unchanged pass-through every deployed OBB model runs today, pinned by
+  characterization tests; an unknown value fails at model load. Not for
+  long-axis subjects (aerial whales) whose heading the chip must keep. Boxes
+  already persisted under the old representation are NOT repaired by this --
+  re-extracting them reproduces the sideways chip, and re-running detection
+  on top creates duplicates (Wildbook dedups by numeric bbox+theta); delete
+  and redetect, or rewrite stored rows about their centre first.
+
 - Image URIs containing a bare `#` now resolve. `#` opens a URL fragment,
   which is never sent to the server, so a filename like
   `2000_174419#R8123A.jpg` was requested as `2000_174419` and 404'd -- which
