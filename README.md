@@ -535,7 +535,8 @@ Models are configured in `app/model_config.json`:
   tilt. Leave it unset for long-axis subjects (aerial whales) whose heading the chip must keep. `null` means
   `"raw"`. Any other value is rejected at model load, and since models load at startup that aborts the whole
   service, deliberately (a silently wrong chip is worse than a loud start-up failure). The key can also be
-  sent per request in `model_params` / `predict_model_params`. `/pipeline/` refuses `min_rotation` together
+  sent per request in `model_params` / `predict_model_params`: omitting it inherits the model's configured
+  mode, an explicit `null` forces `"raw"` for that request. `/pipeline/` refuses `min_rotation` together
   with an `orientation_model_id`: orientation models read the detector's emitted box, and the swapped
   representation has not been validated as their input. Switching an existing model to `min_rotation`
   changes its chips, so its stored embeddings must be regenerated in the same deploy.

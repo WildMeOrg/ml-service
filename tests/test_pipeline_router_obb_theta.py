@@ -183,3 +183,22 @@ def test_raw_config_with_orientation_model_still_works(monkeypatch):
     r = client.post("/pipeline/", json=_payload(orientation_model_id="o", bbox_score_threshold=0.1))
     assert r.status_code == 200, r.text
     assert om.predict_batch.called
+
+
+# Codex round 2: a request override of null must resolve the SAME way in the
+# guard and in the handler (raw), so the orientation model receives the raw
+# (unswapped) box and the persisted box is raw too.
+@pytest.mark.parametrize("orienter", [_wbia_orienter, _densenet_orienter])
+def test_null_override_on_min_rotation_config_gives_orienter_the_raw_box(monkeypatch, orienter):
+    pm = _real_detector(monkeypatch, obb_theta="min_rotation")
+    om = orienter()
+    client, em = _client(pm, {"obb_theta": "min_rotation"}, orientation_model=om)
+    r = client.post("/pipeline/", json=_payload(orientation_model_id="o", bbox_score_threshold=0.1,
+                                                predict_model_params={"obb_theta": None}))
+    assert r.status_code == 200, r.text
+    if om.predict_batch.called if hasattr(om, "predict_batch") else False:
+        seen = om.predict_batch.call_args.kwargs["bboxes"][0]
+    else:
+        seen = om.predict.call_args.kwargs["bbox"]
+    # raw representation: w=213 > h=182 (ints after the pipeline's integerization)
+    assert (int(seen[2]), int(seen[3])) == (213, 182), seen

@@ -301,3 +301,24 @@ def test_raw_passes_nonfinite_theta_through_unchanged():
     m = YOLOUltralyticsModel()
     out = m._process_results(_obb_results([(10.0, 10.0, 30.0, 20.0, float("nan"))]), [0.0, 0.0])
     assert math.isnan(out["thetas"][0])
+
+
+# --------------------------------------------------------------------------
+# Codex review round 2: the request-level `null` must mean the same thing in
+# the handler as in the /pipeline/ guard. Rule: an ABSENT key inherits the
+# loaded mode; an EXPLICIT null (config copy or request override) means raw.
+# --------------------------------------------------------------------------
+def test_explicit_none_override_forces_raw_even_when_loaded_mode_is_min_rotation(dummy_yolo):
+    m = YOLOUltralyticsModel()
+    m.load("x.pt", "cpu", obb_theta="min_rotation")
+    out = m.predict(b"img", obb_theta=None)
+    assert tuple(out["bboxes"][0][2:]) == pytest.approx((213.0, 182.0))   # raw representation
+    assert out["thetas"][0] == pytest.approx(1.5497775077819824)
+
+
+def test_absent_key_inherits_loaded_min_rotation(dummy_yolo):
+    m = YOLOUltralyticsModel()
+    m.load("x.pt", "cpu", obb_theta="min_rotation")
+    out = m.predict(b"img")
+    assert tuple(out["bboxes"][0][2:]) == pytest.approx((182.0, 213.0))
+    assert abs(out["thetas"][0]) < 0.03

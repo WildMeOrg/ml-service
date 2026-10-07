@@ -105,10 +105,14 @@ class YOLOUltralyticsModel(BaseModel):
         conf = kwargs.get('conf', self.model_info['conf'])
         device = self.model_info['device']
         dilation_factors = kwargs.get('dilation_factors', self.model_info['dilation_factors'])
-        # The routers copy model_info['config'] into kwargs, so a `null` in the
-        # config arrives here as an explicit None and must mean "raw" too.
-        obb_theta = kwargs.get('obb_theta')
-        if obb_theta is None:
+        # An ABSENT key inherits the loaded mode; an EXPLICIT value -- the
+        # routers copy model_info['config'] into kwargs, and a request may
+        # override -- is resolved on its own, so `null` means "raw" here
+        # exactly as it does in /pipeline/'s orientation guard. The two must
+        # agree or the guard can be bypassed.
+        if 'obb_theta' in kwargs:
+            obb_theta = resolve_obb_theta(kwargs['obb_theta'])
+        else:
             obb_theta = self.model_info.get('obb_theta', 'raw')
         
         # Run prediction. Decode through decode_image_rgb so the EXIF
