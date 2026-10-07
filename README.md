@@ -527,10 +527,18 @@ Models are configured in `app/model_config.json`:
 - `dilation_factors`: Optional `[long_edge, short_edge]` multiplicative box padding (applied after `obb_theta`)
 - `obb_theta`: OBB models only. `"raw"` (default) passes ultralytics' box representation through unchanged.
   `"min_rotation"` re-expresses each oriented box with the smallest |theta| (theta in (-pi/4, pi/4],
-  swapping w/h as needed) so near-upright subjects such as faces always chip upright. ultralytics 8.3.x
-  regularizes theta into [0, pi/2), which turns a -1 degree tilt into an 89 degree box with swapped edges;
-  `get_chip_from_img` honours theta, so without this the same animal chips a quarter turn apart depending
-  on the sign of a tiny tilt. Leave it unset for long-axis subjects (aerial whales) whose heading the chip must keep.
+  swapping w/h as needed) so a subject within 45 degrees of upright chips with its small tilt removed rather
+  than a quarter turn off. It cannot know which way is up: an upside-down subject stays upside down, and a
+  subject tilted past 45 degrees flips to the other representation. ultralytics 8.3.x regularizes theta into
+  [0, pi/2), which turns a -1 degree tilt into an 89 degree box with swapped edges; `get_chip_from_img`
+  honours theta, so without this the same animal chips a quarter turn apart depending on the sign of a tiny
+  tilt. Leave it unset for long-axis subjects (aerial whales) whose heading the chip must keep. `null` means
+  `"raw"`. Any other value is rejected at model load, and since models load at startup that aborts the whole
+  service, deliberately (a silently wrong chip is worse than a loud start-up failure). The key can also be
+  sent per request in `model_params` / `predict_model_params`. `/pipeline/` refuses `min_rotation` together
+  with an `orientation_model_id`: orientation models read the detector's emitted box, and the swapped
+  representation has not been validated as their input. Switching an existing model to `min_rotation`
+  changes its chips, so its stored embeddings must be regenerated in the same deploy.
 
 **MegaDetector** (`megadetector`):
 - `model_path`: Path or URL to `.pt` weights

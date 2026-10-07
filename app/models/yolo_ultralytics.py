@@ -26,6 +26,8 @@ OBB_THETA_MODES = ("raw", "min_rotation")
 
 def _min_rotation(w, h, r):
     """Return (w, h, theta) for the same rectangle with theta in (-pi/4, pi/4]."""
+    if not math.isfinite(r):
+        raise ValueError(f"obb_theta=min_rotation needs a finite theta, got {r!r}")
     if r > math.pi / 4:
         return h, w, r - math.pi / 2
     if r <= -math.pi / 4:
@@ -33,10 +35,15 @@ def _min_rotation(w, h, r):
     return w, h, r
 
 
-def _validate_obb_theta(mode):
+def resolve_obb_theta(mode):
+    """Map a config/request value to a mode. `None` (an absent or `null` key)
+    means "raw"; anything else must be a known mode, so falsy junk such as ""
+    or False is rejected rather than silently treated as raw."""
+    if mode is None:
+        return "raw"
     if mode not in OBB_THETA_MODES:
         raise ValueError(
-            f"Unknown obb_theta {mode!r}; expected one of {OBB_THETA_MODES}")
+            f"Unknown obb_theta {mode!r}; expected one of {OBB_THETA_MODES} or null")
     return mode
 
 
@@ -60,7 +67,7 @@ class YOLOUltralyticsModel(BaseModel):
                 - obb_theta: "raw" (default) or "min_rotation"; see OBB_THETA_MODES.
                   Validated here so a misconfigured model fails at startup.
         """
-        obb_theta = _validate_obb_theta(kwargs.get('obb_theta', 'raw') or 'raw')
+        obb_theta = resolve_obb_theta(kwargs.get('obb_theta'))
         logger.info(f"Loading YOLO model from {model_path} on device {device}")
         self.model = YOLO(model_path)
         self.model.to(device)
@@ -98,7 +105,11 @@ class YOLOUltralyticsModel(BaseModel):
         conf = kwargs.get('conf', self.model_info['conf'])
         device = self.model_info['device']
         dilation_factors = kwargs.get('dilation_factors', self.model_info['dilation_factors'])
-        obb_theta = kwargs.get('obb_theta', self.model_info.get('obb_theta', 'raw'))
+        # The routers copy model_info['config'] into kwargs, so a `null` in the
+        # config arrives here as an explicit None and must mean "raw" too.
+        obb_theta = kwargs.get('obb_theta')
+        if obb_theta is None:
+            obb_theta = self.model_info.get('obb_theta', 'raw')
         
         # Run prediction. Decode through decode_image_rgb so the EXIF
         # Orientation tag is applied: ultralytics does not transpose PIL
@@ -110,13 +121,13 @@ class YOLOUltralyticsModel(BaseModel):
         # Process results
         return self._process_results(results, dilation_factors, obb_theta=obb_theta)
     
-    def _process_results(self, results, dilation_factors, obb_theta='raw'):
+    def _process_results(self, results, dilation_factors, obb_theta=None):
         """Process YOLO results into a standardized format.
 
         `obb_theta` applies to oriented boxes only and runs BEFORE dilation, so
         the long/short dilation factors follow the normalised edges.
         """
-        _validate_obb_theta(obb_theta)
+        obb_theta = resolve_obb_theta(obb_theta)
         long_dil, short_dil = dilation_factors
         bboxes = []
         thetas = []

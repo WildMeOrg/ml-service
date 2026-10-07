@@ -11,6 +11,7 @@ from app.models.densenet_wilddog_cascade import DenseNetWildDogCascadeModel
 from app.models.miewid import MiewidModel
 from app.models.densenet_orientation import DenseNetOrientationModel
 from app.models.wbia_orientation import WbiaOrientationModel, OrientationInferenceError
+from app.models.yolo_ultralytics import resolve_obb_theta
 from app.utils.image_uri import fetch_image_for_request, admission_slot, sanitize_uri_for_response, sanitize_uri_for_logging
 from fastapi.concurrency import run_in_threadpool
 
@@ -178,6 +179,26 @@ async def run_pipeline(
                 # Remove any parameters that shouldn't be passed to predict
                 predict_params.pop('model_path', None)
                 predict_params.pop('device', None)
+
+                # obb_theta=min_rotation re-expresses each oriented box with
+                # swapped edges. Both orientation kinds read the detector's
+                # EMITTED box (the regressor via ori_bboxes below, the DenseNet
+                # classifier via the crop), so they would see a different window
+                # than they were validated on. Refuse the combination rather
+                # than guess; lift this once that path is tested end to end.
+                if orientation_model is not None:
+                    try:
+                        effective_obb_theta = resolve_obb_theta(predict_params.get('obb_theta'))
+                    except ValueError as e:
+                        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+                    if effective_obb_theta == 'min_rotation':
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=(f"obb_theta='min_rotation' on predict model "
+                                    f"'{pipeline_request.predict_model_id}' cannot be combined with "
+                                    f"orientation_model_id='{pipeline_request.orientation_model_id}': "
+                                    f"orientation models read the detector's emitted box, and the "
+                                    f"swapped representation is not validated as their input."))
                 
                 # Run prediction in a thread pool
                 predict_result = await run_in_threadpool(

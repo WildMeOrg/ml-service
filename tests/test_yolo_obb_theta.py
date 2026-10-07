@@ -221,3 +221,83 @@ def test_load_rejects_unknown_obb_theta(dummy_yolo):
     m = YOLOUltralyticsModel()
     with pytest.raises(ValueError):
         m.load("x.pt", "cpu", obb_theta="sideways")
+
+
+# --------------------------------------------------------------------------
+# Codex review round 1
+# --------------------------------------------------------------------------
+# (1) The routers copy model_info['config'] into every predict() call, so a
+# config that spells the key as null must behave exactly like an absent key at
+# EVERY entry point, while falsy junk ("", False, 0) must still be rejected.
+def test_none_resolves_to_raw_in_process_results():
+    m = YOLOUltralyticsModel()
+    assert m._process_results(_obb_results([KAIJU_ROW]), [0.3, 0.1], obb_theta=None) == \
+        m._process_results(_obb_results([KAIJU_ROW]), [0.3, 0.1])
+
+
+def test_none_resolves_to_raw_in_predict(dummy_yolo):
+    m = YOLOUltralyticsModel()
+    m.load("x.pt", "cpu", obb_theta=None)
+    assert m.get_model_info()["obb_theta"] == "raw"
+    out = m.predict(b"img", obb_theta=None)   # what a router forwards from a `null` config
+    assert tuple(out["bboxes"][0][2:]) == pytest.approx((213.0, 182.0))
+
+
+@pytest.mark.parametrize("junk", ["", False, 0, [], {}])
+def test_falsy_junk_is_rejected_not_silently_treated_as_raw(dummy_yolo, junk):
+    m = YOLOUltralyticsModel()
+    with pytest.raises(ValueError):
+        m.load("x.pt", "cpu", obb_theta=junk)
+    m2 = YOLOUltralyticsModel()
+    with pytest.raises(ValueError):
+        m2._process_results(_obb_results([KAIJU_ROW]), [0.0, 0.0], obb_theta=junk)
+
+
+# (3) Exact, complete-output characterization of the default path on float32
+# inputs (what ultralytics actually yields), generated from origin/main's
+# implementation. `==`, not approx: any drift of the raw path fails here.
+def _f32_obb_results():
+    rows = [(92.0, 110.0, 213.0, 182.0, 1.5497775077819824),
+            (50.0, 60.0, 20.0, 40.0, -0.9), (10.5, 20.25, 30.0, 30.0, 0.0)]
+    obb = _OBB(rows, [0.699, 0.5, 0.25], [1, 0, 1])
+    for t in (obb.xywhr, obb.conf, obb.cls):
+        t._arr = t._arr.astype(np.float32)
+    return _Results(obb=obb)
+
+
+def _f32_aabb_results():
+    bx = _Boxes([(50.0, 60.0, 20.0, 40.0), (7.0, 8.0, 9.0, 3.0)], [0.8, 0.4], [0, 1])
+    for t in (bx.xywh, bx.conf, bx.cls):
+        t._arr = t._arr.astype(np.float32)
+    return _Results(boxes=bx)
+
+
+OBB_F32_EXPECTED = {'bboxes': [[-46.45000000000002, 9.899999999999991, 276.90000000000003, 200.20000000000002], [39.0, 34.0, 22.0, 52.0], [-9.0, 3.75, 39.0, 33.0]], 'thetas': [1.5497775077819824, -0.8999999761581421, 0.0], 'scores': [0.6990000009536743, 0.5, 0.25], 'class_ids': [1, 0, 1], 'class_names': ['dog_face', 'cat_face', 'dog_face']}
+AABB_F32_EXPECTED = {'bboxes': [[39.0, 36.0, 22.0, 48.0], [1.6000000000000005, 6.35, 10.799999999999999, 3.3000000000000003]], 'thetas': [0.0, 0.0], 'scores': [0.800000011920929, 0.4000000059604645], 'class_ids': [0, 1], 'class_names': ['cat_face', 'dog_face']}
+
+
+def test_default_path_exact_output_float32_obb():
+    assert YOLOUltralyticsModel()._process_results(_f32_obb_results(), [0.3, 0.1]) == OBB_F32_EXPECTED
+
+
+def test_default_path_exact_output_float32_axis_aligned():
+    assert YOLOUltralyticsModel()._process_results(_f32_aabb_results(), [0.2, 0.1]) == AABB_F32_EXPECTED
+
+
+def test_raw_explicit_exact_output_float32_obb():
+    assert YOLOUltralyticsModel()._process_results(_f32_obb_results(), [0.3, 0.1], obb_theta="raw") == OBB_F32_EXPECTED
+
+
+# (4) The interval guarantee needs a finite angle; a NaN/inf theta would also
+# wreck the chip downstream, so the opt-in path refuses it loudly. Raw stays raw.
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_min_rotation_rejects_nonfinite_theta(bad):
+    m = YOLOUltralyticsModel()
+    with pytest.raises(ValueError):
+        m._process_results(_obb_results([(10.0, 10.0, 30.0, 20.0, bad)]), [0.0, 0.0], obb_theta="min_rotation")
+
+
+def test_raw_passes_nonfinite_theta_through_unchanged():
+    m = YOLOUltralyticsModel()
+    out = m._process_results(_obb_results([(10.0, 10.0, 30.0, 20.0, float("nan"))]), [0.0, 0.0])
+    assert math.isnan(out["thetas"][0])
