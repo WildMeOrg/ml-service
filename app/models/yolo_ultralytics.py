@@ -1,3 +1,4 @@
+import math
 from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple
 from PIL import Image
@@ -7,6 +8,44 @@ from app.utils.helpers import decode_image_rgb
 import logging
 
 logger = logging.getLogger(__name__)
+
+# How an oriented box's (w, h, theta) representation is normalised before it
+# leaves the handler. ultralytics 8.3.x regularizes every OBB to
+# theta in [0, pi/2), swapping w/h when it wraps -- a discontinuity at 0 where a
+# -1 degree tilt becomes an 89 degree box with swapped edges while +1 degree
+# stays +1 degree. get_chip_from_img honours theta, so the two representations
+# of the SAME rectangle produce chips a quarter turn apart.
+#   raw          -- pass ultralytics' representation through (default; the
+#                   behaviour every existing OBB model was deployed with)
+#   min_rotation -- pick the representation with the smallest |theta|, i.e.
+#                   theta in (-pi/4, pi/4], continuous through 0. Right for
+#                   near-upright subjects (faces); wrong for long-axis subjects
+#                   whose heading the chip must keep (aerial whales).
+OBB_THETA_MODES = ("raw", "min_rotation")
+
+
+def _min_rotation(w, h, r):
+    """Return (w, h, theta) for the same rectangle with theta in (-pi/4, pi/4]."""
+    if not math.isfinite(r):
+        raise ValueError(f"obb_theta=min_rotation needs a finite theta, got {r!r}")
+    if r > math.pi / 4:
+        return h, w, r - math.pi / 2
+    if r <= -math.pi / 4:
+        return h, w, r + math.pi / 2
+    return w, h, r
+
+
+def resolve_obb_theta(mode):
+    """Map a config/request value to a mode. `None` (an absent or `null` key)
+    means "raw"; anything else must be a known mode, so falsy junk such as ""
+    or False is rejected rather than silently treated as raw."""
+    if mode is None:
+        return "raw"
+    if mode not in OBB_THETA_MODES:
+        raise ValueError(
+            f"Unknown obb_theta {mode!r}; expected one of {OBB_THETA_MODES} or null")
+    return mode
+
 
 class YOLOUltralyticsModel(BaseModel):
     """YOLO model implementation using Ultralytics."""
@@ -24,7 +63,11 @@ class YOLOUltralyticsModel(BaseModel):
             **kwargs: Additional parameters including:
                 - imgsz: Default image size for inference
                 - conf: Default confidence threshold
+                - dilation_factors: [long_edge_dil, short_edge_dil] box padding
+                - obb_theta: "raw" (default) or "min_rotation"; see OBB_THETA_MODES.
+                  Validated here so a misconfigured model fails at startup.
         """
+        obb_theta = resolve_obb_theta(kwargs.get('obb_theta'))
         logger.info(f"Loading YOLO model from {model_path} on device {device}")
         self.model = YOLO(model_path)
         self.model.to(device)
@@ -36,7 +79,8 @@ class YOLOUltralyticsModel(BaseModel):
             'device': device,
             'imgsz': kwargs.get('imgsz', 640),
             'conf': kwargs.get('conf', 0.25),
-            'dilation_factors': kwargs.get('dilation_factors', [0.0, 0.0])
+            'dilation_factors': kwargs.get('dilation_factors', [0.0, 0.0]),
+            'obb_theta': obb_theta,
         }
     
     def predict(self, image_bytes: bytes, **kwargs) -> Dict[str, Any]:
@@ -48,6 +92,7 @@ class YOLOUltralyticsModel(BaseModel):
                 - imgsz: Image size for this inference
                 - conf: Confidence threshold
                 - dilation_factors: Dilation factors for OBB [long_edge_dil, short_edge_dil]
+                - obb_theta: OBB representation mode, see OBB_THETA_MODES
                 
         Returns:
             Dictionary containing detection results
@@ -60,6 +105,15 @@ class YOLOUltralyticsModel(BaseModel):
         conf = kwargs.get('conf', self.model_info['conf'])
         device = self.model_info['device']
         dilation_factors = kwargs.get('dilation_factors', self.model_info['dilation_factors'])
+        # An ABSENT key inherits the loaded mode; an EXPLICIT value -- the
+        # routers copy model_info['config'] into kwargs, and a request may
+        # override -- is resolved on its own, so `null` means "raw" here
+        # exactly as it does in /pipeline/'s orientation guard. The two must
+        # agree or the guard can be bypassed.
+        if 'obb_theta' in kwargs:
+            obb_theta = resolve_obb_theta(kwargs['obb_theta'])
+        else:
+            obb_theta = self.model_info.get('obb_theta', 'raw')
         
         # Run prediction. Decode through decode_image_rgb so the EXIF
         # Orientation tag is applied: ultralytics does not transpose PIL
@@ -69,10 +123,15 @@ class YOLOUltralyticsModel(BaseModel):
                                    device=device, verbose=False)[0]
         
         # Process results
-        return self._process_results(results, dilation_factors)
+        return self._process_results(results, dilation_factors, obb_theta=obb_theta)
     
-    def _process_results(self, results, dilation_factors):
-        """Process YOLO results into a standardized format."""
+    def _process_results(self, results, dilation_factors, obb_theta=None):
+        """Process YOLO results into a standardized format.
+
+        `obb_theta` applies to oriented boxes only and runs BEFORE dilation, so
+        the long/short dilation factors follow the normalised edges.
+        """
+        obb_theta = resolve_obb_theta(obb_theta)
         long_dil, short_dil = dilation_factors
         bboxes = []
         thetas = []
@@ -85,6 +144,8 @@ class YOLOUltralyticsModel(BaseModel):
             xywhr = results.obb.xywhr.cpu().numpy()
             
             for x, y, w, h, r in xywhr:
+                if obb_theta == 'min_rotation':
+                    w, h, r = _min_rotation(w, h, r)
                 # Determine long and short side
                 if w >= h:
                     w_dilated = w * (1 + long_dil)
