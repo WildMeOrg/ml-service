@@ -230,6 +230,27 @@ def _parse_load_options(kwargs: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+LOAD_PATH_DINOV3 = "dinov3"
+LOAD_PATH_EFFNET = "efficientnet"
+LOAD_PATH_HF_OVERLAY = "hf_overlay"
+LOAD_PATH_HF_HUB = "hf_hub"
+
+
+def resolve_load_path(opts: Dict[str, Any], version: Any) -> str:
+    """Which loader `MiewidModel.load` takes. `backbone` first; without it,
+    today's legacy dispatch exactly (spec, legacy table). Pure: no I/O."""
+    backbone = opts["backbone"]
+    checkpoint_path = opts["checkpoint_path"]
+    if backbone == BACKBONE_DINOV3_VITB16:
+        return LOAD_PATH_DINOV3
+    if backbone == BACKBONE_EFFNET or (
+            checkpoint_path and isinstance(version, (int, float)) and version >= 4):
+        return LOAD_PATH_EFFNET
+    if checkpoint_path:
+        return LOAD_PATH_HF_OVERLAY
+    return LOAD_PATH_HF_HUB
+
+
 class MiewidModel(BaseModel):
     # Backward-compatible alias for the EfficientNet/HF input size. Nothing
     # in this service reads it any more: every instance carries its own
@@ -304,12 +325,12 @@ class MiewidModel(BaseModel):
             self.use_checkpoint = False
 
         # `backbone` first; without it, today's dispatch exactly (spec, legacy table).
-        if backbone == BACKBONE_DINOV3_VITB16:
+        load_path = resolve_load_path(opts, version)
+        if load_path == LOAD_PATH_DINOV3:
             self._load_dinov3(local_checkpoint_path, device)
-        elif backbone == BACKBONE_EFFNET or (
-                checkpoint_path and isinstance(version, (int, float)) and version >= 4):
+        elif load_path == LOAD_PATH_EFFNET:
             self._load_standalone(local_checkpoint_path, device)
-        elif checkpoint_path:
+        elif load_path == LOAD_PATH_HF_OVERLAY:
             self._load_from_checkpoint(local_checkpoint_path, device, **filtered_kwargs)
         else:
             self._load_from_huggingface(device, **kwargs)
