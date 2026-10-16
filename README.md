@@ -653,7 +653,7 @@ DINOv3 entry:
 }
 ```
 
-DINOv3 and EfficientNet embeddings are separate spaces (1536-d vs 2152-d) and must never share an index or a distance threshold.
+DINOv3 and EfficientNet embeddings are separate spaces (1536-d vs 2152-d) and must never share an index or a distance threshold. Wildbook derives the embedding METHODVERSION from the text after the first dash of `model_id` (`MlServiceProcessor.parseEmbeddingMethodVersion`), so the DINOv3 entry's `model_id` must differ from every EfficientNet entry's after that dash (e.g. `miewid-msv5-dinov3` vs `miewid-msv5`).
 
 All path parameters accept URLs, which are downloaded and cached on startup.
 

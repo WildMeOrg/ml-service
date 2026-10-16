@@ -131,6 +131,7 @@ def test_explain_holds_the_model_lock_across_pairx():
     entry.inference_lock = threading.RLock()
     # Real instances build this in __init__; spec= only exposes class attrs.
     entry.preprocess = build_miewid_transform((440, 440))
+    entry.supports_pairx = True
 
     observed = {}
     loop_thread = {}

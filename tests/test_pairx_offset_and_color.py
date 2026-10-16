@@ -51,6 +51,7 @@ def _miewid_stub():
     m.inference_lock = threading.RLock()
     # Real instances build this in __init__; spec= only exposes class attrs.
     m.preprocess = build_miewid_transform((440, 440))
+    m.supports_pairx = True
     return m
 
 

@@ -38,7 +38,7 @@ def test_dev_checkpoint_loads_and_embeds():
     b = m.extract_embeddings(_jpeg(1), bbox=(10, 20, 200, 150), theta=0.2)
     assert a1.shape == (1, 1536) and a1.dtype == np.float32
     assert np.array_equal(a1, a2), "same input must embed identically"
-    cos = float((a1 @ b.T) / (np.linalg.norm(a1) * np.linalg.norm(b)))
+    cos = float((a1 @ b.T).item() / (np.linalg.norm(a1) * np.linalg.norm(b)))
     assert cos < 0.9999, "different images must not collapse to one embedding"
 
 
