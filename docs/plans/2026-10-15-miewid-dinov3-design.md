@@ -420,7 +420,7 @@ bytes. It never reimplements either decoder.
 ## Training-session inputs
 
 Received 2026-10-16 (`docs/claudeQuestions2.txt`; artifacts in
-`miewid-dinov3-dev/`):
+`/mnt/c/claude-skills/models/reference/miewid-dinov3-dev/`, outside the repo):
 
 - Backbone config dump (`dinov3_backbone_config.json`), HF revision
   `5931719e67bbdb9737e363e781fb0c67687896bc`. It matches the frozen config
