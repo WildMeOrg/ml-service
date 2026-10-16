@@ -1,4 +1,5 @@
 from .base_model import BaseModel
+import contextlib
 import logging
 import pickle
 from transformers import AutoModel
@@ -444,6 +445,12 @@ class MiewidModel(BaseModel):
     def predict(self, **kwargs):
         raise HTTPException(status_code=400, detail=f"MiewID should not be used for prediction")
 
+    def _autocast(self):
+        """fp16 autocast for DINOv3 on CUDA only (resolve_precision)."""
+        if self.precision == "fp16_autocast":
+            return torch.autocast(device_type="cuda", dtype=torch.float16)
+        return contextlib.nullcontext()
+
     def extract_embeddings(self, image_bytes: bytes, bbox: Optional[Tuple[int, int, int, int]] = None, theta: float = 0.0) -> np.ndarray:
         """
         Extract embeddings from an image using optional bounding box and rotation.
@@ -483,11 +490,19 @@ class MiewidModel(BaseModel):
             
             # Extract embeddings. The lock is held only across the forward,
             # not the decode/preprocess above it, so a slow image never blocks
-            # another endpoint's inference.
-            with self.inference_lock, torch.no_grad():
+            # another endpoint's inference. Autocast covers backbone AND neck
+            # for DINOv3 (as training evaluated) and is a no-op otherwise.
+            with self.inference_lock, torch.no_grad(), self._autocast():
                 embeddings = self.model(input_batch)
-            
-            # Convert to numpy and return
+            embeddings = embeddings.float()
+
+            # An fp16 overflow shows up as inf/NaN. Never hand that to
+            # Wildbook as an embedding: the except below turns it into the
+            # existing 500, which /extract and /pipeline both propagate.
+            if not torch.isfinite(embeddings).all():
+                raise ValueError(
+                    f"non-finite embedding from {self.backbone_name} "
+                    f"(precision {self.precision})")
             return embeddings.cpu().numpy()
             
         except Exception as e:
