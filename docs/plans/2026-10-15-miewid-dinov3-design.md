@@ -1,0 +1,310 @@
+# Design: DINOv3 backbone for the `miewid` model type (MiewID v5 DINOv3)
+
+## Context
+
+MiewID v5 is being trained in two variants on the same data split:
+
+| | shipped v5 (EfficientNet) | v5 DINOv3 (in training) |
+|---|---|---|
+| backbone | timm `efficientnetv2_rw_m` | HF transformers `facebook/dinov3-vitb16-pretrain-lvd1689m` (ViT-B/16, 4 registers) |
+| neck | GeM over feature map → BatchNorm1d | concat(CLS, GeM over 28×28 patch grid) → BatchNorm1d |
+| embedding dim | 2152 | 1536 |
+| input | 440×440 | 448×448 (must be a multiple of 16) |
+| checkpoint keys | `backbone.*` (timm), `pooling.p`, `bn.*` | `backbone.*` (HF, transformers 5.17 layout), `pooling.p`, `bn.*` |
+| eval precision | fp16 autocast (WBIA) | fp16 autocast |
+
+Neither checkpoint carries an ArcFace head. Source for the DINOv3 column: the
+training session's answers (2026-10-16, epoch 9 of 30, architecture and I/O
+declared final; weights not yet final).
+
+At matched epoch 8 the two are close on mean mAP (69.80 EffNet vs 68.89
+DINOv3), but they split cleanly by species: DINOv3 wins on faces, heads and
+whole-body patterns, while EfficientNet wins on fine edge detail (fin notches,
+fluke edges, callosities). Routing per species to the better model is worth
+about +2.7 mean mAP. **Both models will be served side by side**, and Wildbook
+will choose a `model_id` per species in its own config. ml-service doesn't need
+to know about species; each variant is just another `model_id`.
+
+Today `miewid` can only serve the DINOv3 variant by accident or not at all:
+
+1. `MiewIdNet` hardcodes `efficientnetv2_rw_m` and `backbone.classifier`
+   (`app/models/miewid.py:38-52`).
+2. ml-service pins `transformers==4.52.4` and `torch==2.1.2`; 4.52 has no
+   DINOv3. 4.56 has it and still accepts torch 2.1, but names encoder layers
+   `layer.*` while the training run's 5.17 names them `model.layer.*`, so the
+   checkpoint would not load strictly. transformers ≥ 5.4 requires torch ≥ 2.4.
+3. `facebook/dinov3-*` repos on the HF Hub are licence-gated, so
+   `AutoModel.from_pretrained` at runtime would need credentials, which is
+   unacceptable for a service that already has every backbone weight in
+   the checkpoint.
+4. `IMAGE_SIZE = (440, 440)` is a class constant, and `/explain` rebuilds its
+   transform from it (`app/routers/explain_router.py:65-69`), so a 448 model
+   would silently get 440 inputs there.
+5. PairX treats hooked outputs as spatial maps and only has CNN canonizers; the
+   default `layer_key` `backbone.blocks.3` is EfficientNet-specific.
+
+## Goal
+
+One `model_type: "miewid"` that serves, per `model_id`, either the existing
+backbones (HF msv2/msv3, standalone EfficientNet) or the DINOv3 ViT-B/16
+variant. Embeddings from the DINOv3 variant must match the training repo's
+`MiewIdNet` within an agreed tolerance on fixed reference chips.
+
+## Non-goals
+
+- Per-species routing (Wildbook config).
+- PairX `/explain` for the DINOv3 variant (fails closed, see below).
+- Any dependency bump. torch, torchvision, timm, transformers and albumentations
+  pins and the fidelity contract in `requirements.txt` are unchanged.
+- Other DINOv3 sizes (ViT-S/L/H). The vendored module is config-driven, so
+  adding one later means adding a frozen config and a parity run, not new code.
+- Changing EfficientNet precision (stays fp32; see Precision).
+
+## Design
+
+Approach **A** (chosen 2026-10-15; Codex recommended it independently): vendor a
+minimal pure-PyTorch DINOv3 ViT, built from a frozen local config, with
+parameter names identical to transformers 5.17 so the checkpoint loads strictly
+with no key remap. Rejected alternatives: **B**, bumping transformers to
+4.56/4.57 (needs a key remap, runs different code than training, and the global
+bump re-opens msv2/msv3 `trust_remote_code` and the fidelity contract); and
+**C**, timm 1.0.25's DINOv3 with HF→timm remapping (QKV fusion, Q/V bias
+handling, and RoPE written as periods rather than inverse frequencies make
+equivalence the hardest to establish).
+
+### Config contract
+
+A new optional field, `backbone`, selects the network. It is checked **before**
+the legacy `version` logic:
+
+```json
+{
+  "model_id": "miewid-msv5-dinov3",
+  "model_type": "miewid",
+  "backbone": "dinov3_vitb16",
+  "checkpoint_path": "/datasets/miew_id.msv5_dinov3.bin",
+  "version": 5
+}
+```
+
+| `backbone` | behaviour |
+|---|---|
+| absent | unchanged: checkpoint + numeric `version >= 4` → standalone EfficientNet; checkpoint + lower version → HF overlay; no checkpoint → HF hub msv2/msv3 |
+| `"efficientnetv2_rw_m"` | standalone EfficientNet (explicit form of today's v4+ path; requires `checkpoint_path`) |
+| `"dinov3_vitb16"` | vendored DINOv3 network; requires `checkpoint_path` |
+| anything else | `ValueError` at load, naming the supported values |
+
+An existing EfficientNet entry with `version: 5` and no `backbone` stays
+EfficientNet. `version` stays informational for the new values. The training
+repo's `dinov3:<hf-id>` prefix is not accepted as a selector, so there is one
+way to say it.
+
+Image size, embedding dim and precision come from the backbone, not from the
+config. Optional `imgsz` and `embedding_dim` fields, if present, are
+**assertions**: a mismatch with the resolved value raises at load. Today `imgsz`
+only feeds `model_info`, so this changes nothing for existing entries unless
+they set a wrong value; the plan includes auditing prod entries for that.
+
+### Code layout
+
+```
+app/models/miewid.py          MiewidModel (public, unchanged name), MiewIdNet (EffNet, unchanged),
+                              DinoV3MiewIdNet (new), backbone dispatch
+app/models/dinov3_vit.py      vendored DINOv3 ViT (new, ~250 lines) + frozen VITB16 config
+```
+
+`MiewidModel` stays the one class in `MODEL_REGISTRY` and the one class the
+routers check with `isinstance` (`extract_router.py:88`,
+`pipeline_router.py:121`, `explain_router.py:59`). Decoding, `get_chip_from_img`
+cropping, albumentations preprocessing, `inference_lock` and numpy conversion
+stay shared.
+
+### Vendored backbone: `app/models/dinov3_vit.py`
+
+Derived from `transformers==5.17.0`
+`models/dinov3_vit/modeling_dinov3_vit.py` (Apache-2.0; licence header and
+source version recorded at the top of the file). Kept: `Embeddings` (CLS,
+register tokens, mask_token, patch conv), `RopePositionEmbedding`, `Attention`,
+`LayerScale`, `MLP`, `Layer`, `Encoder`, `Model`. Module attribute names are
+preserved exactly so `state_dict` keys match training
+(`embeddings.*`, `model.layer.N.*`, `norm.*`; `rope_embeddings` holds only a
+non-persistent `inv_freq` buffer).
+
+Stripped: `PreTrainedModel`, gradient checkpointing, output-capturing
+decorators, drop-path, training-time RoPE augmentation (shift/jitter/rescale
+only run when `self.training`), gated MLP, the `Backbone` head, and the
+attention-function registry.
+
+Behaviour that must survive the port:
+
+- RoPE angles computed in **fp32 with autocast disabled**, then cast to the
+  input dtype (5.17 does this with `maybe_autocast(enabled=False)`; the port
+  uses `torch.autocast(device_type, enabled=False)`).
+- RoPE applied to patch tokens only, skipping the 1 + 4 prefix tokens.
+- LayerScale on both residual branches (active in eval; weights come from the
+  checkpoint).
+- Final `norm` applied to every token before the neck.
+- Attention through `torch.nn.functional.scaled_dot_product_attention` if
+  training used `sdpa`, otherwise the eager matmul/softmax. Which one is an
+  open question for the training session (it changes fp16 numerics).
+- torch 2.1-compatible: `register_buffer(..., persistent=False)` instead of
+  `nn.Buffer` (torch ≥ 2.5), and no `enable_gqa`.
+
+The frozen ViT-B/16 config is a Python constant, not a downloaded file:
+hidden 768, intermediate 3072, 12 layers, 12 heads, 4 register tokens, patch
+16, rope_theta 100, layer_norm_eps 1e-5, query/value/proj/mlp bias on, key bias
+off, layerscale on, gelu, no gated MLP. These values come from the 5.17 defaults
+plus the training answers; a unit test compares the constant against the
+training run's `backbone.config.to_dict()` dump, committed as a test fixture.
+
+### Network: `DinoV3MiewIdNet`
+
+```python
+tok   = self.backbone(x)                          # (B, 5 + h*w, 768), after final norm
+cls   = tok[:, 0]
+patch = tok[:, 5:]                                # skip CLS + 4 registers
+grid  = patch.transpose(1, 2).reshape(B, 768, h, w)
+feat  = torch.cat([cls, self.pooling(grid).flatten(1)], dim=1)   # (B, 1536)
+return self.bn(feat)                              # BatchNorm1d(1536)
+```
+
+`h = w = 448 / 16 = 28`. The forward asserts the token count is
+`5 + h*w` and raises `ValueError` otherwise. GeM is the existing `GeM` class
+(learnable `p`, loaded from `pooling.p`). The raw BN output is returned with no
+L2 normalisation, as with EfficientNet.
+
+### Loading
+
+- `torch.load(path, map_location="cpu", weights_only=True)` → must be a bare
+  `dict` of tensors. A wrapped resume checkpoint (`model_state_dict`,
+  `optimizer`, …) is rejected with a message telling the operator to ship
+  `model_best.bin` instead.
+- Before `load_state_dict`, check the selection against the keys: DINOv3
+  requires `backbone.embeddings.register_tokens` and `bn.weight` of shape
+  `(1536,)`; EfficientNet requires `backbone.conv_stem.weight`. A mismatch
+  raises a `ValueError` naming both the configured backbone and what the
+  checkpoint looks like. The keys only ever validate, never switch, the
+  architecture.
+- `load_state_dict(strict=True)`. Unexpected `final.*` keys (an ArcFace head)
+  are rejected, not stripped. Neither v5 artifact carries one, and the
+  WBIA-converted v4 checkpoints that do are a separate, existing problem.
+- The checkpoint's SHA-256 is computed at load and reported in `model_info`.
+  The checkpoint cache is keyed by URL, so an overwritten URL can serve stale
+  weights; the digest makes that visible.
+- Sequence: build the network on CPU, load the state, `eval()`, move to device,
+  drop the CPU state dict.
+
+### Preprocessing and per-instance image size
+
+`MiewidModel.IMAGE_SIZE` is replaced by `self.image_size`, set from the backbone:
+`(440, 440)` for HF and EfficientNet, `(448, 448)` for DINOv3. `self.preprocess`
+is built from it, using the same albumentations `Resize` → `Normalize()`
+(ImageNet) → `ToTensorV2` chain and the same `get_chip_from_img`. No HF image
+processor.
+
+`explain_router.preprocess` reuses `model.preprocess` instead of rebuilding the
+transform from the class constant. The class constant is kept as a
+backward-compatible alias equal to 440, with no remaining internal readers.
+
+### Precision
+
+DINOv3 forwards run under `torch.autocast("cuda", dtype=torch.float16)` on CUDA,
+covering backbone and neck, inside the existing `inference_lock` and
+`no_grad`. Weights stay fp32 (no `.half()`). The output is cast to float32
+before numpy. This matches training eval (`eval_fn.py:18`) and costs nothing in
+compatibility: the 1536-d space is new, so there is no existing index to stay
+consistent with.
+
+On CPU (no autocast), DINOv3 runs fp32 and logs a warning once at load.
+`model_info.precision` reports the effective mode (`"fp16_autocast"` or
+`"fp32"`).
+
+EfficientNet and HF variants stay fp32. Switching them to autocast would move
+embeddings against every existing Wildbook index; that is a separate decision.
+
+### PairX `/explain`
+
+`MiewidModel` gets a `supports_pairx` attribute: `True` for HF and EfficientNet,
+`False` for DINOv3. `/explain` checks it right after resolving the model id,
+**before** fetching any image, and returns
+`400 {"detail": "PairX is not supported for model '<id>' (backbone dinov3_vitb16)"}`.
+This holds even when the caller passes an explicit `layer_key`, since a
+DINOv3 module name would pass the existing `named_modules()` check and then
+fail deep inside PairX.
+
+Supporting PairX on ViTs (a module exposing the patch grid as
+`(B, 768, 28, 28)` plus validated transformer relevance propagation) is
+separate work.
+
+### `model_info`
+
+Adds to the existing keys: `backbone`, `image_size`, `embedding_dim`,
+`precision`, `checkpoint_sha256`, `supports_pairx`. Existing keys
+(`model_type`, `device`, `imgsz`, `version`, `checkpoint_path`,
+`use_checkpoint`) keep their meaning. `imgsz` now reports the resolved size.
+
+### Responses
+
+Unchanged. `/extract` and `/pipeline` already return a flat embedding list whose
+length follows the model; DINOv3 returns 1536 floats. Embeddings are checked
+for finiteness after the forward (fp16 overflow would show up as `inf`); a
+non-finite embedding raises the existing 500 path rather than returning NaNs to
+Wildbook.
+
+## Resource cost
+
+ViT-B/16 is about 86M backbone params (~345 MB fp32 resident), similar to
+`efficientnetv2_rw_m` (~53M). At 448, 789 tokens per image, so attention is
+cheap. Peak VRAM with all prod models loaded plus one DINOv3 instance is
+measured on the target GPU before deploy (plan task), not assumed.
+
+## Test plan
+
+Unit (CPU, no network, synthetic weights):
+
+- Dispatch: no `backbone` + v3/v4/v5 → today's paths; `"efficientnetv2_rw_m"`;
+  `"dinov3_vitb16"`; unknown value → `ValueError`; DINOv3 without
+  `checkpoint_path` → `ValueError`.
+- Vendored module: `state_dict` key set and shapes equal the training key
+  manifest (fixture from the training session); frozen config equals the
+  training config dump.
+- Forward: (1, 3, 448, 448) → (1, 1536); registers excluded (perturbing
+  register-token outputs leaves the GeM half unchanged); wrong input size →
+  `ValueError`.
+- Loading: resume-format checkpoint rejected; DINOv3 config + EffNet checkpoint
+  (and vice versa) rejected with the named mismatch; `final.*` rejected.
+- Image size: DINOv3 instance preprocesses to 448, EffNet to 440, both loaded
+  together; `/explain` preprocessing uses the instance transform.
+- `/explain` with a DINOv3 model id → 400 before any image fetch (assert the
+  fetch mock is never called), with and without `layer_key`.
+- `model_info` fields for both variants.
+- Existing EffNet/HF and PairX concurrency tests unchanged and passing.
+
+Parity gate (release-blocking, run in the production image on the production
+GPU):
+
+1. **Architecture parity.** Identical saved preprocessed tensors through the
+   training `MiewIdNet` (transformers 5.17, training venv) and
+   `DinoV3MiewIdNet`; compare final tokens, the concat feature, and BN output.
+2. **End-to-end parity.** Identical image bytes, bbox and theta, including
+   EXIF-rotated images, θ ≠ 0, boxes overhanging the frame, and full-frame;
+   compare chips, input tensors and embeddings.
+3. Report max abs error, cosine distance and top-k retrieval agreement on a
+   fixed gallery from at least three DINOv3-routed species. Thresholds are
+   agreed with the training owner before release; the proposed defaults are
+   cosine distance ≤ 1e-3 per embedding and identical top-5 on ≥ 99% of
+   queries.
+
+The gate runs against the final checkpoint. Development uses the epoch-8
+`model_best.bin` (md5 `50f0c1d5…`).
+
+## Open questions for the training session
+
+1. `backbone.config.to_dict()` dump and the HF revision (commit hash) of
+   `facebook/dinov3-vitb16-pretrain-lvd1689m` that was used.
+2. The full `state_dict` key → shape manifest of `model_best.bin`.
+3. `backbone.config._attn_implementation` at eval (`sdpa` or `eager`), GPU
+   model, and TF32 setting.
+4. 10–20 reference chips with their input tensors and embeddings from the
+   training `MiewIdNet` (under autocast, as eval runs), for the parity gate.
+5. Final artifact name, immutable URL, and SHA-256 once training ends.
