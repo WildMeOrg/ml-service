@@ -1,0 +1,50 @@
+{
+  "_note": "INPUT manifest for the MiewID DINOv3 parity gate. Inputs and limits only; both implementations are executed live. Thresholds are PROPOSED until agreed with the training owner (spec, Parity gate step 3); the gate prints that status. Chip limits allow small JPEG-decoder differences (cv2.imread vs Pillow) and nothing else.",
+  "thresholds_status": "proposed",
+  "thresholds": {
+    "arch": {
+      "tokens":    {"max_abs": 5e-2, "rel_l2": 1e-2},
+      "concat":    {"max_abs": 5e-2, "rel_l2": 1e-2},
+      "embedding": {"max_abs": 5e-2, "rel_l2": 1e-2}
+    },
+    "e2e": {
+      "chip":      {"max_abs": 8, "mean_abs": 0.5},
+      "input":     {"max_abs": 5e-2, "rel_l2": 1e-2},
+      "embedding": {"max_abs": 5e-2, "rel_l2": 1e-2}
+    },
+    "cosine_distance_max": 1e-3,
+    "top5_agreement_min": 0.99,
+    "negative_control_scale": 1.05
+  },
+  "checkpoint": {
+    "path": "/datasets/miew_id.msv5_dinov3.bin",
+    "sha256": "<final sha256 from the training session>"
+  },
+  "expected_chips": [
+    {"case": "theta_nonzero", "species": "bowhead_whale", "name": "56462"},
+    {"case": "theta_nonzero", "species": "bowhead_whale", "name": "56465"},
+    {"case": "theta_nonzero", "species": "aetobatus_sp", "name": "96119"},
+    {"case": "theta_nonzero", "species": "aetobatus_sp", "name": "96053"},
+    {"case": "bbox_overhang", "species": "bowhead_whale", "name": "56466"},
+    {"case": "bbox_overhang", "species": "lion", "name": "36100"},
+    {"case": "bbox_overhang", "species": "bottlenose_dolphin", "name": "36"},
+    {"case": "full_frame", "species": "dog", "name": "32937"},
+    {"case": "full_frame", "species": "dog", "name": "32938"},
+    {"case": "full_frame", "species": "chimpanzee_ctai", "name": "38402"},
+    {"case": "plain_dinov3", "species": "snow_leopard", "name": "9077"},
+    {"case": "plain_dinov3", "species": "sheep", "name": "77725"},
+    {"case": "plain_dinov3", "species": "whale_orca", "name": "19150"},
+    {"case": "plain_effnet", "species": "lizard_balearic", "name": "76749"},
+    {"case": "plain_effnet", "species": "right_whale+head_aerial", "name": "70150"},
+    {"case": "exif_rotated", "species": "elephant", "name": "74136"},
+    {"case": "exif_rotated", "species": "elephant+left_ear", "name": "74170"},
+    {"case": "exif_rotated", "species": "elephant+head", "name": "74137"},
+    {"case": "exif_rotated", "species": "trout", "name": "76579"}
+  ],
+  "known_divergence": [
+    {"case": "bbox_overhang", "species": "bowhead_whale", "name": "56466", "reason": "service get_chip_from_img pads overhanging boxes (crop_rect); training helper clamps and slices — pre-existing divergence, decision pending"},
+    {"case": "bbox_overhang", "species": "lion", "name": "36100", "reason": "service get_chip_from_img pads overhanging boxes (crop_rect); training helper clamps and slices — pre-existing divergence, decision pending"},
+    {"case": "bbox_overhang", "species": "bottlenose_dolphin", "name": "36", "reason": "service get_chip_from_img pads overhanging boxes (crop_rect); training helper clamps and slices — pre-existing divergence, decision pending"}
+  ],
+  "bbox_modes": ["router", "float"]
+}
