@@ -1,0 +1,24 @@
+{
+  "_note": "INPUT manifest for the MiewID DINOv3 parity gate. Inputs and limits only; both implementations are executed live. Thresholds are PROPOSED until agreed with the training owner (spec, Parity gate step 3); the gate prints that status. Chip limits allow small JPEG-decoder differences (cv2.imread vs Pillow) and nothing else.",
+  "thresholds_status": "proposed",
+  "thresholds": {
+    "arch": {
+      "tokens":    {"max_abs": 5e-2, "rel_l2": 1e-2},
+      "concat":    {"max_abs": 5e-2, "rel_l2": 1e-2},
+      "embedding": {"max_abs": 5e-2, "rel_l2": 1e-2}
+    },
+    "e2e": {
+      "chip":      {"max_abs": 8, "mean_abs": 0.5},
+      "input":     {"max_abs": 5e-2, "rel_l2": 1e-2},
+      "embedding": {"max_abs": 5e-2, "rel_l2": 1e-2}
+    },
+    "cosine_distance_max": 1e-3,
+    "top5_agreement_min": 0.99,
+    "negative_control_scale": 1.05
+  },
+  "checkpoint": {
+    "path": "/datasets/miew_id.msv5_dinov3.bin",
+    "sha256": "<final sha256 from the training session>"
+  },
+  "bbox_modes": ["router", "float"]
+}
