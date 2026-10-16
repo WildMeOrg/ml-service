@@ -83,7 +83,8 @@ the legacy `version` logic:
   "model_type": "miewid",
   "backbone": "dinov3_vitb16",
   "checkpoint_path": "/datasets/miew_id.msv5_dinov3.bin",
-  "version": 5
+  "version": 5,
+  "checkpoint_sha256": "<64 hex chars, from the training session>"
 }
 ```
 
@@ -236,9 +237,19 @@ missing/unexpected keys, unchanged.
 - `load_state_dict(strict=True)`. Unexpected `final.*` keys (an ArcFace head)
   are rejected, not stripped. Neither v5 artifact carries one, and the
   WBIA-converted v4 checkpoints that do are a separate, existing problem.
-- The checkpoint's SHA-256 is computed at load and reported in `model_info`.
-  The checkpoint cache is keyed by URL, so an overwritten URL can serve stale
-  weights; the digest makes that visible.
+- The checkpoint's SHA-256 is computed at load (streamed, from the local cached
+  file) and reported in `model_info`.
+- Optional `checkpoint_sha256` config field (approved 2026-10-16): when set,
+  the computed digest must equal it (case-insensitive, 64 hex chars; any other
+  format raises) or the load raises `ValueError` naming the expected and actual
+  digests and the local file path. The checkpoint cache is keyed by URL
+  (`app/utils/checkpoint_utils.py`), so a file replaced at the same URL would
+  otherwise be served stale with no signal. A load failure already aborts
+  startup (`app/main.py:155`), so a mismatch fails closed and loudly. The field
+  applies to **every** path that has a `checkpoint_path`, including the legacy
+  HF overlay; setting it without `checkpoint_path` raises. It is optional for
+  existing entries and **required in practice for the DINOv3 release entry**
+  (deploy checklist, not code-enforced).
 - Sequence: build the network on CPU, load the state, `eval()`, move to device,
   drop the CPU state dict.
 
@@ -350,6 +361,11 @@ Unit (CPU, no network, synthetic weights):
   and HF forwards never enter autocast.
 - Finiteness: a model whose forward returns NaN, +Inf or −Inf makes `/extract`
   and `/pipeline` return the 500 path, not a NaN embedding.
+- `checkpoint_sha256`: matching digest (lower and upper case) loads; a
+  mismatching digest raises naming expected/actual; a malformed value
+  (`"abc"`, 63 chars, non-hex) raises; set without `checkpoint_path` raises;
+  works on the HF overlay path too; `model_info.checkpoint_sha256` is the
+  computed digest either way.
 - Loading: resume-format checkpoint rejected; DINOv3 config + EffNet checkpoint
   (and vice versa) rejected with the named mismatch; `final.*` rejected.
 - Image size: DINOv3 instance preprocesses to 448, EffNet to 440, both loaded
