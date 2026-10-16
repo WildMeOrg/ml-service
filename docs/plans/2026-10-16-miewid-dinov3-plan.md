@@ -150,8 +150,10 @@ def main(out_path):
         "tokens": tok,
         "concat": feat,
         "embedding": emb,
-        "transformers_version": transformers.__version__,
-        "torch_version": torch.__version__,
+        # Plain str: torch.__version__ is a TorchVersion object, which
+        # torch.load(weights_only=True) refuses to unpickle.
+        "transformers_version": str(transformers.__version__),
+        "torch_version": str(torch.__version__),
     }, out_path)
     print(f"wrote {out_path}: tokens {tuple(tok.shape)}, embedding {tuple(emb.shape)}")
 
@@ -1202,6 +1204,26 @@ def test_real_dinov3_load(dinov3_ckpt):
     assert m.embedding_dim == 1536
     assert m.supports_pairx is False
     assert m.checkpoint_sha256 == sha256_file(dinov3_ckpt)
+    assert m.model.device == torch.device("cpu")
+
+
+def test_install_sets_model_device_for_pairx():
+    """PairX reads model.device (pairx/core.py:288); plain nn.Modules lack it."""
+    m = MiewidModel()
+    m._install(nn.Linear(2, 2), "cpu")
+    assert m.model.device == torch.device("cpu")
+
+
+def test_reused_instance_does_not_inherit_state(recorder, empty_ckpt):
+    m = MiewidModel()
+    m.load(device="cpu", model_id="t", checkpoint_path=empty_ckpt, backbone=BACKBONE_DINOV3_VITB16)
+    assert (m.image_size, m.supports_pairx, m.embedding_dim) == ((448, 448), False, 1536)
+    m.load(device="cpu", model_id="t", checkpoint_path=empty_ckpt, version=4)
+    assert (m.image_size, m.supports_pairx, m.embedding_dim) == ((440, 440), True, 2152)
+    assert tuple(m.preprocess(image=torch.zeros(9, 9, 3).numpy().astype("uint8"))["image"].shape) == (3, 440, 440)
+    m.load(device="cpu", model_id="t", version=3)
+    assert m.embedding_dim is None and m.checkpoint_sha256 is None
+    assert m.backbone_name == "hf:conservationxlabs/miewid-msv3"
 
 
 def test_legacy_v4_with_arcface_head_names_the_head(tmp_path):
@@ -1294,9 +1316,15 @@ In `class MiewidModel`, replace the `IMAGE_SIZE` comment block and constant with
     # in this service reads it any more: every instance carries its own
     # `image_size` (448 for DINOv3), and /explain uses `model.preprocess`.
     IMAGE_SIZE = (440, 440)
-    # Class-level defaults so MagicMock(spec=MiewidModel) stubs expose them.
+    # Class-level defaults: MagicMock(spec=MiewidModel) stubs expose them, and
+    # tests that build instances with MiewidModel.__new__ (skipping __init__)
+    # still get a working fp32 extract_embeddings.
     supports_pairx = True
     backbone_name: Optional[str] = None
+    precision = "fp32"
+    embedding_dim: Optional[int] = None
+    checkpoint_sha256: Optional[str] = None
+    image_size = IMAGE_SIZE
 ```
 
 At the end of `__init__` (after `self.inference_lock = threading.Lock()`), add:
@@ -1318,6 +1346,14 @@ Replace `load` entirely:
     def load(self, model_path: str = "", device: str = "cuda", **kwargs) -> None:
         opts = _parse_load_options(kwargs)
         self.device = device
+        # Reset everything a previous load() resolved, so reusing an instance
+        # (DINOv3 -> EfficientNet -> HF) never inherits 448, supports_pairx
+        # False, an old embedding_dim or an old digest.
+        self.image_size = self.IMAGE_SIZE
+        self.backbone_name = None
+        self.embedding_dim = None
+        self.checkpoint_sha256 = None
+        self.supports_pairx = True
         checkpoint_path = opts["checkpoint_path"]
         backbone = opts["backbone"]
         version = kwargs.get('version', 3)
@@ -1401,6 +1437,13 @@ Replace `_load_standalone`, and add `_install` and `_load_dinov3`:
     def _install(self, model: nn.Module, device: str) -> None:
         model.eval()
         model.to(device)
+        # PairX reads model.device directly (pairx/core.py:288), and plain
+        # nn.Modules have no such property. _apply_checkpoint set this for
+        # the standalone path before; keep doing it.
+        try:
+            model.device = torch.device(device)
+        except AttributeError:
+            pass  # HuggingFace models have a read-only .device property
         self.model = model
 
     def _load_standalone(self, checkpoint_path: str, device: str) -> None:
@@ -1558,6 +1601,17 @@ class _Const(torch.nn.Module):
         return torch.full((x.shape[0], self.dim), self.value)
 
 
+def test_new_without_init_still_extracts_fp32():
+    """Existing tests build instances via MiewidModel.__new__ (skipping
+    __init__); class-level defaults must keep extract_embeddings working."""
+    m = MiewidModel.__new__(MiewidModel)
+    m.inference_lock = threading.RLock()
+    m.device = "cpu"
+    m.model = _Const(1.0)
+    m.preprocess = build_miewid_transform((440, 440))
+    assert m.extract_embeddings(_rgb_png()).shape == (1, 8)
+
+
 def test_bare_instance_defaults():
     m = MiewidModel()
     assert MiewidModel.IMAGE_SIZE == (440, 440)
@@ -1614,8 +1668,12 @@ def test_dinov3_cuda_precision_selects_fp16_autocast(monkeypatch):
 def test_dinov3_runs_fp16_internally_on_cuda_and_returns_float32():
     m = _tiny_dinov3_model(device="cuda", precision="fp16_autocast")
     seen = {}
-    m.model.backbone.model.layer[0].mlp.up_proj.register_forward_hook(
-        lambda mod, inp, out: seen.setdefault("dtype", out.dtype))
+
+    def record_dtype(mod, inp, out):
+        # Must return None: a non-None return REPLACES the module output.
+        seen["dtype"] = out.dtype
+
+    m.model.backbone.model.layer[0].mlp.up_proj.register_forward_hook(record_dtype)
     emb = m.extract_embeddings(_rgb_png())
     assert seen["dtype"] == torch.float16
     assert next(m.model.parameters()).dtype == torch.float32
@@ -1658,7 +1716,9 @@ def test_extract_endpoint_returns_500_not_nan():
     client = _app(extract_router.router, {"e": _nan_model()}, {"e": {"config": {"version": 5}}})
     r = client.post("/extract/", json={"model_id": "e", "image_uri": DATA_URI})
     assert r.status_code == 500, r.text
-    assert "NaN" not in r.text
+    # FastAPI already 500s on NaN JSON, so "500" alone passes vacuously; the
+    # guard's own message proves extraction ran and the guard fired.
+    assert "non-finite embedding" in r.text, r.text
 
 
 def test_pipeline_endpoint_returns_500_not_nan():
@@ -1672,7 +1732,9 @@ def test_pipeline_endpoint_returns_500_not_nan():
     r = client.post("/pipeline/", json={"predict_model_id": "p", "extract_model_id": "e",
                                         "image_uri": DATA_URI})
     assert r.status_code == 500, r.text
-    assert "NaN" not in r.text
+    # FastAPI already 500s on NaN JSON, so "500" alone passes vacuously; the
+    # guard's own message proves extraction ran and the guard fired.
+    assert "non-finite embedding" in r.text, r.text
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -1992,41 +2054,7 @@ docker run --rm --gpus all --entrypoint "" -v "$PWD:/src" -w /src \
 ```
 Expected: all pass, including the CUDA-only test (no `--gpus all` → it skips; report which). This is the check that the vendored module runs on torch 2.1.2. A failure here that does not reproduce on the dev host is a torch-2.1 incompatibility: fix it in `dinov3_vit.py` and re-run the Task 1 golden test.
 
-- [ ] **Step 4b: Measure GPU memory (spec, "Resource cost")**
-
-Write this to `/tmp/vram_probe.py` (scratch, not committed):
-
-```python
-import io
-
-import numpy as np
-import torch
-from PIL import Image
-
-from app.models.miewid import MiewidModel
-
-R = "/mnt/c/claude-skills/models/reference"
-dino, eff = MiewidModel(), MiewidModel()
-dino.load(device="cuda", model_id="d", backbone="dinov3_vitb16",
-          checkpoint_path=f"{R}/miewid-dinov3-dev/miew_id.msv5_dinov3.DEV-ep10.bin")
-eff.load(device="cuda", model_id="e", version=5,
-         checkpoint_path=f"{R}/miewIDv5/_model/miew_id.msv5_main.bin")
-buf = io.BytesIO()
-Image.fromarray(np.zeros((1200, 1600, 3), np.uint8)).save(buf, format="JPEG")
-torch.cuda.reset_peak_memory_stats()
-dino.extract_embeddings(buf.getvalue())
-eff.extract_embeddings(buf.getvalue())
-print(f"resident {torch.cuda.memory_allocated() / 2**20:.0f} MiB, "
-      f"peak {torch.cuda.max_memory_allocated() / 2**20:.0f} MiB")
-```
-
-```bash
-docker run --rm --gpus all --entrypoint "" -v "$PWD:/src" -w /src \
-  -v /tmp/vram_probe.py:/tmp/vram_probe.py:ro \
-  -v /mnt/c/claude-skills/models/reference:/mnt/c/claude-skills/models/reference:ro \
-  ml-service python3 /tmp/vram_probe.py
-```
-Record both numbers in the PR description. The DINOv3 instance's increment is what the prod GPU must have free on top of today's models.
+GPU memory is measured on the production host with the full prod registry (Task 8's `vram_probe.py`; see "After the plan"), not here: one EfficientNet beside DINOv3 does not represent the prod GPU.
 
 - [ ] **Step 5: List prod MiewID entries that set `imgsz` or `embedding_dim`**
 
@@ -2057,18 +2085,23 @@ Co-Authored-By: Codex <noreply@openai.com>"
 ### Task 8: Parity-gate tooling (release-blocking; runs on the final checkpoint)
 
 **Files:**
+- Create: `scripts/preflight/miewid_dinov3/__init__.py` (empty)
 - Create: `scripts/preflight/miewid_dinov3/metrics.py`
 - Create: `scripts/preflight/miewid_dinov3/reference_runner.py`
 - Create: `scripts/preflight/miewid_dinov3/run_gate.py`
+- Create: `scripts/preflight/miewid_dinov3/vram_probe.py`
 - Create: `scripts/preflight/miewid_dinov3/manifest.json`
 - Create: `scripts/preflight/miewid_dinov3/README.md`
 - Test: `tests/test_miewid_dinov3_gate_metrics.py`
 
 **Interfaces:**
-- Consumes: `MiewidModel`, `DinoV3MiewIdNet.forward_stages` (Tasks 2, 4, 5).
-- Produces: `metrics.max_abs(a, b) -> float`, `metrics.rel_l2(a, b) -> float` (‖a−b‖/‖b‖), `metrics.cosine_distance(a, b) -> float`, `metrics.topk_agreement(ref: ndarray[N,D], got: ndarray[N,D], k: int) -> float`, `metrics.check_stage(name, got, ref, limits) -> dict` with `{"stage", "max_abs", "rel_l2", "pass"}`; the reference artifact format `reference.npz` + `reference.json` described below.
+- Consumes: `MiewidModel`, `DinoV3MiewIdNet.forward_stages`, `MiewidModel._autocast` (Tasks 2, 4, 5); `ModelHandler` (existing).
+- Produces: `metrics.max_abs`, `metrics.mean_abs`, `metrics.rel_l2` (‖a−b‖/‖b‖), `metrics.cosine_distance`, `metrics.topk_agreement(got, ref, k) -> float`, `metrics.check_stage(name, got, ref, limits) -> {"stage", "max_abs", "rel_l2", "pass"}` (raises `ValueError` on a shape mismatch, never broadcasts), `metrics.check_chip(got_uint8, ref_uint8, limits) -> {"shape_equal", "max_abs", "mean_abs", "pass"}`; `router_bbox(bbox) -> tuple` (in `metrics.py`, `tuple(int(v) for v in bbox)`, exactly `/extract`'s conversion: truncation toward zero, not floor); the reference artifact (`reference.npz`, `reference.json`, `reference_chips.csv`) described in Step 5.
 
-The gate has two halves because the two implementations need different stacks. `reference_runner.py` runs in the **training venv** (transformers 5.17, torch 2.6) with the training repo's own code. `run_gate.py` runs in the **production image** (torch 2.1.2). They meet through files: same image bytes in, per-stage arrays out.
+The gate has two halves because the two implementations need different stacks. `reference_runner.py` runs in the **training venv** (transformers 5.17, torch 2.6) with the training repo's own code. `run_gate.py` runs in the **production image** (torch 2.1.2). They meet through files: same image bytes in, per-stage arrays out. Both halves are run for **two bbox modes**, each gated on its own, so implementation error is never mixed with coordinate rounding:
+
+- `router`: `router_bbox(bbox)`, which is what `/extract` hands `extract_embeddings` in production.
+- `float`: the CSV floats as training passes them.
 
 - [ ] **Step 1: Write the failing metrics tests**
 
@@ -2079,6 +2112,7 @@ The gate has two halves because the two implementations need different stacks. `
 top-k are both blind to a uniformly scaled embedding, so the raw-error check
 must catch it or the gate is not live."""
 import numpy as np
+import pytest
 
 from scripts.preflight.miewid_dinov3 import metrics
 
@@ -2100,6 +2134,11 @@ def test_scaled_embedding_fails_raw_check_but_not_cosine():
     assert metrics.topk_agreement(scaled, a, 5) == 1.0
 
 
+def test_shape_mismatch_raises_instead_of_broadcasting():
+    with pytest.raises(ValueError, match="shape"):
+        metrics.check_stage("embedding", np.zeros((1, 1536)), np.zeros((19, 1536)), LIMITS)
+
+
 def test_rel_l2_and_max_abs():
     ref = np.array([3.0, 4.0])
     got = np.array([3.0, 4.5])
@@ -2113,6 +2152,19 @@ def test_topk_agreement_detects_reordering():
     got = ref.copy()
     got[[0, 1]] = got[[1, 0]]
     assert metrics.topk_agreement(got, ref, 3) < 1.0
+
+
+def test_check_chip():
+    a = np.zeros((10, 12, 3), np.uint8)
+    lim = {"max_abs": 8, "mean_abs": 0.5}
+    assert metrics.check_chip(a, a, lim)["pass"]
+    assert not metrics.check_chip(a, np.zeros((12, 10, 3), np.uint8), lim)["pass"]
+    b = a.copy(); b[0, 0, 0] = 200
+    assert not metrics.check_chip(b, a, lim)["pass"]
+
+
+def test_router_bbox_truncates_toward_zero():
+    assert metrics.router_bbox([612.9, -213.7, 1101.0, 2226.5]) == (612, -213, 1101, 2226)
 ```
 
 - [ ] **Step 2: Run them to verify they fail**
@@ -2120,7 +2172,7 @@ def test_topk_agreement_detects_reordering():
 Run: `python3 -m pytest tests/test_miewid_dinov3_gate_metrics.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'scripts.preflight.miewid_dinov3'`.
 
-- [ ] **Step 3: Implement `metrics.py`**
+- [ ] **Step 3: Implement `metrics.py`** (and create the empty `__init__.py`)
 
 ```python
 """Parity-gate metrics for the MiewID DINOv3 port. Pure numpy, no torch, so
@@ -2128,17 +2180,37 @@ the same code scores runs from either environment."""
 import numpy as np
 
 
+def router_bbox(bbox):
+    """Exactly /extract's conversion (extract_router.py): int() truncates
+    toward zero, so -213.7 -> -213, not -214."""
+    return tuple(int(v) for v in bbox)
+
+
+def _pair(got, ref):
+    got, ref = np.asarray(got, np.float64), np.asarray(ref, np.float64)
+    if got.shape != ref.shape:
+        raise ValueError(f"shape mismatch: got {got.shape}, ref {ref.shape}")
+    return got, ref
+
+
 def max_abs(got, ref) -> float:
-    return float(np.max(np.abs(np.asarray(got, np.float64) - np.asarray(ref, np.float64))))
+    got, ref = _pair(got, ref)
+    return float(np.max(np.abs(got - ref)))
+
+
+def mean_abs(got, ref) -> float:
+    got, ref = _pair(got, ref)
+    return float(np.mean(np.abs(got - ref)))
 
 
 def rel_l2(got, ref) -> float:
-    got, ref = np.asarray(got, np.float64), np.asarray(ref, np.float64)
+    got, ref = _pair(got, ref)
     return float(np.linalg.norm(got - ref) / np.linalg.norm(ref))
 
 
 def cosine_distance(a, b) -> float:
-    a, b = np.asarray(a, np.float64).ravel(), np.asarray(b, np.float64).ravel()
+    a, b = _pair(a, b)
+    a, b = a.ravel(), b.ravel()
     return float(1.0 - a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 
@@ -2152,6 +2224,7 @@ def _topk(emb, k):
 
 def topk_agreement(got, ref, k: int) -> float:
     """Fraction of queries whose ordered top-k neighbours match exactly."""
+    _pair(got, ref)
     return float(np.mean(np.all(_topk(got, k) == _topk(ref, k), axis=1)))
 
 
@@ -2159,16 +2232,28 @@ def check_stage(name, got, ref, limits) -> dict:
     result = {"stage": name, "max_abs": max_abs(got, ref), "rel_l2": rel_l2(got, ref)}
     result["pass"] = result["max_abs"] <= limits["max_abs"] and result["rel_l2"] <= limits["rel_l2"]
     return result
+
+
+def check_chip(got, ref, limits) -> dict:
+    """uint8 HWC chips. A size mismatch is a failure, not an error: it is a
+    crop/rotation disagreement, which is exactly what this stage looks for."""
+    got, ref = np.asarray(got), np.asarray(ref)
+    if got.shape != ref.shape:
+        return {"shape_equal": False, "got_shape": list(got.shape),
+                "ref_shape": list(ref.shape), "pass": False}
+    result = {"shape_equal": True, "max_abs": max_abs(got, ref), "mean_abs": mean_abs(got, ref)}
+    result["pass"] = result["max_abs"] <= limits["max_abs"] and result["mean_abs"] <= limits["mean_abs"]
+    return result
 ```
 
 Run: `python3 -m pytest tests/test_miewid_dinov3_gate_metrics.py -v`
-Expected: 4 passed.
+Expected: 7 passed.
 
 - [ ] **Step 4: Write `manifest.json`**
 
 ```json
 {
-  "_note": "INPUT manifest for the MiewID DINOv3 parity gate. Inputs and limits only; both implementations are executed live. Thresholds are PROPOSED until agreed with the training owner (spec, Parity gate step 3); the gate prints that status.",
+  "_note": "INPUT manifest for the MiewID DINOv3 parity gate. Inputs and limits only; both implementations are executed live. Thresholds are PROPOSED until agreed with the training owner (spec, Parity gate step 3); the gate prints that status. Chip limits allow small JPEG-decoder differences (cv2.imread vs Pillow) and nothing else.",
   "thresholds_status": "proposed",
   "thresholds": {
     "arch": {
@@ -2177,6 +2262,7 @@ Expected: 4 passed.
       "embedding": {"max_abs": 5e-2, "rel_l2": 1e-2}
     },
     "e2e": {
+      "chip":      {"max_abs": 8, "mean_abs": 0.5},
       "input":     {"max_abs": 5e-2, "rel_l2": 1e-2},
       "embedding": {"max_abs": 5e-2, "rel_l2": 1e-2}
     },
@@ -2188,15 +2274,11 @@ Expected: 4 passed.
     "path": "/datasets/miew_id.msv5_dinov3.bin",
     "sha256": "<final sha256 from the training session>"
   },
-  "reference_source": {
-    "repo": "wbia-plugin-miew-id DINOv3 experiment tree (audit_v4_1/dinov3-exp)",
-    "hf_backbone": "facebook/dinov3-vitb16-pretrain-lvd1689m@5931719e67bbdb9737e363e781fb0c67687896bc"
-  },
-  "chips_csv": "/fixtures/reference_chips.csv"
+  "bbox_modes": ["router", "float"]
 }
 ```
 
-The `<final sha256 ...>` value is filled in at gate time from the training session's end-of-training answer. `run_gate.py` refuses to run while it still starts with `<`.
+`checkpoint.sha256` is filled in at gate time from the training session's end-of-training answer. `run_gate.py` refuses to run while it still starts with `<`.
 
 - [ ] **Step 5: Write `reference_runner.py` (training venv)**
 
@@ -2205,14 +2287,29 @@ The `<final sha256 ...>` value is filled in at gate time from the training sessi
 venv (transformers 5.17, torch 2.6) with the training repo's own code:
 load_image (cv2.imread, EXIF applied) -> get_chip_from_img ->
 get_test_transforms((448, 448)) -> MiewIdNet, under CUDA fp16 autocast as
-training eval runs. Writes per-chip inputs and stage outputs:
+training eval runs.
 
-  <out>/reference.npz   input[N,3,448,448] tokens[N,789,768] concat[N,1536] embedding[N,1536]
-  <out>/reference.json  chip order, image sha256s, environment, checkpoint sha256
+For each bbox mode (router = int() of each coordinate, as /extract converts
+it; float = the CSV values) and each chip it records the chip, the input
+tensor and every stage:
+
+  <out>/reference.npz   {mode}_input[N,3,448,448] {mode}_tokens[N,789,768]
+                        {mode}_concat[N,1536] {mode}_embedding[N,1536]
+                        {mode}_chip_{i} (uint8 HWC, sizes vary)
+  <out>/reference.json  chip rows in order, image sha256s, environment,
+                        checkpoint sha256, reference source + revision
+  <out>/reference_chips.csv   the exact CSV used, for the service side
+
+ASSUMPTIONS ABOUT THE TRAINING TREE (verify against the actual DINOv3
+experiment tree before the first run; the public plugin tree does not have
+the dinov3 branch): MiewIdNet accepts these keyword arguments, and
+MiewIdNet(x) returns the BatchNorm output. If either is wrong, change the
+two marked lines and record the change in --source-note.
 
 Usage (on the training host):
-  python reference_runner.py --repo /path/to/dinov3-exp --checkpoint model_final.bin \
-      --chips reference_chips.csv --path-column host_path --out /tmp/ref
+  python reference_runner.py --repo /path/to/dinov3-exp --repo-revision <hash-or-tarball-md5> \
+      --checkpoint model_final.bin --chips reference_chips.csv --path-column host_path \
+      --out /tmp/dinov3-ref
 """
 import argparse
 import ast
@@ -2220,19 +2317,30 @@ import csv
 import hashlib
 import json
 import pathlib
+import shutil
 import sys
 
 import numpy as np
 import torch
 
 
-def sha256_bytes(b):
-    return hashlib.sha256(b).hexdigest()
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def router_bbox(bbox):
+    return tuple(int(v) for v in bbox)   # == metrics.router_bbox; kept local (training venv)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", required=True, help="tree containing wbia_miew_id/")
+    ap.add_argument("--repo-revision", required=True, help="commit hash or source tarball md5")
+    ap.add_argument("--source-note", default="", help="any deviation from the assumptions above")
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--chips", required=True)
     ap.add_argument("--path-column", default="host_path")
@@ -2245,6 +2353,7 @@ def main():
     from wbia_miew_id.models.model import MiewIdNet
     import transformers
 
+    # ASSUMPTION 1: constructor keywords (see module docstring).
     model = MiewIdNet(n_classes=1, model_name="dinov3:facebook/dinov3-vitb16-pretrain-lvd1689m",
                       use_fc=False, pretrained=True)
     sd = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
@@ -2253,70 +2362,89 @@ def main():
     assert model.backbone.config._attn_implementation == "sdpa", model.backbone.config._attn_implementation
 
     captured = {}
-    model.backbone.register_forward_hook(
-        lambda mod, inp, out: captured.__setitem__("tokens", out.last_hidden_state.float()))
-    model.bn.register_forward_hook(
-        lambda mod, inp, out: captured.__setitem__("concat", inp[0].float()))
+
+    def grab_tokens(mod, inp, out):
+        captured["tokens"] = out.last_hidden_state.float()
+
+    def grab_concat(mod, inp, out):
+        captured["concat"] = inp[0].float()
+
+    model.backbone.register_forward_hook(grab_tokens)
+    model.bn.register_forward_hook(grab_concat)
     transform = get_test_transforms((448, 448))
 
     rows = list(csv.DictReader(open(args.chips)))
-    inputs, tokens, concats, embs, meta = [], [], [], [], []
-    for row in rows:
-        path = row[args.path_column]
-        raw = pathlib.Path(path).read_bytes()
-        img = load_image(path)
-        chip = get_chip_from_img(img, ast.literal_eval(row["bbox"]), float(row["theta"]))
-        x = transform(image=chip)["image"].unsqueeze(0).cuda()
-        with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
-            emb = model(x).float()
-        inputs.append(x[0].cpu().numpy())
-        tokens.append(captured["tokens"][0].cpu().numpy())
-        concats.append(captured["concat"][0].cpu().numpy())
-        embs.append(emb[0].cpu().numpy())
-        meta.append({"case": row["case"], "species": row["species"], "path": path,
-                     "bbox": row["bbox"], "theta": row["theta"], "image_sha256": sha256_bytes(raw)})
+    arrays, meta = {}, []
+    for mode in ("router", "float"):
+        stacks = {"input": [], "tokens": [], "concat": [], "embedding": []}
+        for i, row in enumerate(rows):
+            path = row[args.path_column]
+            bbox = ast.literal_eval(row["bbox"])
+            bbox = list(router_bbox(bbox)) if mode == "router" else bbox
+            img = load_image(path)
+            chip = get_chip_from_img(img, bbox, float(row["theta"]))
+            x = transform(image=chip)["image"].unsqueeze(0).cuda()
+            with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
+                emb = model(x).float()   # ASSUMPTION 2: returns the BN output
+            arrays[f"{mode}_chip_{i}"] = np.ascontiguousarray(chip, dtype=np.uint8)
+            stacks["input"].append(x[0].cpu().numpy())
+            stacks["tokens"].append(captured["tokens"][0].cpu().numpy())
+            stacks["concat"].append(captured["concat"][0].cpu().numpy())
+            stacks["embedding"].append(emb[0].cpu().numpy())
+            if mode == "router":
+                meta.append({"index": i, "case": row["case"], "species": row["species"],
+                             "name": row["name"], "path": path, "bbox": row["bbox"],
+                             "theta": row["theta"], "image_sha256": sha256_file(path)})
+        for k, v in stacks.items():
+            arrays[f"{mode}_{k}"] = np.stack(v)
 
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    np.savez(out / "reference.npz", input=np.stack(inputs), tokens=np.stack(tokens),
-             concat=np.stack(concats), embedding=np.stack(embs))
+    np.savez(out / "reference.npz", **arrays)
+    shutil.copyfile(args.chips, out / "reference_chips.csv")
     json.dump({
         "chips": meta,
-        "checkpoint_sha256": sha256_bytes(pathlib.Path(args.checkpoint).read_bytes()),
-        "env": {"torch": torch.__version__, "transformers": transformers.__version__,
+        "checkpoint_sha256": sha256_file(args.checkpoint),
+        "reference_source": {"repo": args.repo, "revision": args.repo_revision,
+                             "note": args.source_note},
+        "env": {"torch": str(torch.__version__), "transformers": str(transformers.__version__),
                 "cuda": torch.version.cuda, "gpu": torch.cuda.get_device_name(0),
                 "matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
                 "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
                 "attn_implementation": model.backbone.config._attn_implementation},
     }, open(out / "reference.json", "w"), indent=2)
-    print(f"wrote {len(rows)} chips to {out}")
+    print(f"wrote {len(rows)} chips x 2 bbox modes to {out}")
 
 
 if __name__ == "__main__":
     main()
 ```
 
-Note for the training session: if `MiewIdNet`'s constructor in the experiment tree needs other keyword arguments, use the values from `configs/EDA-msv5-dinov3.yaml`. If `model(x)` there returns anything other than the BN output, use `model.extract_feat(x)` instead and say so in `reference.json`.
-
 - [ ] **Step 6: Write `run_gate.py` (production image)**
 
 ```python
 """Service half of the MiewID DINOv3 parity gate. Runs INSIDE the production
-image on the production GPU. Compares the service to reference.npz:
+image on the production GPU, from the repository root:
+
+  python3 -m scripts.preflight.miewid_dinov3.run_gate ...
 
   arch: the reference's own preprocessed tensors -> DinoV3MiewIdNet.forward_stages
         (tokens, concat, embedding), under the service's autocast
-  e2e:  the same image FILE BYTES -> MiewidModel.extract_embeddings with the bbox
-        converted exactly as /extract converts it (int floor); the model's input
-        tensor is captured with a pre-hook, never recomputed here
+  e2e:  the same image FILE BYTES (sha256-checked) ->
+        MiewidModel.extract_embeddings, per bbox mode. The chip and the
+        input tensor are CAPTURED from the service path (preprocess wrapper,
+        forward pre-hook), never recomputed here.
   retrieval: ordered top-5 over the chip set; cosine distance per chip
-  negative control: the e2e embeddings x1.05 must FAIL the raw check
+  negative control: e2e embeddings x1.05 must FAIL the raw check
 
-Exit 0 only if every check passes AND the negative control fails.
+Exit 0 only if every check passes in both bbox modes AND every negative
+control fails. Any input misalignment (row count, row metadata, image
+bytes, checkpoint) aborts before inference.
 """
 import argparse
 import ast
 import csv
+import hashlib
 import json
 import pathlib
 import sys
@@ -2327,6 +2455,16 @@ import torch
 from app.models.miewid import MiewidModel
 from scripts.preflight.miewid_dinov3 import metrics
 
+ROW_KEYS = ("case", "species", "name", "bbox", "theta")
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
 
 def rewrite(path, rules):
     for old, new in rules:
@@ -2335,11 +2473,29 @@ def rewrite(path, rules):
     return path
 
 
+def check_alignment(rows, ref_meta, ref, paths):
+    n = len(rows)
+    if n != len(ref_meta["chips"]):
+        sys.exit(f"{n} CSV rows vs {len(ref_meta['chips'])} reference chips")
+    for i, (row, meta) in enumerate(zip(rows, ref_meta["chips"])):
+        for key in ROW_KEYS:
+            if str(row[key]) != str(meta[key]):
+                sys.exit(f"row {i}: {key} {row[key]!r} != reference {meta[key]!r}")
+        got = sha256_file(paths[i])
+        if got != meta["image_sha256"]:
+            sys.exit(f"row {i}: image bytes differ from the reference ({paths[i]})")
+    expected = {"input": (n, 3, 448, 448), "tokens": (n, 789, 768),
+                "concat": (n, 1536), "embedding": (n, 1536)}
+    for mode in ("router", "float"):
+        for k, shape in expected.items():
+            if ref[f"{mode}_{k}"].shape != shape:
+                sys.exit(f"reference {mode}_{k} has shape {ref[f'{mode}_{k}'].shape}, expected {shape}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--manifest", required=True)
-    ap.add_argument("--reference", required=True, help="dir with reference.npz/.json")
-    ap.add_argument("--chips", required=True)
+    ap.add_argument("--reference", required=True, help="dir written by reference_runner.py")
     ap.add_argument("--path-column", default="host_path")
     ap.add_argument("--rewrite-prefix", action="append", default=[], help="OLD=NEW")
     ap.add_argument("--artifact", required=True)
@@ -2349,9 +2505,13 @@ def main():
     th = manifest["thresholds"]
     if manifest["checkpoint"]["sha256"].startswith("<"):
         sys.exit("manifest checkpoint sha256 is still a placeholder; fill it from the training session")
+    ref_dir = pathlib.Path(args.reference)
+    ref = np.load(ref_dir / "reference.npz")
+    ref_meta = json.load(open(ref_dir / "reference.json"))
+    rows = list(csv.DictReader(open(ref_dir / "reference_chips.csv")))
     rules = [tuple(r.split("=", 1)) for r in args.rewrite_prefix]
-    ref = np.load(pathlib.Path(args.reference) / "reference.npz")
-    ref_meta = json.load(open(pathlib.Path(args.reference) / "reference.json"))
+    paths = [rewrite(row[args.path_column], rules) for row in rows]
+    check_alignment(rows, ref_meta, ref, paths)
 
     m = MiewidModel()
     m.load(device="cuda", model_id="gate", backbone="dinov3_vitb16",
@@ -2360,65 +2520,76 @@ def main():
     if m.checkpoint_sha256 != ref_meta["checkpoint_sha256"]:
         sys.exit(f"service checkpoint {m.checkpoint_sha256} != reference {ref_meta['checkpoint_sha256']}")
 
-    # arch: identical tensors in
-    arch = {"tokens": [], "concat": [], "embedding": []}
-    for x in ref["input"]:
-        with torch.no_grad(), m._autocast():
-            stages = m.model.forward_stages(torch.from_numpy(x).unsqueeze(0).cuda())
-        for k in arch:
-            arch[k].append(stages[k][0].float().cpu().numpy())
-    results = [metrics.check_stage(f"arch.{k}", np.stack(v), ref[k], th["arch"][k])
-               for k, v in arch.items()]
+    # Capture what the service actually feeds: the chip handed to preprocess
+    # and the tensor handed to the network.
+    captured = {}
+    original_preprocess = m.preprocess
 
-    # e2e: identical bytes in
-    captured = []
-    m.model.register_forward_pre_hook(lambda mod, a: captured.append(a[0][0].float().cpu().numpy()))
-    rows = list(csv.DictReader(open(args.chips)))
-    e2e_inputs, e2e_embs, float_bbox_embs = [], [], []
-    for row, meta in zip(rows, ref_meta["chips"]):
-        path = rewrite(row[args.path_column], rules)
-        raw = pathlib.Path(path).read_bytes()
-        bbox = ast.literal_eval(row["bbox"])
-        theta = float(row["theta"])
-        int_bbox = tuple(int(v) for v in bbox)          # /extract's conversion
-        captured.clear()
-        e2e_embs.append(m.extract_embeddings(raw, bbox=int_bbox, theta=theta)[0])
-        e2e_inputs.append(captured[0])
-        # Diagnostic only, not gated: float bbox as training passes it.
-        float_bbox_embs.append(m.extract_embeddings(raw, bbox=tuple(bbox), theta=theta)[0])
-    e2e_embs = np.stack(e2e_embs)
-    results.append(metrics.check_stage("e2e.input", np.stack(e2e_inputs), ref["input"], th["e2e"]["input"]))
-    results.append(metrics.check_stage("e2e.embedding", e2e_embs, ref["embedding"], th["e2e"]["embedding"]))
+    def capturing_preprocess(image):
+        captured["chip"] = np.array(image, copy=True)
+        return original_preprocess(image=image)
 
-    cos = [metrics.cosine_distance(a, b) for a, b in zip(e2e_embs, ref["embedding"])]
-    top5 = metrics.topk_agreement(e2e_embs, ref["embedding"], 5)
-    results.append({"stage": "e2e.cosine", "max": max(cos), "pass": max(cos) <= th["cosine_distance_max"]})
-    results.append({"stage": "e2e.top5", "agreement": top5, "pass": top5 >= th["top5_agreement_min"]})
+    def capture_input(mod, args_):
+        captured["input"] = args_[0][0].float().cpu().numpy()
 
-    control = metrics.check_stage("negative_control", e2e_embs * th["negative_control_scale"],
-                                  ref["embedding"], th["e2e"]["embedding"])
-    control_ok = not control["pass"]
+    m.preprocess = capturing_preprocess
+    m.model.register_forward_pre_hook(capture_input)
 
-    diag = {"float_bbox_cosine_max": max(metrics.cosine_distance(a, b)
-                                         for a, b in zip(float_bbox_embs, ref["embedding"]))}
-    passed = all(r["pass"] for r in results) and control_ok
-    artifact = {
+    results, controls, per_chip = [], [], []
+    for mode in ("router", "float"):
+        # arch: identical tensors in
+        arch = {"tokens": [], "concat": [], "embedding": []}
+        for x in ref[f"{mode}_input"]:
+            with torch.no_grad(), m._autocast():
+                stages = m.model.forward_stages(torch.from_numpy(x).unsqueeze(0).cuda())
+            for k in arch:
+                arch[k].append(stages[k][0].float().cpu().numpy())
+        for k, v in arch.items():
+            results.append(metrics.check_stage(f"{mode}.arch.{k}", np.stack(v), ref[f"{mode}_{k}"], th["arch"][k]))
+
+        # e2e: identical bytes in
+        chips_ok, inputs, embs = [], [], []
+        for i, row in enumerate(rows):
+            raw = pathlib.Path(paths[i]).read_bytes()
+            bbox = ast.literal_eval(row["bbox"])
+            bbox = metrics.router_bbox(bbox) if mode == "router" else tuple(bbox)
+            captured.clear()
+            embs.append(m.extract_embeddings(raw, bbox=bbox, theta=float(row["theta"]))[0])
+            chip = metrics.check_chip(captured["chip"], ref[f"{mode}_chip_{i}"], th["e2e"]["chip"])
+            chips_ok.append({"index": i, "case": row["case"], **chip})
+            inputs.append(captured["input"])
+        embs = np.stack(embs)
+        results.append({"stage": f"{mode}.e2e.chip", "pass": all(c["pass"] for c in chips_ok),
+                        "per_chip": chips_ok})
+        results.append(metrics.check_stage(f"{mode}.e2e.input", np.stack(inputs), ref[f"{mode}_input"], th["e2e"]["input"]))
+        results.append(metrics.check_stage(f"{mode}.e2e.embedding", embs, ref[f"{mode}_embedding"], th["e2e"]["embedding"]))
+        cos = [metrics.cosine_distance(a, b) for a, b in zip(embs, ref[f"{mode}_embedding"])]
+        top5 = metrics.topk_agreement(embs, ref[f"{mode}_embedding"], 5)
+        results.append({"stage": f"{mode}.e2e.cosine", "max": max(cos), "pass": max(cos) <= th["cosine_distance_max"]})
+        results.append({"stage": f"{mode}.e2e.top5", "agreement": top5, "pass": top5 >= th["top5_agreement_min"]})
+        per_chip += [{"mode": mode, "case": r["case"], "species": r["species"], "cosine_distance": c}
+                     for r, c in zip(rows, cos)]
+
+        control = metrics.check_stage(f"{mode}.negative_control", embs * th["negative_control_scale"],
+                                      ref[f"{mode}_embedding"], th["e2e"]["embedding"])
+        controls.append({**control, "failed_as_required": not control["pass"]})
+
+    passed = all(r["pass"] for r in results) and all(c["failed_as_required"] for c in controls)
+    json.dump({
         "pass": passed,
         "thresholds_status": manifest["thresholds_status"],
         "results": results,
-        "negative_control": {**control, "failed_as_required": control_ok},
-        "per_chip_cosine": [{"case": mt["case"], "species": mt["species"], "cosine_distance": c}
-                            for mt, c in zip(ref_meta["chips"], cos)],
-        "diagnostics": diag,
-        "service_env": {"torch": torch.__version__, "cuda": torch.version.cuda,
+        "negative_controls": controls,
+        "per_chip_cosine": per_chip,
+        "service_env": {"torch": str(torch.__version__), "cuda": torch.version.cuda,
                         "gpu": torch.cuda.get_device_name(0),
                         "matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
                         "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
                         "precision": m.precision},
         "reference_env": ref_meta["env"],
+        "reference_source": ref_meta["reference_source"],
         "checkpoint_sha256": m.checkpoint_sha256,
-    }
-    json.dump(artifact, open(args.artifact, "w"), indent=2)
+    }, open(args.artifact, "w"), indent=2)
     print(json.dumps({"pass": passed, "thresholds_status": manifest["thresholds_status"]}))
     sys.exit(0 if passed else 1)
 
@@ -2427,7 +2598,82 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 7: Write the gate `README.md`**
+- [ ] **Step 7: Write `vram_probe.py`**
+
+Spec ("Resource cost"): peak VRAM with **all prod models loaded** plus one DINOv3 instance, measured on the target GPU. The prod config is not in this repo, so the probe takes it as an argument and goes through the service's own `ModelHandler`:
+
+```python
+"""Measure the GPU memory the DINOv3 MiewID adds to a production registry.
+
+Run INSIDE the production image on the production GPU, from the repo root:
+  python3 -m scripts.preflight.miewid_dinov3.vram_probe \
+      --config /path/to/prod/model_config.json --dinov3-entry dinov3_entry.json
+
+Prints the baseline with every prod model loaded, the increment from loading
+the DINOv3 entry, and the peak increment during one DINOv3 extraction.
+"""
+import argparse
+import io
+import json
+
+import numpy as np
+import torch
+from PIL import Image
+
+from app.models.model_handler import ModelHandler
+
+MiB = 2 ** 20
+
+
+def load(handler, entry):
+    params = {k: v for k, v in entry.items() if k not in ("model_id", "model_type")}
+    handler.load_model(model_id=entry["model_id"], model_type=entry["model_type"],
+                       device="cuda", **params)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", required=True, help="the production model_config.json")
+    ap.add_argument("--dinov3-entry", required=True, help="JSON file with one DINOv3 model entry")
+    args = ap.parse_args()
+
+    handler = ModelHandler()
+    for entry in json.load(open(args.config))["models"]:
+        load(handler, entry)
+    torch.cuda.synchronize()
+    baseline = torch.cuda.memory_allocated()
+
+    dino_entry = json.load(open(args.dinov3_entry))
+    load(handler, dino_entry)
+    torch.cuda.synchronize()
+    loaded = torch.cuda.memory_allocated()
+
+    buf = io.BytesIO()
+    Image.fromarray(np.random.default_rng(0).integers(0, 255, (3000, 4000, 3), dtype=np.uint8)
+                    ).save(buf, format="JPEG")
+    torch.cuda.reset_peak_memory_stats()
+    handler.get_model(dino_entry["model_id"]).extract_embeddings(buf.getvalue(), bbox=(100, 100, 2000, 1500))
+    torch.cuda.synchronize()
+    peak = torch.cuda.max_memory_allocated()
+
+    total = torch.cuda.get_device_properties(0).total_memory
+    print(json.dumps({
+        "gpu": torch.cuda.get_device_name(0),
+        "total_mib": round(total / MiB),
+        "baseline_all_prod_models_mib": round(baseline / MiB),
+        "dinov3_resident_increment_mib": round((loaded - baseline) / MiB),
+        "dinov3_extract_peak_increment_mib": round((peak - baseline) / MiB),
+        "headroom_after_peak_mib": round((total - peak) / MiB),
+    }, indent=2))
+
+
+if __name__ == "__main__":
+    main()
+```
+
+These numbers are taken on the production host before deploy (see "After the plan"). On this dev host, run it only as a smoke test, with a config containing one EfficientNet entry, and do not report those numbers as the prod measurement.
+
+- [ ] **Step 8: Write the gate `README.md`**
 
 `scripts/preflight/miewid_dinov3/README.md`:
 
@@ -2446,59 +2692,72 @@ run live on the same bytes.
 
 ## 1. Reference (training host, training venv)
 
+First check the two ASSUMPTIONS in `reference_runner.py`'s docstring against
+the DINOv3 experiment tree. Then:
+
 ```bash
 python scripts/preflight/miewid_dinov3/reference_runner.py \
-  --repo /path/to/audit_v4_1/dinov3-exp \
+  --repo /path/to/audit_v4_1/dinov3-exp --repo-revision <commit or tarball md5> \
   --checkpoint /path/to/miew_id.msv5_dinov3.bin \
   --chips reference_chips.csv --path-column host_path --out /tmp/dinov3-ref
 ```
 
-Copy `/tmp/dinov3-ref/` and the 19 chip images to the ml-service host.
+Copy `/tmp/dinov3-ref/` (it includes `reference_chips.csv`) and the 19 chip
+images to the ml-service host.
 
-## 2. Service (ml-service host, INSIDE the production image)
+## 2. Service (ml-service host, INSIDE the production image, from the repo root)
 
 ```bash
 docker build -t ml-service -f docker/dockerfile .
 docker run --rm --gpus all --entrypoint "" -v "$PWD:/src" -w /src \
   -v "$MODELS_DIR:/datasets:ro" -v /path/to/dinov3-ref:/ref:ro \
   -v /path/to/chip-images:/chips:ro -v "$PWD/preflight-artifacts:/artifacts" \
-  ml-service python3 scripts/preflight/miewid_dinov3/run_gate.py \
+  ml-service python3 -m scripts.preflight.miewid_dinov3.run_gate \
     --manifest scripts/preflight/miewid_dinov3/manifest.json \
-    --reference /ref --chips /ref/reference_chips.csv \
+    --reference /ref \
     --rewrite-prefix /nas/=/chips/nas/ --rewrite-prefix /data0/=/chips/data0/ \
     --artifact /artifacts/dinov3-gate.json
 ```
 
 Fill `manifest.json` `checkpoint.sha256` first; the gate refuses a placeholder.
+It also aborts before inference if any row, image file or the checkpoint
+differs from what the reference used.
 
 ## Reading the result
 
-- `pass` needs every stage within limits **and** the ×1.05 negative control
-  failing. Cosine and top-k are blind to scale, so the control proves the
-  raw-error check is live.
+- Two bbox modes, each gated on its own: `router` (`int()` of each
+  coordinate, which truncates toward zero, exactly what `/extract` passes in
+  production) and `float` (the CSV values, as training passes them). Both
+  sides use the same bbox within a mode, so a failure is implementation
+  error, never rounding.
+- `pass` needs every stage within limits in both modes **and** every ×1.05
+  negative control failing. Cosine and top-k are blind to scale, so the
+  control proves the raw-error check is live.
 - `thresholds_status: "proposed"` means the limits have not yet been agreed
   with the training owner. A pass under proposed limits is not a release
   pass.
-- e2e uses the bbox exactly as `/extract` converts it (int floor), because
-  that is what production does. `diagnostics.float_bbox_cosine_max` shows the
-  same comparison with the training-style float bbox. If e2e fails but the
-  float-bbox diagnostic passes, the int floor is the cause: report it, do not
-  loosen limits.
+- Chip failures with `shape_equal: false` are crop/rotation disagreements;
+  small `max_abs` differences with equal shapes are JPEG-decoder (cv2 vs
+  Pillow) differences.
 - The trout and lion chips carry bboxes whose source frame or resolution
   disagrees with the file. Both sides apply the same bbox to the same decoded
   pixels, so they still compare.
 ````
 
-- [ ] **Step 8: Smoke-test `run_gate.py` argument handling**
+- [ ] **Step 9: Smoke-test the gate's guards**
 
-Run: `python3 scripts/preflight/miewid_dinov3/run_gate.py --manifest scripts/preflight/miewid_dinov3/manifest.json --reference /nonexistent --chips /nonexistent --artifact /tmp/x.json; echo "exit=$?"`
-Expected: exits non-zero with `manifest checkpoint sha256 is still a placeholder`. That proves the placeholder guard runs before anything is loaded.
+```bash
+python3 -m scripts.preflight.miewid_dinov3.run_gate \
+  --manifest scripts/preflight/miewid_dinov3/manifest.json \
+  --reference /nonexistent --artifact /tmp/x.json; echo "exit=$?"
+```
+Expected: non-zero exit with `manifest checkpoint sha256 is still a placeholder`. This shows the imports resolve from the repo root and the placeholder guard runs before anything loads.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
 git add scripts/preflight/miewid_dinov3/ tests/test_miewid_dinov3_gate_metrics.py
-git commit -m "feat(preflight): MiewID DINOv3 parity gate (reference runner + service gate)
+git commit -m "feat(preflight): MiewID DINOv3 parity gate and VRAM probe
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Co-Authored-By: Codex <noreply@openai.com>"
@@ -2508,9 +2767,10 @@ Co-Authored-By: Codex <noreply@openai.com>"
 
 ## After the plan
 
-Not tasks for this branch. They wait on the training session's end-of-training answers:
+Not tasks for this branch. They wait on the training session's end-of-training answers and on prod access:
 
 1. The final checkpoint's URL and SHA-256 go into `manifest.json` and the prod config entry.
-2. The training session runs `reference_runner.py` on the final weights.
-3. `run_gate.py` runs in the prod image; thresholds are agreed with the training owner, and `thresholds_status` changes to `"agreed"`.
-4. The prod config gets the DINOv3 entry (README example), with `checkpoint_sha256` set.
+2. The training session checks the reference runner's two assumptions, then runs it on the final weights.
+3. `run_gate` runs in the prod image; thresholds are agreed with the training owner, and `thresholds_status` changes to `"agreed"`.
+4. `vram_probe` runs on the prod host with the real prod `model_config.json`; the numbers go in the deploy notes.
+5. The prod config gets the DINOv3 entry (README example), with `checkpoint_sha256` set.
