@@ -27,7 +27,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from app.models.miewid import MiewidModel
+from app.models.miewid import MiewidModel, build_miewid_transform
 
 
 class _SharedBackbone(nn.Module):
@@ -129,6 +129,8 @@ def test_explain_holds_the_model_lock_across_pairx():
     entry = MagicMock(spec=MiewidModel)
     entry.model = MagicMock()
     entry.inference_lock = threading.RLock()
+    # Real instances build this in __init__; spec= only exposes class attrs.
+    entry.preprocess = build_miewid_transform((440, 440))
 
     observed = {}
     loop_thread = {}

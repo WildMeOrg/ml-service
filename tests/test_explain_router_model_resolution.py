@@ -17,7 +17,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.models.miewid import MiewidModel
+from app.models.miewid import MiewidModel, build_miewid_transform
 from app.models.yolo_ultralytics import YOLOUltralyticsModel
 from app.routers import explain_router
 
@@ -64,6 +64,8 @@ def _miewid():
     m.model = MagicMock()
     # Real instances get this in __init__; spec= only exposes class attrs.
     m.inference_lock = threading.RLock()
+    # Real instances build this in __init__; spec= only exposes class attrs.
+    m.preprocess = build_miewid_transform((440, 440))
     return m
 
 

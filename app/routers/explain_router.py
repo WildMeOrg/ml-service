@@ -4,12 +4,10 @@ import logging
 import math
 import os
 
-import albumentations
 import cv2
 import numpy as np
 import torch
 import torchvision.transforms as transforms
-from albumentations.pytorch import ToTensorV2
 from PIL import Image
 from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.concurrency import run_in_threadpool
@@ -57,17 +55,10 @@ def preprocess(image, model):
     "miewid".
     """
     if isinstance(model, MiewidModel):
-        # Match wbia-plugin-miew-id's training/inference transforms (and
-        # MiewidModel.preprocess) so PairX visualizations operate on the
-        # same tensor representation as embedding extraction. albumentations
-        # takes a numpy HWC uint8 image; the caller passes a numpy image
-        # already, so no PIL round-trip is needed.
-        transform = albumentations.Compose([
-            albumentations.Resize(*MiewidModel.IMAGE_SIZE),
-            albumentations.Normalize(),
-            ToTensorV2(),
-        ])
-        augmented = transform(image=image.astype("uint8"))
+        # The instance's own transform, so PairX sees exactly the tensor
+        # /extract embeds (448 for DINOv3, 440 otherwise). Building it here
+        # from a class constant once fed 440 inputs to every model.
+        augmented = model.preprocess(image=image.astype("uint8"))
         return augmented["image"]
     else:
         raise HTTPException(status_code=400, detail="Unsupported model")
@@ -162,7 +153,8 @@ def resolve_pairx_model(handler, model_id):
     """Resolve `model_id` against the loaded registry for a pairx request.
 
     Raises 404 when the model is not loaded (listing what is), and 400 when
-    it is loaded but is not a MiewID model. Both are permanent, caller-side
+    it is loaded but is not a MiewID model or is a MiewID model PairX cannot
+    explain (DINOv3). Both are permanent, caller-side
     errors: returning them as 4xx rather than letting an AttributeError
     become a 500 matters because Wildbook retries 5xx, so a misconfigured
     model id would otherwise retry forever against an unresolvable error.
@@ -177,6 +169,14 @@ def resolve_pairx_model(handler, model_id):
         raise HTTPException(
             status_code=400,
             detail=f"Model '{model_id}' is not a MiewID model. PairX requires a MiewID model.",
+        )
+    if not model_entry.supports_pairx:
+        # Also covers an explicit layer_key: a ViT module name passes the
+        # named_modules() check and then fails deep inside PairX.
+        raise HTTPException(
+            status_code=400,
+            detail=f"PairX is not supported for model '{model_id}' "
+                   f"(backbone {model_entry.backbone_name})",
         )
     return model_entry
 

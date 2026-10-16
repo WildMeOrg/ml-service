@@ -36,7 +36,7 @@ import pytest
 import torch
 from PIL import Image
 
-from app.models.miewid import MiewidModel
+from app.models.miewid import MiewidModel, build_miewid_transform
 
 
 def _miewid_stub():
@@ -49,6 +49,8 @@ def _miewid_stub():
     m = MagicMock(spec=MiewidModel)
     # Real instances get this in __init__; spec= only exposes class attrs.
     m.inference_lock = threading.RLock()
+    # Real instances build this in __init__; spec= only exposes class attrs.
+    m.preprocess = build_miewid_transform((440, 440))
     return m
 
 
