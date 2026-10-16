@@ -1157,6 +1157,13 @@ def test_imgsz_must_be_int(recorder, empty_ckpt, bad):
         _load(4, checkpoint_path=empty_ckpt, imgsz=bad)
 
 
+def test_null_assertions_are_unset(recorder, empty_ckpt):
+    """JSON null means "not set", consistently with "backbone": null."""
+    m = _load(4, checkpoint_path=empty_ckpt, imgsz=None, embedding_dim=None)
+    assert m.image_size == (440, 440) and m.embedding_dim == 2152
+    _load(3, embedding_dim=None)   # allowed on HF: null is not an assertion
+
+
 def test_embedding_dim_on_hf_path_rejected(recorder):
     with pytest.raises(ValueError, match="embedding_dim"):
         _load(3, embedding_dim=2152)
@@ -1295,6 +1302,7 @@ def _parse_load_options(kwargs: Dict[str, Any]) -> Dict[str, Any]:
             raise ValueError("checkpoint_sha256 is set but checkpoint_path is not")
         sha = sha.lower()
 
+    # JSON null means "not set", consistently with "backbone": null.
     for name in ("imgsz", "embedding_dim"):
         value = kwargs.get(name)
         if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
@@ -2657,13 +2665,20 @@ def main():
     peak = torch.cuda.max_memory_allocated()
 
     total = torch.cuda.get_device_properties(0).total_memory
+    device_free, _ = torch.cuda.mem_get_info()
     print(json.dumps({
         "gpu": torch.cuda.get_device_name(0),
         "total_mib": round(total / MiB),
         "baseline_all_prod_models_mib": round(baseline / MiB),
         "dinov3_resident_increment_mib": round((loaded - baseline) / MiB),
         "dinov3_extract_peak_increment_mib": round((peak - baseline) / MiB),
-        "headroom_after_peak_mib": round((total - peak) / MiB),
+        "torch_reserved_mib": round(torch.cuda.memory_reserved() / MiB),
+        # What the driver says is free right now: includes the CUDA context,
+        # library workspaces and every other process on the GPU.
+        "device_free_mib": round(device_free / MiB),
+        # total - PyTorch peak; EXCLUDES the context, libraries and other
+        # processes, so it overstates what is actually available.
+        "theoretical_headroom_after_peak_mib": round((total - peak) / MiB),
     }, indent=2))
 
 

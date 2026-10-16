@@ -116,7 +116,7 @@ Image size, embedding dim and precision come from the backbone, not from the
 config. Optional `imgsz` and `embedding_dim` fields, if present, are
 **assertions**: a mismatch with the resolved value raises at load. `imgsz` is a
 single `int` (the square side, as today, e.g. `448`); `embedding_dim` is an
-`int`. Other types raise. `imgsz` applies to every path, including legacy
+`int`. Other types raise; JSON `null` means "not set", as with `"backbone": null`. `imgsz` applies to every path, including legacy
 entries without `backbone` (resolved 440 for HF and EffNet, 448 for DINOv3).
 `embedding_dim` applies to the standalone paths (2152 EffNet, 1536 DINOv3,
 read from `bn.weight`); setting it on an HF path raises, because those models
