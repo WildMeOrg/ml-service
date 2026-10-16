@@ -15,6 +15,7 @@ from PIL import Image
 import numpy as np
 import io
 import threading
+from app.models.dinov3_vit import DINOv3ViTConfig, DINOv3ViTModel, VITB16
 from app.utils.checkpoint_utils import get_checkpoint_path
 from app.utils.helpers import get_chip_from_img, decode_image_rgb
 
@@ -50,6 +51,57 @@ class MiewIdNet(nn.Module):
         x = self.backbone.forward_features(x)
         x = self.pooling(x).view(x.size(0), -1)
         return self.bn(x)
+
+
+# DINOv3 MiewID runs at 448: ViT-B/16 needs a multiple of 16, so the
+# EfficientNet's 440 is not an option (the patch grid would not tile it).
+DINOV3_IMAGE_SIZE = (448, 448)
+
+
+class DinoV3MiewIdNet(nn.Module):
+    """MiewID with a DINOv3 ViT backbone.
+
+    Matches the training repo's MiewIdNet `dinov3:` branch
+    (wbia_miew_id/models/model.py, MiewID v5 DINOv3 run):
+    concat(CLS, GeM over the patch grid with CLS and registers skipped)
+    -> BatchNorm1d. No projection, no L2 normalisation.
+    """
+
+    def __init__(self, config: DINOv3ViTConfig = VITB16,
+                 input_size: Tuple[int, int] = DINOV3_IMAGE_SIZE):
+        super().__init__()
+        if input_size[0] % config.patch_size or input_size[1] % config.patch_size:
+            raise ValueError(
+                f"DINOv3 input size {input_size} must be a multiple of {config.patch_size}")
+        self.backbone = DINOv3ViTModel(config)
+        self.input_size = (int(input_size[0]), int(input_size[1]))
+        self.n_skip = 1 + config.num_register_tokens
+        self.grid = (input_size[0] // config.patch_size, input_size[1] // config.patch_size)
+        self.final_in_features = config.hidden_size * 2
+        self.pooling = GeM()
+        self.bn = nn.BatchNorm1d(self.final_in_features)
+
+    def forward_stages(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        # Check the input, not just the token count: the patch conv floors,
+        # so 449x448 and 224x896 both yield 784 patches, and the second would
+        # be reshaped onto the wrong 28x28 grid without any error.
+        if tuple(x.shape[-2:]) != self.input_size:
+            raise ValueError(
+                f"DINOv3 MiewID expects {self.input_size[0]}x{self.input_size[1]} input, "
+                f"got {x.shape[-2]}x{x.shape[-1]}")
+        tokens = self.backbone(x)
+        b, n, c = tokens.shape
+        h, w = self.grid
+        if n != self.n_skip + h * w:
+            raise ValueError(f"expected {self.n_skip + h * w} tokens, got {n}")
+        cls = tokens[:, 0]
+        patch = tokens[:, self.n_skip:]
+        grid = patch.transpose(1, 2).reshape(b, c, h, w)
+        concat = torch.cat([cls, self.pooling(grid).view(b, -1)], dim=1)
+        return {"tokens": tokens, "concat": concat, "embedding": self.bn(concat)}
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_stages(x)["embedding"]
 
 
 class MiewidModel(BaseModel):
