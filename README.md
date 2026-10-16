@@ -635,7 +635,25 @@ commit SHA because `download_checkpoint` caches by URL. Resident cost is
 
 **MiewID** (`miewid`):
 - `checkpoint_path`: Path or URL to model binary
-- `imgsz`: Input image size (default: 440)
+- `backbone` (optional): `"dinov3_vitb16"` for the MiewID v5 DINOv3 variant (448×448 input, 1536-d embedding, fp16 autocast on CUDA, no PairX), or `"efficientnetv2_rw_m"` to name the standalone EfficientNet explicitly. Both require `checkpoint_path`. Omit it for existing entries: dispatch is then by `version` exactly as before.
+- `checkpoint_sha256` (optional): expected SHA-256 of the checkpoint file. A mismatch fails startup. Recommended for every URL checkpoint, because the download cache is keyed by URL, so a file replaced at the same URL is otherwise served stale. Required in practice for DINOv3 release entries.
+- `imgsz` (optional, int): asserted against the backbone's input size (440 for EfficientNet/HF, 448 for DINOv3); a mismatch fails startup. It does not change the input size.
+- `embedding_dim` (optional, int): asserted against the checkpoint (2152 EfficientNet v5, 1536 DINOv3). Not allowed on the HF (msv2/msv3) paths.
+
+DINOv3 entry:
+
+```json
+{
+  "model_id": "miewid-msv5-dinov3",
+  "model_type": "miewid",
+  "backbone": "dinov3_vitb16",
+  "checkpoint_path": "https://…/miew_id.msv5_dinov3.bin",
+  "checkpoint_sha256": "<sha256 from the training session>",
+  "version": 5
+}
+```
+
+DINOv3 and EfficientNet embeddings are separate spaces (1536-d vs 2152-d) and must never share an index or a distance threshold.
 
 All path parameters accept URLs, which are downloaded and cached on startup.
 

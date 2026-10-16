@@ -15,9 +15,10 @@ from albumentations.pytorch import ToTensorV2
 from PIL import Image
 import numpy as np
 import io
+import re
 import threading
 from app.models.dinov3_vit import DINOv3ViTConfig, DINOv3ViTModel, VITB16
-from app.utils.checkpoint_utils import get_checkpoint_path
+from app.utils.checkpoint_utils import get_checkpoint_path, sha256_file
 from app.utils.helpers import get_chip_from_img, decode_image_rgb
 
 logger = logging.getLogger(__name__)
@@ -166,19 +167,87 @@ def load_standalone_state_dict(path: str, backbone: str) -> Dict[str, torch.Tens
     return sd
 
 
+_SHA256_RE = re.compile(r"[0-9a-fA-F]{64}")
+
+
+def build_miewid_transform(image_size: Tuple[int, int]) -> albumentations.Compose:
+    """wbia-plugin-miew-id's get_valid/test_transforms at `image_size`.
+
+    albumentations 1.3.1 Normalize defaults are ImageNet mean/std with
+    max_pixel_value=255. The models were trained against cv2 bilinear
+    resize, which is what albumentations uses; torchvision's PIL resize
+    measured ~3 degrees of angular drift per embedding.
+    """
+    return albumentations.Compose([
+        albumentations.Resize(*image_size),
+        albumentations.Normalize(),
+        ToTensorV2(),
+    ])
+
+
+def resolve_precision(backbone_name: Optional[str], device: str) -> str:
+    """fp16 autocast for DINOv3 on CUDA (as training evaluated); fp32 otherwise.
+
+    EfficientNet and HF stay fp32: changing them would move embeddings
+    against every existing Wildbook index.
+    """
+    if backbone_name == BACKBONE_DINOV3_VITB16 and torch.device(device).type == "cuda":
+        return "fp16_autocast"
+    return "fp32"
+
+
+def _parse_load_options(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate the config fields this design adds, before anything loads."""
+    backbone = kwargs.get("backbone")
+    checkpoint_path = kwargs.get("checkpoint_path")
+    if backbone is not None and backbone not in SUPPORTED_BACKBONES:
+        raise ValueError(
+            f"Unsupported MiewID backbone {backbone!r}; supported: {list(SUPPORTED_BACKBONES)}")
+    if backbone is not None and not checkpoint_path:
+        raise ValueError(f"MiewID backbone {backbone!r} requires checkpoint_path")
+
+    sha = kwargs.get("checkpoint_sha256")
+    if sha is not None:
+        if not isinstance(sha, str) or not _SHA256_RE.fullmatch(sha):
+            raise ValueError(f"checkpoint_sha256 must be 64 hex characters, got {sha!r}")
+        if not checkpoint_path:
+            raise ValueError("checkpoint_sha256 is set but checkpoint_path is not")
+        sha = sha.lower()
+
+    # JSON null means "not set", consistently with "backbone": null.
+    for name in ("imgsz", "embedding_dim"):
+        value = kwargs.get(name)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+            raise ValueError(f"{name} must be an int, got {value!r}")
+
+    return {
+        "backbone": backbone,
+        "checkpoint_path": checkpoint_path,
+        "checkpoint_sha256": sha,
+        "imgsz": kwargs.get("imgsz"),
+        "embedding_dim": kwargs.get("embedding_dim"),
+    }
+
+
 class MiewidModel(BaseModel):
-    # Input shape the MiewID v3/v4 architecture expects. Also the shape used
-    # at training time by wbia-plugin-miew-id (see
-    # wbia_miew_id/datasets/transforms.py:get_valid_transforms). Kept as a
-    # class-level constant so the preprocessing config and any future
-    # model_info reporting stay in sync.
+    # Backward-compatible alias for the EfficientNet/HF input size. Nothing
+    # in this service reads it any more: every instance carries its own
+    # `image_size` (448 for DINOv3), and /explain uses `model.preprocess`.
     IMAGE_SIZE = (440, 440)
+    # Class-level defaults: MagicMock(spec=MiewidModel) stubs expose them, and
+    # tests that build instances with MiewidModel.__new__ (skipping __init__)
+    # still get a working fp32 extract_embeddings.
+    supports_pairx = True
+    backbone_name: Optional[str] = None
+    precision = "fp32"
+    embedding_dim: Optional[int] = None
+    checkpoint_sha256: Optional[str] = None
+    image_size = IMAGE_SIZE
 
     def __init__(self):
         self.model = None
         self.model_info = {}
         self.device = "cuda"
-        self.preprocess = None
         self.use_checkpoint = False
         # Serializes forwards through this instance across routers.
         #
@@ -195,51 +264,98 @@ class MiewidModel(BaseModel):
         # run_pairx's OOM recursion stays inside that single acquisition,
         # never reacquiring. Nothing takes this lock twice on one thread.
         self.inference_lock = threading.Lock()
+        self.image_size = self.IMAGE_SIZE
+        self.preprocess = build_miewid_transform(self.image_size)
+        self.backbone_name = None
+        self.embedding_dim = None
+        self.precision = "fp32"
+        self.checkpoint_sha256 = None
+        self.supports_pairx = True
 
     def load(self, model_path: str = "", device: str = "cuda", **kwargs) -> None:
+        opts = _parse_load_options(kwargs)
         self.device = device
-        checkpoint_path = kwargs.get('checkpoint_path')
-        
-        # Check if we should use checkpoint loading
+        # Reset everything a previous load() resolved, so reusing an instance
+        # (DINOv3 -> EfficientNet -> HF) never inherits 448, supports_pairx
+        # False, an old embedding_dim or an old digest.
+        self.image_size = self.IMAGE_SIZE
+        self.backbone_name = None
+        self.embedding_dim = None
+        self.checkpoint_sha256 = None
+        self.supports_pairx = True
+        checkpoint_path = opts["checkpoint_path"]
+        backbone = opts["backbone"]
+        version = kwargs.get('version', 3)
+        # Remove checkpoint_path from kwargs to avoid duplicate parameter error
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k != 'checkpoint_path'}
+
+        local_checkpoint_path = None
         if checkpoint_path:
             self.use_checkpoint = True
             local_checkpoint_path = get_checkpoint_path(checkpoint_path)
-            # Remove checkpoint_path from kwargs to avoid duplicate parameter error
-            filtered_kwargs = {k: v for k, v in kwargs.items() if k != 'checkpoint_path'}
-            version = kwargs.get('version', 3)
-            if isinstance(version, (int, float)) and version >= 4:
-                self._load_standalone(local_checkpoint_path, device)
-            else:
-                self._load_from_checkpoint(local_checkpoint_path, device, **filtered_kwargs)
+            self.checkpoint_sha256 = sha256_file(local_checkpoint_path)
+            expected = opts["checkpoint_sha256"]
+            if expected is not None and self.checkpoint_sha256 != expected:
+                raise ValueError(
+                    f"checkpoint_sha256 mismatch for {checkpoint_path} (local file "
+                    f"{local_checkpoint_path}): expected {expected}, got {self.checkpoint_sha256}")
         else:
             self.use_checkpoint = False
+
+        # `backbone` first; without it, today's dispatch exactly (spec, legacy table).
+        if backbone == BACKBONE_DINOV3_VITB16:
+            self._load_dinov3(local_checkpoint_path, device)
+        elif backbone == BACKBONE_EFFNET or (
+                checkpoint_path and isinstance(version, (int, float)) and version >= 4):
+            self._load_standalone(local_checkpoint_path, device)
+        elif checkpoint_path:
+            self._load_from_checkpoint(local_checkpoint_path, device, **filtered_kwargs)
+        else:
             self._load_from_huggingface(device, **kwargs)
 
-        # Initialize preprocessing transforms.
-        # Matches wbia-plugin-miew-id's get_valid_transforms exactly so
-        # embeddings extracted here agree numerically with embeddings
-        # extracted by the legacy WBIA MiewID pipeline for the same input
-        # image+bbox. albumentations 1.3.1's Normalize defaults are ImageNet
-        # mean/std with max_pixel_value=255.0, equivalent to torchvision's
-        # ToTensor + Normalize(mean,std) chain modulo the bilinear resize
-        # implementation (PIL vs cv2.INTER_LINEAR) — and the model was
-        # trained against cv2 bilinear, so albumentations is the correct
-        # match. Bumping to torchvision was a ~3° angular drift per
-        # embedding, large enough to reshuffle top-N matches.
-        self.preprocess = albumentations.Compose([
-            albumentations.Resize(*self.IMAGE_SIZE),
-            albumentations.Normalize(),
-            ToTensorV2(),
-        ])
+        self.precision = resolve_precision(self.backbone_name, device)
+        if self.backbone_name == BACKBONE_DINOV3_VITB16 and self.precision == "fp32":
+            logger.warning(
+                "DINOv3 MiewID on %s runs fp32; training evaluated under CUDA fp16 "
+                "autocast, so embeddings will differ slightly from the reference.", device)
+        self._check_assertions(opts)
+
+        # Matches wbia-plugin-miew-id's get_valid_transforms at this
+        # instance's size, so embeddings agree with the training pipeline.
+        self.preprocess = build_miewid_transform(self.image_size)
 
         self.model_info = {
             'model_type': 'miewid',
             'device': device,
-            'imgsz': kwargs.get('imgsz', 440),
+            'imgsz': self.image_size[0],
             'version': kwargs.get('version', 3),
             'checkpoint_path': checkpoint_path,
-            'use_checkpoint': self.use_checkpoint
+            'use_checkpoint': self.use_checkpoint,
+            'backbone': self.backbone_name,
+            'image_size': list(self.image_size),
+            'embedding_dim': self.embedding_dim,
+            'precision': self.precision,
+            'checkpoint_sha256': self.checkpoint_sha256,
+            'supports_pairx': self.supports_pairx,
         }
+
+    def _check_assertions(self, opts: Dict[str, Any]) -> None:
+        """`imgsz` / `embedding_dim` in config are assertions, never settings."""
+        imgsz = opts["imgsz"]
+        if imgsz is not None and imgsz != self.image_size[0]:
+            raise ValueError(
+                f"imgsz {imgsz} does not match backbone {self.backbone_name}, "
+                f"which runs at {self.image_size[0]}")
+        embedding_dim = opts["embedding_dim"]
+        if embedding_dim is not None:
+            if self.embedding_dim is None:
+                raise ValueError(
+                    f"embedding_dim cannot be asserted for {self.backbone_name}: "
+                    f"HuggingFace MiewID models do not expose it statically")
+            if embedding_dim != self.embedding_dim:
+                raise ValueError(
+                    f"embedding_dim {embedding_dim} does not match the checkpoint's "
+                    f"{self.embedding_dim} ({self.backbone_name})")
 
     def _load_from_huggingface(self, device: str, **kwargs) -> None:
         """Load model from HuggingFace Hub."""
@@ -248,6 +364,7 @@ class MiewidModel(BaseModel):
         else:
             model_tag = f"conservationxlabs/miewid-msv2"
             
+        self.backbone_name = f"hf:{model_tag}"
         self.model = AutoModel.from_pretrained(model_tag, trust_remote_code=True)
         self.model.eval()
         self.model.to(device)
@@ -279,13 +396,46 @@ class MiewidModel(BaseModel):
             model_tag = "conservationxlabs/miewid-msv3"
         else:
             model_tag = "conservationxlabs/miewid-msv2"
+        self.backbone_name = f"hf:{model_tag}"
         model = AutoModel.from_pretrained(model_tag, trust_remote_code=True)
         self._apply_checkpoint(model, checkpoint_path, device, strict=False)
 
+    def _install(self, model: nn.Module, device: str) -> None:
+        model.eval()
+        model.to(device)
+        # PairX reads model.device directly (pairx/core.py:288), and plain
+        # nn.Modules have no such property. _apply_checkpoint set this for
+        # the standalone path before; keep doing it.
+        try:
+            model.device = torch.device(device)
+        except AttributeError:
+            pass  # HuggingFace models have a read-only .device property
+        self.model = model
+
     def _load_standalone(self, checkpoint_path: str, device: str) -> None:
-        """Load model from checkpoint using standalone timm-based architecture."""
+        """Standalone timm EfficientNet MiewID (v4+), strict load."""
+        sd = load_standalone_state_dict(checkpoint_path, BACKBONE_EFFNET)
         model = MiewIdNet()
-        self._apply_checkpoint(model, checkpoint_path, device, strict=True)
+        model.load_state_dict(sd, strict=True)
+        self.embedding_dim = int(sd["bn.weight"].shape[0])
+        del sd
+        self._install(model, device)
+        self.backbone_name = BACKBONE_EFFNET
+        logger.info(f"Loaded MiewID EfficientNet from checkpoint: {checkpoint_path}")
+
+    def _load_dinov3(self, checkpoint_path: str, device: str) -> None:
+        """DINOv3 ViT-B/16 MiewID (v5 DINOv3), strict load, built from the
+        frozen local config: nothing is downloaded (the HF repo is gated)."""
+        sd = load_standalone_state_dict(checkpoint_path, BACKBONE_DINOV3_VITB16)
+        model = DinoV3MiewIdNet()
+        model.load_state_dict(sd, strict=True)
+        del sd
+        self._install(model, device)
+        self.backbone_name = BACKBONE_DINOV3_VITB16
+        self.embedding_dim = model.final_in_features
+        self.image_size = DINOV3_IMAGE_SIZE
+        self.supports_pairx = False
+        logger.info(f"Loaded MiewID DINOv3 from checkpoint: {checkpoint_path}")
 
     def get_model_info(self) -> Dict[str, Any]:
         """Get information about the loaded model."""
