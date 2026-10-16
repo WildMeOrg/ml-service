@@ -13,8 +13,14 @@ image on the production GPU, from the repository root:
   negative control: e2e embeddings x1.05 must FAIL the raw check
 
 Exit 0 only if every check passes in both bbox modes AND every negative
-control fails. Any input misalignment (row count, row metadata, image
-bytes, checkpoint) aborts before inference.
+control fails, and thresholds_status is "agreed" (or --allow-proposed).
+Any input misalignment (row set/order vs manifest expected_chips, row
+metadata, image bytes, checkpoint) aborts before inference.
+
+Rows listed in manifest known_divergence (overhanging bboxes, where the service
+and training chippers differ) are computed and REPORTED in every e2e stage but
+excluded from the gated e2e stages, e2e top-5 and the e2e negative control.
+The arch stage stays gated for all rows.
 """
 import argparse
 import ast
@@ -74,6 +80,8 @@ def main():
     ap.add_argument("--path-column", default="host_path")
     ap.add_argument("--rewrite-prefix", action="append", default=[], help="OLD=NEW")
     ap.add_argument("--artifact", required=True)
+    ap.add_argument("--allow-proposed", action="store_true",
+                    help="exit 0 on a pass even though thresholds_status is not 'agreed'")
     args = ap.parse_args()
 
     manifest = json.load(open(args.manifest))
@@ -84,6 +92,12 @@ def main():
     ref = np.load(ref_dir / "reference.npz")
     ref_meta = json.load(open(ref_dir / "reference.json"))
     rows = list(csv.DictReader(open(ref_dir / "reference_chips.csv")))
+    problems = (metrics.check_expected_chips(rows, manifest["expected_chips"])
+                + metrics.check_known_divergence(manifest["known_divergence"], manifest["expected_chips"]))
+    if problems:
+        sys.exit("reference gallery does not match the manifest:\n  " + "\n  ".join(problems))
+    sel = metrics.select_rows(manifest["expected_chips"], manifest["known_divergence"])
+    gated, reported = sel["gated"], sel["reported"]
     rules = [tuple(r.split("=", 1)) for r in args.rewrite_prefix]
     paths = [rewrite(row[args.path_column], rules) for row in rows]
     check_alignment(rows, ref_meta, ref, paths)
@@ -110,7 +124,7 @@ def main():
     m.preprocess = capturing_preprocess
     m.model.register_forward_pre_hook(capture_input)
 
-    results, controls, per_chip = [], [], []
+    results, controls, per_chip, known_report = [], [], [], []
     for mode in ("router", "float"):
         # arch: identical tensors in
         arch = {"tokens": [], "concat": [], "embedding": []}
@@ -122,31 +136,43 @@ def main():
         for k, v in arch.items():
             results.append(metrics.check_stage(f"{mode}.arch.{k}", np.stack(v), ref[f"{mode}_{k}"], th["arch"][k]))
 
-        # e2e: identical bytes in
-        chips_ok, inputs, embs = [], [], []
+        # e2e: identical bytes in, for every row; only `gated` rows are judged
+        chips, inputs, embs = [], [], []
         for i, row in enumerate(rows):
             raw = pathlib.Path(paths[i]).read_bytes()
             bbox = ast.literal_eval(row["bbox"])
             bbox = metrics.router_bbox(bbox) if mode == "router" else tuple(bbox)
             captured.clear()
             embs.append(m.extract_embeddings(raw, bbox=bbox, theta=float(row["theta"]))[0])
-            chip = metrics.check_chip(captured["chip"], ref[f"{mode}_chip_{i}"], th["e2e"]["chip"])
-            chips_ok.append({"index": i, "case": row["case"], **chip})
+            chips.append(metrics.check_chip(captured["chip"], ref[f"{mode}_chip_{i}"], th["e2e"]["chip"]))
             inputs.append(captured["input"])
-        embs = np.stack(embs)
+        embs, inputs = np.stack(embs), np.stack(inputs)
+        ref_emb, ref_in = ref[f"{mode}_embedding"], ref[f"{mode}_input"]
+        cos = [metrics.cosine_distance(a, b) for a, b in zip(embs, ref_emb)]
+
+        chips_ok = [{"index": i, "case": rows[i]["case"], **chips[i]} for i in gated]
         results.append({"stage": f"{mode}.e2e.chip", "pass": all(c["pass"] for c in chips_ok),
                         "per_chip": chips_ok})
-        results.append(metrics.check_stage(f"{mode}.e2e.input", np.stack(inputs), ref[f"{mode}_input"], th["e2e"]["input"]))
-        results.append(metrics.check_stage(f"{mode}.e2e.embedding", embs, ref[f"{mode}_embedding"], th["e2e"]["embedding"]))
-        cos = [metrics.cosine_distance(a, b) for a, b in zip(embs, ref[f"{mode}_embedding"])]
-        top5 = metrics.topk_agreement(embs, ref[f"{mode}_embedding"], 5)
-        results.append({"stage": f"{mode}.e2e.cosine", "max": max(cos), "pass": max(cos) <= th["cosine_distance_max"]})
+        results.append(metrics.check_stage(f"{mode}.e2e.input", inputs[gated], ref_in[gated], th["e2e"]["input"]))
+        results.append(metrics.check_stage(f"{mode}.e2e.embedding", embs[gated], ref_emb[gated], th["e2e"]["embedding"]))
+        results.append({"stage": f"{mode}.e2e.cosine",
+                        **metrics.cosine_gate([cos[i] for i in gated], th["cosine_distance_max"])})
+        top5 = metrics.topk_agreement(embs[gated], ref_emb[gated], 5)
         results.append({"stage": f"{mode}.e2e.top5", "agreement": top5, "pass": top5 >= th["top5_agreement_min"]})
-        per_chip += [{"mode": mode, "case": r["case"], "species": r["species"], "cosine_distance": c}
-                     for r, c in zip(rows, cos)]
+        per_chip += [{"mode": mode, "index": i, "case": rows[i]["case"], "species": rows[i]["species"],
+                      "cosine_distance": cos[i], "gated": i in gated} for i in range(len(rows))]
 
-        control = metrics.check_stage(f"{mode}.negative_control", embs * th["negative_control_scale"],
-                                      ref[f"{mode}_embedding"], th["e2e"]["embedding"])
+        # Known divergence: every e2e stage reported, none gated.
+        for i in reported:
+            known_report.append({
+                "mode": mode, "index": i, "case": rows[i]["case"], "species": rows[i]["species"],
+                "name": rows[i]["name"], "chip": chips[i],
+                "input": metrics.check_stage(f"{mode}.input", inputs[i], ref_in[i], th["e2e"]["input"]),
+                "embedding": metrics.check_stage(f"{mode}.embedding", embs[i], ref_emb[i], th["e2e"]["embedding"]),
+                "cosine_distance": cos[i]})
+
+        control = metrics.check_stage(f"{mode}.negative_control", embs[gated] * th["negative_control_scale"],
+                                      ref_emb[gated], th["e2e"]["embedding"])
         controls.append({**control, "failed_as_required": not control["pass"]})
 
     passed = all(r["pass"] for r in results) and all(c["failed_as_required"] for c in controls)
@@ -156,6 +182,13 @@ def main():
         "results": results,
         "negative_controls": controls,
         "per_chip_cosine": per_chip,
+        "known_divergence": {
+            "excluded_rows": len(reported),
+            "gated_e2e_rows": len(gated),
+            "reason": sorted({k["reason"] for k in manifest["known_divergence"]}),
+            "entries": manifest["known_divergence"],
+            "reported": known_report,
+        },
         "service_env": {"torch": str(torch.__version__), "cuda": torch.version.cuda,
                         "gpu": torch.cuda.get_device_name(0),
                         "matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
@@ -166,7 +199,14 @@ def main():
         "checkpoint_sha256": m.checkpoint_sha256,
     }, open(args.artifact, "w"), indent=2)
     print(json.dumps({"pass": passed, "thresholds_status": manifest["thresholds_status"]}))
-    sys.exit(0 if passed else 1)
+    print(f"{len(reported)} of {len(rows)} rows excluded from gated e2e (reported only, see "
+          f"'known_divergence' in the artifact): service chipper pads overhanging boxes, "
+          f"training clamps; arch gated on all {len(rows)}.")
+    code = metrics.exit_code(passed, manifest["thresholds_status"], args.allow_proposed)
+    if code == 2:
+        print(f"EXIT 2: checks passed but thresholds_status is {manifest['thresholds_status']!r}, "
+              "not 'agreed'; this is not a release pass (use --allow-proposed to accept).")
+    sys.exit(code)
 
 
 if __name__ == "__main__":

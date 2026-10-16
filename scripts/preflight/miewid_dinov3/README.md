@@ -55,10 +55,38 @@ differs from what the reference used.
   control proves the raw-error check is live.
 - `thresholds_status: "proposed"` means the limits have not yet been agreed
   with the training owner. A pass under proposed limits is not a release
-  pass.
+  pass, so the gate exits 2 unless `--allow-proposed` is given.
 - Chip failures with `shape_equal: false` are crop/rotation disagreements;
   small `max_abs` differences with equal shapes are JPEG-decoder (cv2 vs
   Pillow) differences.
-- The trout and lion chips carry bboxes whose source frame or resolution
-  disagrees with the file. Both sides apply the same bbox to the same decoded
-  pixels, so they still compare.
+- The trout and lion rows carry bboxes whose source frame or resolution
+  disagrees with the file; whether they crop the intended animal is a
+  training-data question. They still compare (same bbox, same decoded pixels).
+- The three `bbox_overhang` rows (bowhead_whale 56466, lion 36100,
+  bottlenose_dolphin 36) are listed in `manifest.json` `known_divergence`.
+  Decoding matches but cropping does not: the service's `get_chip_from_img`
+  pads overhanging boxes (`crop_rect`), the training helper clamps and slices.
+  This predates the DINOv3 work and affects EfficientNet too; which chipper is
+  correct is an open item. These rows are computed and reported in every e2e
+  stage under the artifact's `known_divergence` section (chip, input,
+  embedding, cosine; with the row count excluded and the reason) but are
+  excluded from the gated e2e stages, e2e top-5 and the e2e negative control.
+  The arch stage (identical reference tensors in) is gated on all 19 rows.
+  Every `known_divergence` entry must match a row of `expected_chips`.
+- `manifest.json` `expected_chips` is the ordered 19-row gallery. The gate
+  aborts before inference unless the reference CSV matches it exactly, so a
+  missing, extra, duplicate or reordered row cannot pass.
+- Exit codes: 0 pass; 1 a check failed; 2 every check passed but
+  `thresholds_status` is not `"agreed"` (pass `--allow-proposed` to get 0 for a
+  dry run; it is still not a release pass).
+
+## Before deploying this branch
+
+Any MiewID entry that now raises in `MiewidModel.load` aborts the whole service
+at startup. Audit the production config first (no weights, no network):
+
+```bash
+python3 -m scripts.preflight.miewid_dinov3.audit_config /path/to/model_config.json
+```
+
+Exit 1 names every entry that would abort startup and why.

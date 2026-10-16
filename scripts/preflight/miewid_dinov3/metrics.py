@@ -47,7 +47,10 @@ def _topk(emb, k):
 
 def topk_agreement(got, ref, k: int) -> float:
     """Fraction of queries whose ordered top-k neighbours match exactly."""
-    _pair(got, ref)
+    got, _ = _pair(got, ref)
+    if got.shape[0] <= k:
+        raise ValueError(
+            f"top-{k} needs more than {k} rows (self is excluded), got {got.shape[0]} rows")
     return float(np.mean(np.all(_topk(got, k) == _topk(ref, k), axis=1)))
 
 
@@ -67,3 +70,50 @@ def check_chip(got, ref, limits) -> dict:
     result = {"shape_equal": True, "max_abs": max_abs(got, ref), "mean_abs": mean_abs(got, ref)}
     result["pass"] = result["max_abs"] <= limits["max_abs"] and result["mean_abs"] <= limits["mean_abs"]
     return result
+
+
+def _key(chip):
+    return (str(chip["case"]), str(chip["species"]), str(chip["name"]))
+
+
+def check_expected_chips(rows, expected) -> list:
+    """Problems (empty = ok) if the reference rows are not EXACTLY the expected
+    gallery, in order. Rejects missing, extra, duplicate and reordered rows."""
+    problems = []
+    if len(rows) != len(expected):
+        problems.append(f"{len(rows)} reference rows, expected {len(expected)}")
+    for i, (row, exp) in enumerate(zip(rows, expected)):
+        if _key(row) != _key(exp):
+            problems.append(f"row {i}: {_key(row)} != expected {_key(exp)}")
+    return problems
+
+
+def check_known_divergence(known, expected) -> list:
+    """Every known_divergence entry must name a row of expected_chips."""
+    keys = [_key(e) for e in expected]
+    return [f"known_divergence entry {_key(k)} matches no expected chip"
+            for k in known if _key(k) not in keys]
+
+
+def select_rows(expected, known) -> dict:
+    """arch: every row. gated: e2e rows that must pass. reported: known-divergence
+    rows, computed and reported but never gated."""
+    skip = {_key(k) for k in known}
+    reported = [i for i, e in enumerate(expected) if _key(e) in skip]
+    gated = [i for i, e in enumerate(expected) if _key(e) not in skip]
+    return {"arch": list(range(len(expected))), "gated": gated, "reported": reported}
+
+
+def cosine_gate(cos, limit) -> dict:
+    """NaN-safe: a non-finite cosine fails the stage."""
+    cos = np.asarray(cos, np.float64)
+    worst = float(np.max(cos))
+    return {"max": worst, "pass": bool(np.all(np.isfinite(cos)) and worst <= limit)}
+
+
+def exit_code(passed, thresholds_status, allow_proposed) -> int:
+    if not passed:
+        return 1
+    if thresholds_status != "agreed" and not allow_proposed:
+        return 2
+    return 0

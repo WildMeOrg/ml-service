@@ -423,10 +423,19 @@ fixed (`tests/test_exif_orientation_decode.py`).
 
 The trout row (recorded 4000×3000, decoded 3000×4000) and the lion row
 (recorded 683×800, file 598×700) carry bboxes whose source frame or resolution
-disagrees with the file. They stay in the gate as-is: both sides apply the
-same bbox to the same decoded pixels, which is what parity needs. Whether
-those bboxes crop the intended animal is a training-data question, not a
-parity one.
+disagrees with the file. Whether those bboxes crop the intended animal is a
+training-data question, not a parity one.
+
+The three overhanging-bbox rows (bowhead_whale 56466, lion 36100,
+bottlenose_dolphin 36) are a different matter. Decoding matches, but cropping
+does not: the service's `get_chip_from_img` sends any box not wholly inside the
+frame through `crop_rect` on a padded canvas, whereas the training helper
+clamps the coordinates (`max(0, int(x))`) and slices. The chips therefore
+legitimately differ in shape and content. These rows are computed and reported
+in every end-to-end stage (artifact section `known_divergence`) but are not
+gated in e2e, e2e top-5 or the e2e negative control; the arch stage stays gated
+on all 19 rows. The divergence predates this work and affects EfficientNet
+too. Deciding which chipper is correct is an open item for the user.
 
 The end-to-end stage of the gate feeds the reference side through the training
 repo's own `load_image` + `get_chip_from_img` + `get_test_transforms` and the
