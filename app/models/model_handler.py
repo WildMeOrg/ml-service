@@ -42,6 +42,10 @@ MODEL_REGISTRY = {
     'lightnet': {
         'module': 'app.models.lightnet_model',
         'class': 'LightNetModel'
+    },
+    'timm-classifier': {
+        'module': 'app.models.timm_classifier',
+        'class': 'TimmClassifierModel'
     }
     # Add new model types here as they are implemented
 }
