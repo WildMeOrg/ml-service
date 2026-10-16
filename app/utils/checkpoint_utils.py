@@ -23,6 +23,18 @@ def is_url(path: str) -> bool:
     """Check if a path is a URL."""
     return path.startswith(('http://', 'https://'))
 
+def sha256_file(path: str, chunk_size: int = 1 << 20) -> str:
+    """Streamed SHA-256 of a local file, lowercase hex.
+
+    The download cache is keyed by URL, not content, so this is the only
+    way to notice a checkpoint replaced at the same URL.
+    """
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(chunk_size), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
 def download_checkpoint(url: str, cache_dir: str = "/tmp/checkpoints") -> str:
     """
     Download a checkpoint from a URL and cache it locally.

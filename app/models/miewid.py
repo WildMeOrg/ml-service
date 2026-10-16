@@ -1,5 +1,6 @@
 from .base_model import BaseModel
 import logging
+import pickle
 from transformers import AutoModel
 from fastapi import HTTPException
 from typing import Dict, Any, List, Optional, Tuple
@@ -102,6 +103,67 @@ class DinoV3MiewIdNet(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.forward_stages(x)["embedding"]
+
+
+BACKBONE_EFFNET = "efficientnetv2_rw_m"
+BACKBONE_DINOV3_VITB16 = "dinov3_vitb16"
+SUPPORTED_BACKBONES = (BACKBONE_EFFNET, BACKBONE_DINOV3_VITB16)
+
+# Top-level keys of a training resume checkpoint (checkpoint_latest.pth).
+_RESUME_KEYS = {"model_state_dict", "optimizer", "scheduler", "epoch", "best_score"}
+
+
+def describe_checkpoint(sd: Dict[str, Any]) -> str:
+    """Which standalone MiewID backbone a state dict was saved from."""
+    if "backbone.embeddings.register_tokens" in sd:
+        return BACKBONE_DINOV3_VITB16
+    if "backbone.conv_stem.weight" in sd:
+        return BACKBONE_EFFNET
+    return "unrecognised (first keys: %s)" % ", ".join(list(sd)[:3])
+
+
+def load_standalone_state_dict(path: str, backbone: str) -> Dict[str, torch.Tensor]:
+    """Load and validate a standalone MiewID checkpoint for `backbone`.
+
+    Standalone paths only (EfficientNet v4+ and DINOv3). The legacy HF
+    overlay keeps its strict=False tolerance and never comes through here.
+    """
+    try:
+        sd = torch.load(path, map_location="cpu", weights_only=True)
+    except pickle.UnpicklingError as e:
+        raise ValueError(
+            f"{path} is not a plain tensor state dict (torch.load weights_only "
+            f"refused it: {e}). A training resume checkpoint is not servable; "
+            f"ship model_best.bin.") from e
+    if not isinstance(sd, dict):
+        raise ValueError(f"{path}: expected a state dict, got {type(sd).__name__}")
+    resume_keys = _RESUME_KEYS & set(sd)
+    if resume_keys:
+        raise ValueError(
+            f"{path} is a training resume checkpoint (keys {sorted(resume_keys)}); "
+            f"ship model_best.bin instead.")
+    non_tensor = [k for k, v in sd.items() if not isinstance(v, torch.Tensor)]
+    if non_tensor:
+        raise ValueError(f"{path}: non-tensor values under {non_tensor[:3]}")
+    head = [k for k in sd if k.startswith("final.")]
+    if head:
+        raise ValueError(
+            f"{path} carries an ArcFace head ({len(head)} 'final.*' keys). Serving "
+            f"checkpoints must not include it; re-export without 'final.*'.")
+    looks_like = describe_checkpoint(sd)
+    if looks_like != backbone:
+        raise ValueError(
+            f"checkpoint {path} does not match configured backbone '{backbone}': "
+            f"it looks like {looks_like}.")
+    if "bn.weight" not in sd:
+        raise ValueError(f"{path}: missing 'bn.weight'")
+    if backbone == BACKBONE_DINOV3_VITB16:
+        want = (2 * VITB16.hidden_size,)
+        if tuple(sd["bn.weight"].shape) != want:
+            raise ValueError(
+                f"{path}: bn.weight has shape {tuple(sd['bn.weight'].shape)}, "
+                f"expected {want} for {backbone}")
+    return sd
 
 
 class MiewidModel(BaseModel):
