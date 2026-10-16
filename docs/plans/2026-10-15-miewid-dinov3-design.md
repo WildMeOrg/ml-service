@@ -89,10 +89,22 @@ the legacy `version` logic:
 
 | `backbone` | behaviour |
 |---|---|
-| absent | unchanged: checkpoint + numeric `version >= 4` → standalone EfficientNet; checkpoint + lower version → HF overlay; no checkpoint → HF hub msv2/msv3 |
+| absent | unchanged, predicates copied verbatim from `miewid.py:85-169` with no coercion (table below) |
 | `"efficientnetv2_rw_m"` | standalone EfficientNet (explicit form of today's v4+ path; requires `checkpoint_path`) |
 | `"dinov3_vitb16"` | vendored DINOv3 network; requires `checkpoint_path` |
 | anything else | `ValueError` at load, naming the supported values |
+
+Legacy dispatch when `backbone` is absent (today's exact behaviour, preserved):
+
+| `checkpoint_path` | `version` | path |
+|---|---|---|
+| truthy | `int`/`float` and `>= 4` | standalone EfficientNet, strict load |
+| truthy | anything else (missing, `< 4`, any string) | HF overlay, `strict=False` |
+| falsy/absent | any | HF hub, no checkpoint |
+
+Inside both HF paths only `version == 3` (so missing, `3`, `3.0`) selects
+`miewid-msv3`; everything else (`3.5`, `"3"`, `"5"`, and numeric `4` without a
+checkpoint) selects `miewid-msv2`. These quirks are preserved, not fixed.
 
 An existing EfficientNet entry with `version: 5` and no `backbone` stays
 EfficientNet. `version` stays informational for the new values. The training
@@ -131,18 +143,37 @@ preserved exactly so `state_dict` keys match training
 non-persistent `inv_freq` buffer).
 
 Stripped: `PreTrainedModel`, gradient checkpointing, output-capturing
-decorators, drop-path, training-time RoPE augmentation (shift/jitter/rescale
+decorators, the `ACT2FN` activation registry (replaced by `nn.GELU()`, which is
+what `"gelu"` resolves to), the coordinate `lru_cache`, drop-path, training-time RoPE augmentation (shift/jitter/rescale
 only run when `self.training`), gated MLP, the `Backbone` head, and the
 attention-function registry.
 
-Behaviour that must survive the port:
+The retained forward-path functions are copied **line for line**, not
+re-implemented; generic ViT RoPE code has the same shapes and different values.
+Invariants the port must preserve:
 
-- RoPE angles computed in **fp32 with autocast disabled**, then cast to the
-  input dtype (5.17 does this with `maybe_autocast(enabled=False)`; the port
-  uses `torch.autocast(device_type, enabled=False)`).
-- RoPE applied to patch tokens only, skipping the 1 + 4 prefix tokens.
-- LayerScale on both residual branches (active in eval; weights come from the
-  checkpoint).
+- RoPE coordinates: patch-centre `(y, x)` from `arange(0.5, n) / n`, meshgrid
+  `ij`, flattened, mapped to `[-1, 1]` (`get_patches_center_coordinates`).
+  `inv_freq = 1 / theta ** arange(0, 1, 4/head_dim)`; angles
+  `2π · coords[:, :, None] · inv_freq`, flattened over the axis, then `tile(2)`;
+  rotation by `rotate_half` (half-vector split, `cat(-x2, x1)`). The coordinate
+  `lru_cache` decorator is dropped (it is a cache, not a numeric change).
+- RoPE computed in **fp32 with autocast disabled**
+  (`torch.autocast(device_type, enabled=False)` replaces `maybe_autocast`), then
+  cast to `pixel_values.dtype`. `pixel_values` is first cast to the patch-conv
+  weight dtype (fp32), so cos/sin stay fp32 under autocast.
+- RoPE applied to patch tokens only, skipping the 1 + 4 prefix tokens. Under
+  autocast, `q_patches * cos` promotes the fp16 patch Q/K to fp32 before
+  `torch.cat` with the fp16 prefix tokens; the attention op then recasts. This
+  promotion is part of the training numerics and is preserved by copying the
+  lines as-is.
+- Attention: non-causal, scaling `head_dim ** -0.5` applied once, dropout 0 in
+  eval, heads transposed back before the output projection. Eager softmax has
+  no explicit fp32 upcast.
+- Each block: pre-norm → attention → LayerScale → residual; pre-norm → MLP →
+  LayerScale → residual. MLP is up-projection → exact (erf) GELU →
+  down-projection. LayerScale is active in eval; its weights come from the
+  checkpoint.
 - Final `norm` applied to every token before the neck.
 - Attention through `torch.nn.functional.scaled_dot_product_attention` if
   training used `sdpa`, otherwise the eager matmul/softmax. Which one is an
@@ -168,15 +199,23 @@ feat  = torch.cat([cls, self.pooling(grid).flatten(1)], dim=1)   # (B, 1536)
 return self.bn(feat)                              # BatchNorm1d(1536)
 ```
 
-`h = w = 448 / 16 = 28`. The forward asserts the token count is
-`5 + h*w` and raises `ValueError` otherwise. GeM is the existing `GeM` class
+`h = w = 448 / 16 = 28`. The forward checks the **input** spatial size equals
+`(448, 448)` before the backbone and raises `ValueError` otherwise. A
+token-count check alone is not enough: the patch conv floors, so 449×448 gives
+784 patches, and 224×896 gives 784 patches that would be wrongly reshaped to
+28×28. The token count `5 + 784` is asserted as well. GeM is the existing `GeM` class
 (learnable `p`, loaded from `pooling.p`). The raw BN output is returned with no
 L2 normalisation, as with EfficientNet.
 
 ### Loading
 
-- `torch.load(path, map_location="cpu", weights_only=True)` → must be a bare
-  `dict` of tensors. A wrapped resume checkpoint (`model_state_dict`,
+The rules below apply to the **standalone** paths only (DINOv3 and standalone
+EfficientNet, whether selected by `backbone` or by legacy `version >= 4`). The
+legacy HF-overlay path keeps `strict=False` and its current tolerance of
+missing/unexpected keys, unchanged.
+
+- `torch.load(path, map_location="cpu", weights_only=True)` → must satisfy
+  `isinstance(sd, dict)` (the artifact is an `OrderedDict`) with tensor values. A wrapped resume checkpoint (`model_state_dict`,
   `optimizer`, …) is rejected with a message telling the operator to ship
   `model_best.bin` instead.
 - Before `load_state_dict`, check the selection against the keys: DINOv3
@@ -203,7 +242,9 @@ is built from it, using the same albumentations `Resize` → `Normalize()`
 processor.
 
 `explain_router.preprocess` reuses `model.preprocess` instead of rebuilding the
-transform from the class constant. The class constant is kept as a
+transform from the class constant. The PairX capability check (next section)
+lives in `resolve_pairx_model` before it returns, so it runs before any image
+task is scheduled. The class constant is kept as a
 backward-compatible alias equal to 440, with no remaining internal readers.
 
 ### Precision
@@ -214,6 +255,10 @@ covering backbone and neck, inside the existing `inference_lock` and
 before numpy. This matches training eval (`eval_fn.py:18`) and costs nothing in
 compatibility: the 1536-d space is new, so there is no existing index to stay
 consistent with.
+
+The finiteness check (see Responses) sits on the final BN embedding in the
+shared `MiewidModel.extract_embeddings`, before numpy conversion, so `/extract`
+and `/pipeline` are both covered.
 
 On CPU (no autocast), DINOv3 runs fp32 and logs a warning once at load.
 `model_info.precision` reports the effective mode (`"fp16_autocast"` or
@@ -262,15 +307,34 @@ measured on the target GPU before deploy (plan task), not assumed.
 
 Unit (CPU, no network, synthetic weights):
 
-- Dispatch: no `backbone` + v3/v4/v5 → today's paths; `"efficientnetv2_rw_m"`;
-  `"dinov3_vitb16"`; unknown value → `ValueError`; DINOv3 without
-  `checkpoint_path` → `ValueError`.
+- Legacy dispatch matrix, no `backbone`: checkpoint present/absent ×
+  version missing, `3`, `3.0`, `3.5`, `4`, `4.1`, `5`, `"3"`, `"5"`; each asserts
+  the path (EffNet / HF overlay / HF hub) and the HF tag (msv2/msv3) from the
+  legacy table.
+- HF overlay still loads with `strict=False`: a checkpoint with a missing key
+  and an extra key loads as it does today.
+- Explicit dispatch: `"efficientnetv2_rw_m"`; `"dinov3_vitb16"`; unknown value →
+  `ValueError`; either explicit backbone without `checkpoint_path` →
+  `ValueError`.
 - Vendored module: `state_dict` key set and shapes equal the training key
   manifest (fixture from the training session); frozen config equals the
   training config dump.
+- Numerics, not just shapes: a golden-output test. With a fixed seeded
+  synthetic state dict and fixed input, `DinoV3MiewIdNet` output is compared
+  against outputs produced once by the real transformers 5.17 `DINOv3ViTModel`
+  plus the training neck (generated in the training venv, committed as a small
+  fixture), fp32 on CPU, `atol=1e-5`. This catches RoPE, attention, LayerScale
+  and norm-order errors that key/shape tests cannot.
 - Forward: (1, 3, 448, 448) → (1, 1536); registers excluded (perturbing
-  register-token outputs leaves the GeM half unchanged); wrong input size →
-  `ValueError`.
+  register-token outputs leaves the GeM half unchanged); 440×440, 449×448 and
+  224×896 → `ValueError`.
+- Precision: on CUDA (skipped without a GPU), a DINOv3 forward runs under fp16
+  autocast (assert via a patched `torch.autocast` or by checking an
+  intermediate dtype), weights stay fp32, and the returned numpy array is
+  float32. On CPU, DINOv3 runs fp32 and reports `precision: "fp32"`. EffNet
+  and HF forwards never enter autocast.
+- Finiteness: a model whose forward returns NaN, +Inf or −Inf makes `/extract`
+  and `/pipeline` return the 500 path, not a NaN embedding.
 - Loading: resume-format checkpoint rejected; DINOv3 config + EffNet checkpoint
   (and vice versa) rejected with the named mismatch; `final.*` rejected.
 - Image size: DINOv3 instance preprocesses to 448, EffNet to 440, both loaded
@@ -289,11 +353,20 @@ GPU):
 2. **End-to-end parity.** Identical image bytes, bbox and theta, including
    EXIF-rotated images, θ ≠ 0, boxes overhanging the frame, and full-frame;
    compare chips, input tensors and embeddings.
-3. Report max abs error, cosine distance and top-k retrieval agreement on a
-   fixed gallery from at least three DINOv3-routed species. Thresholds are
-   agreed with the training owner before release; the proposed defaults are
-   cosine distance ≤ 1e-3 per embedding and identical top-5 on ≥ 99% of
-   queries.
+3. Acceptance requires **all** of the following, because cosine and rank
+   checks alone accept a uniformly scaled embedding:
+   - per-stage raw error limits on final tokens, the 1536-d concat feature and
+     the BN output: max abs error and relative L2 error
+     (`‖a − b‖ / ‖b‖`);
+   - cosine distance per embedding;
+   - top-k retrieval agreement on a fixed gallery from at least three
+     DINOv3-routed species.
+
+   Thresholds are agreed with the training owner before release. Proposed
+   defaults under matched fp16 autocast: relative L2 ≤ 1e-2 at every stage,
+   cosine distance ≤ 1e-3, identical top-5 on ≥ 99% of queries. A **negative
+   control** (the service embedding multiplied by 1.05) must fail the gate,
+   which proves the raw-error check is live.
 
 The gate runs against the final checkpoint. Development uses the epoch-8
 `model_best.bin` (md5 `50f0c1d5…`).
@@ -308,3 +381,6 @@ The gate runs against the final checkpoint. Development uses the epoch-8
 4. 10–20 reference chips with their input tensors and embeddings from the
    training `MiewIdNet` (under autocast, as eval runs), for the parity gate.
 5. Final artifact name, immutable URL, and SHA-256 once training ends.
+6. Running a small script (supplied with the plan) in the training venv to
+   produce the golden-output unit-test fixture: seeded synthetic weights through
+   the real 5.17 `DINOv3ViTModel` + neck, fp32 CPU.
