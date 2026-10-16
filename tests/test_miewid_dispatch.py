@@ -40,7 +40,14 @@ def recorder(monkeypatch):
         self.image_size = (448, 448)
         self.supports_pairx = False
 
+    original_overlay = MiewidModel._load_from_checkpoint
+
+    def spy_overlay(self, path, device, **kw):
+        calls["paths"].append("overlay")
+        return original_overlay(self, path, device, **kw)
+
     monkeypatch.setattr(miewid_mod.AutoModel, "from_pretrained", fake_from_pretrained)
+    monkeypatch.setattr(MiewidModel, "_load_from_checkpoint", spy_overlay)
     monkeypatch.setattr(MiewidModel, "_load_standalone", fake_standalone)
     monkeypatch.setattr(MiewidModel, "_load_dinov3", fake_dinov3)
     return calls
@@ -59,12 +66,6 @@ def _load(version=_ABSENT, **kw):
     m = MiewidModel()
     m.load(device="cpu", model_id="t", **kw)
     return m
-
-
-def _path(calls):
-    if calls["paths"]:
-        return calls["paths"][-1]
-    return "hf"
 
 
 # (checkpoint?, version) -> (path, hf tag or None)
@@ -96,7 +97,11 @@ def test_legacy_dispatch_is_unchanged(recorder, empty_ckpt, has_ckpt, version, p
     m = _load(version, **kw)
     if path == "standalone":
         assert recorder["paths"] == ["standalone"] and recorder["tags"] == []
+    elif path == "overlay":
+        assert recorder["paths"] == ["overlay"]
+        assert recorder["tags"] == [tag]
     else:
+        assert path == "hub"
         assert recorder["paths"] == []
         assert recorder["tags"] == [tag]
     assert m.image_size == (440, 440)
