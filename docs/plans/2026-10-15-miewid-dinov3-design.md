@@ -181,9 +181,12 @@ Invariants the port must preserve:
   down-projection. LayerScale is active in eval; its weights come from the
   checkpoint.
 - Final `norm` applied to every token before the neck.
-- Attention through `torch.nn.functional.scaled_dot_product_attention` if
-  training used `sdpa`, otherwise the eager matmul/softmax. Which one is an
-  open question for the training session (it changes fp16 numerics).
+- Attention through `torch.nn.functional.scaled_dot_product_attention` only.
+  Training ran `_attn_implementation = "sdpa"` (the transformers default on
+  torch 2.6; never set explicitly). The eager path is not ported.
+- TF32: training ran process defaults, `matmul.allow_tf32 = False` and
+  `cudnn.allow_tf32 = True`. These are also torch 2.1.2's defaults, and
+  ml-service sets neither, so no change; the parity gate records both flags.
 - torch 2.1-compatible: `register_buffer(..., persistent=False)` instead of
   `nn.Buffer` (torch ≥ 2.5), and no `enable_gqa`.
 
@@ -380,19 +383,63 @@ GPU):
    control** (the service embedding multiplied by 1.05) must fail the gate,
    which proves the raw-error check is live.
 
-The gate runs against the final checkpoint. Development uses the epoch-8
-`model_best.bin` (md5 `50f0c1d5…`).
+The gate runs against the final checkpoint. Development uses a frozen dev
+snapshot that must never ship or gate a release:
+`miew_id.msv5_dinov3.DEV-ep10.bin` (epoch 10, group-avg 0.7261, 342,749,463
+bytes, sha256 `1c30dec4cf20e82da5cb9a9e2bf53efe4a7080c75ec3db3416952f592b356735`).
 
-## Open questions for the training session
+### Reference chips and the image frame
 
-1. `backbone.config.to_dict()` dump and the HF revision (commit hash) of
-   `facebook/dinov3-vitb16-pretrain-lvd1689m` that was used.
-2. The full `state_dict` key → shape manifest of `model_best.bin`.
-3. `backbone.config._attn_implementation` at eval (`sdpa` or `eager`), GPU
-   model, and TF32 setting.
-4. 10–20 reference chips with their input tensors and embeddings from the
-   training `MiewIdNet` (under autocast, as eval runs), for the parity gate.
-5. Final artifact name, immutable URL, and SHA-256 once training ends.
-6. Running a small script (supplied with the plan) in the training venv to
-   produce the golden-output unit-test fixture: seeded synthetic weights through
-   the real 5.17 `DINOv3ViTModel` + neck, fp32 CPU.
+19 chips (`reference_chips.csv`): θ ≠ 0 (4), bbox overhanging the frame (3),
+full-frame (3), plain DINOv3-routed (3), plain EffNet-routed (2, as contrast),
+EXIF-tagged (4, including trout with orientation 6 and θ = 1.31). Ten
+DINOv3-routed species are covered.
+
+Training decodes with `cv2.imread(path)` then BGR→RGB
+(`wbia_miew_id/datasets/helpers.py:8` at `316688c`). OpenCV's default `imread`
+**applies** EXIF orientation (verified on OpenCV 4.10: a 400×300-stored JPEG
+with orientation 6 reads as 300×400; only `IMREAD_IGNORE_ORIENTATION` returns
+the stored frame). `decode_image_rgb` produces the same upright frame, so
+training and service crop from the same pixels and **no decode change is
+needed**. The training session's note that cv2 ignores EXIF is incorrect.
+Following it would reintroduce the Whiskerbook bug that `decode_image_rgb`
+fixed (`tests/test_exif_orientation_decode.py`).
+
+The trout row (recorded 4000×3000, decoded 3000×4000) and the lion row
+(recorded 683×800, file 598×700) carry bboxes whose source frame or resolution
+disagrees with the file. They stay in the gate as-is: both sides apply the
+same bbox to the same decoded pixels, which is what parity needs. Whether
+those bboxes crop the intended animal is a training-data question, not a
+parity one.
+
+The end-to-end stage of the gate feeds the reference side through the training
+repo's own `load_image` + `get_chip_from_img` + `get_test_transforms` and the
+service side through `MiewidModel.extract_embeddings`, both from the same file
+bytes. It never reimplements either decoder.
+
+## Training-session inputs
+
+Received 2026-10-16 (`docs/claudeQuestions2.txt`; artifacts in
+`miewid-dinov3-dev/`):
+
+- Backbone config dump (`dinov3_backbone_config.json`), HF revision
+  `5931719e67bbdb9737e363e781fb0c67687896bc`. It matches the frozen config
+  above; `config.image_size` is 224 while we run 448, which is fine because
+  DINOv3 uses RoPE, not learned absolute position embeddings.
+- `state_dict_keys.tsv`: 217 keys, 85,666,562 params, all fp32
+  (`backbone.*` 211, `pooling.p` 1, `bn.*` 5). `k_proj` has no bias.
+- Attention `sdpa`, RTX A6000, TF32 at defaults (see above).
+- Frozen dev checkpoint ep10 and the 19 reference chips (see above).
+
+These become test fixtures under `tests/fixtures/dinov3/` (config dump, key
+manifest) and the parity-gate manifest under `scripts/preflight/`.
+
+Still pending, at end of training:
+
+1. Final artifact name, immutable URL, and SHA-256.
+2. Reference embeddings for the 19 chips from the final weights, under
+   autocast, on the A6000.
+3. Running the golden-output generator script (supplied with the plan) in the
+   training venv: seeded synthetic weights through the real 5.17
+   `DINOv3ViTModel` + neck, fp32 CPU. This one does not depend on training and
+   can run as soon as the script exists.
