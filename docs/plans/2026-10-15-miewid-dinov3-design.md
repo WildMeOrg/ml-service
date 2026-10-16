@@ -113,9 +113,15 @@ way to say it.
 
 Image size, embedding dim and precision come from the backbone, not from the
 config. Optional `imgsz` and `embedding_dim` fields, if present, are
-**assertions**: a mismatch with the resolved value raises at load. Today `imgsz`
-only feeds `model_info`, so this changes nothing for existing entries unless
-they set a wrong value; the plan includes auditing prod entries for that.
+**assertions**: a mismatch with the resolved value raises at load. `imgsz` is a
+single `int` (the square side, as today, e.g. `448`); `embedding_dim` is an
+`int`. Other types raise. `imgsz` applies to every path, including legacy
+entries without `backbone` (resolved 440 for HF and EffNet, 448 for DINOv3).
+`embedding_dim` applies to the standalone paths (2152 EffNet, 1536 DINOv3,
+read from `bn.weight`); setting it on an HF path raises, because those models
+do not expose it statically. Today `imgsz` only feeds `model_info`, so
+this changes nothing for existing entries unless they set a wrong value; the
+plan includes auditing prod entries for that.
 
 ### Code layout
 
@@ -245,7 +251,8 @@ processor.
 transform from the class constant. The PairX capability check (next section)
 lives in `resolve_pairx_model` before it returns, so it runs before any image
 task is scheduled. The class constant is kept as a
-backward-compatible alias equal to 440, with no remaining internal readers.
+backward-compatible alias equal to the tuple `(440, 440)` (its current type and
+value), with no remaining internal readers.
 
 ### Precision
 
@@ -313,6 +320,11 @@ Unit (CPU, no network, synthetic weights):
   legacy table.
 - HF overlay still loads with `strict=False`: a checkpoint with a missing key
   and an extra key loads as it does today.
+- Config assertions: `imgsz` matching (440 legacy EffNet, 440 HF, 448 DINOv3)
+  loads; mismatching (448 on EffNet, 440 on DINOv3) and non-int (`"448"`,
+  `[448, 448]`) raise. `embedding_dim` matching (2152 EffNet incl. legacy
+  entry without `backbone`, 1536 DINOv3) loads; mismatching raises; set on an
+  HF path raises. `MiewidModel.IMAGE_SIZE == (440, 440)`.
 - Explicit dispatch: `"efficientnetv2_rw_m"`; `"dinov3_vitb16"`; unknown value →
   `ValueError`; either explicit backbone without `checkpoint_path` →
   `ValueError`.
