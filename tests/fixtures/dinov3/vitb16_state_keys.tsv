@@ -1,0 +1,218 @@
+key	shape	dtype
+backbone.embeddings.cls_token	(1, 1, 768)	torch.float32
+backbone.embeddings.mask_token	(1, 1, 768)	torch.float32
+backbone.embeddings.register_tokens	(1, 4, 768)	torch.float32
+backbone.embeddings.patch_embeddings.weight	(768, 3, 16, 16)	torch.float32
+backbone.embeddings.patch_embeddings.bias	(768,)	torch.float32
+backbone.model.layer.0.norm1.weight	(768,)	torch.float32
+backbone.model.layer.0.norm1.bias	(768,)	torch.float32
+backbone.model.layer.0.attention.k_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.0.attention.v_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.0.attention.v_proj.bias	(768,)	torch.float32
+backbone.model.layer.0.attention.q_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.0.attention.q_proj.bias	(768,)	torch.float32
+backbone.model.layer.0.attention.o_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.0.attention.o_proj.bias	(768,)	torch.float32
+backbone.model.layer.0.layer_scale1.lambda1	(768,)	torch.float32
+backbone.model.layer.0.norm2.weight	(768,)	torch.float32
+backbone.model.layer.0.norm2.bias	(768,)	torch.float32
+backbone.model.layer.0.mlp.up_proj.weight	(3072, 768)	torch.float32
+backbone.model.layer.0.mlp.up_proj.bias	(3072,)	torch.float32
+backbone.model.layer.0.mlp.down_proj.weight	(768, 3072)	torch.float32
+backbone.model.layer.0.mlp.down_proj.bias	(768,)	torch.float32
+backbone.model.layer.0.layer_scale2.lambda1	(768,)	torch.float32
+backbone.model.layer.1.norm1.weight	(768,)	torch.float32
+backbone.model.layer.1.norm1.bias	(768,)	torch.float32
+backbone.model.layer.1.attention.k_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.1.attention.v_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.1.attention.v_proj.bias	(768,)	torch.float32
+backbone.model.layer.1.attention.q_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.1.attention.q_proj.bias	(768,)	torch.float32
+backbone.model.layer.1.attention.o_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.1.attention.o_proj.bias	(768,)	torch.float32
+backbone.model.layer.1.layer_scale1.lambda1	(768,)	torch.float32
+backbone.model.layer.1.norm2.weight	(768,)	torch.float32
+backbone.model.layer.1.norm2.bias	(768,)	torch.float32
+backbone.model.layer.1.mlp.up_proj.weight	(3072, 768)	torch.float32
+backbone.model.layer.1.mlp.up_proj.bias	(3072,)	torch.float32
+backbone.model.layer.1.mlp.down_proj.weight	(768, 3072)	torch.float32
+backbone.model.layer.1.mlp.down_proj.bias	(768,)	torch.float32
+backbone.model.layer.1.layer_scale2.lambda1	(768,)	torch.float32
+backbone.model.layer.2.norm1.weight	(768,)	torch.float32
+backbone.model.layer.2.norm1.bias	(768,)	torch.float32
+backbone.model.layer.2.attention.k_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.2.attention.v_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.2.attention.v_proj.bias	(768,)	torch.float32
+backbone.model.layer.2.attention.q_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.2.attention.q_proj.bias	(768,)	torch.float32
+backbone.model.layer.2.attention.o_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.2.attention.o_proj.bias	(768,)	torch.float32
+backbone.model.layer.2.layer_scale1.lambda1	(768,)	torch.float32
+backbone.model.layer.2.norm2.weight	(768,)	torch.float32
+backbone.model.layer.2.norm2.bias	(768,)	torch.float32
+backbone.model.layer.2.mlp.up_proj.weight	(3072, 768)	torch.float32
+backbone.model.layer.2.mlp.up_proj.bias	(3072,)	torch.float32
+backbone.model.layer.2.mlp.down_proj.weight	(768, 3072)	torch.float32
+backbone.model.layer.2.mlp.down_proj.bias	(768,)	torch.float32
+backbone.model.layer.2.layer_scale2.lambda1	(768,)	torch.float32
+backbone.model.layer.3.norm1.weight	(768,)	torch.float32
+backbone.model.layer.3.norm1.bias	(768,)	torch.float32
+backbone.model.layer.3.attention.k_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.3.attention.v_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.3.attention.v_proj.bias	(768,)	torch.float32
+backbone.model.layer.3.attention.q_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.3.attention.q_proj.bias	(768,)	torch.float32
+backbone.model.layer.3.attention.o_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.3.attention.o_proj.bias	(768,)	torch.float32
+backbone.model.layer.3.layer_scale1.lambda1	(768,)	torch.float32
+backbone.model.layer.3.norm2.weight	(768,)	torch.float32
+backbone.model.layer.3.norm2.bias	(768,)	torch.float32
+backbone.model.layer.3.mlp.up_proj.weight	(3072, 768)	torch.float32
+backbone.model.layer.3.mlp.up_proj.bias	(3072,)	torch.float32
+backbone.model.layer.3.mlp.down_proj.weight	(768, 3072)	torch.float32
+backbone.model.layer.3.mlp.down_proj.bias	(768,)	torch.float32
+backbone.model.layer.3.layer_scale2.lambda1	(768,)	torch.float32
+backbone.model.layer.4.norm1.weight	(768,)	torch.float32
+backbone.model.layer.4.norm1.bias	(768,)	torch.float32
+backbone.model.layer.4.attention.k_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.4.attention.v_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.4.attention.v_proj.bias	(768,)	torch.float32
+backbone.model.layer.4.attention.q_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.4.attention.q_proj.bias	(768,)	torch.float32
+backbone.model.layer.4.attention.o_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.4.attention.o_proj.bias	(768,)	torch.float32
+backbone.model.layer.4.layer_scale1.lambda1	(768,)	torch.float32
+backbone.model.layer.4.norm2.weight	(768,)	torch.float32
+backbone.model.layer.4.norm2.bias	(768,)	torch.float32
+backbone.model.layer.4.mlp.up_proj.weight	(3072, 768)	torch.float32
+backbone.model.layer.4.mlp.up_proj.bias	(3072,)	torch.float32
+backbone.model.layer.4.mlp.down_proj.weight	(768, 3072)	torch.float32
+backbone.model.layer.4.mlp.down_proj.bias	(768,)	torch.float32
+backbone.model.layer.4.layer_scale2.lambda1	(768,)	torch.float32
+backbone.model.layer.5.norm1.weight	(768,)	torch.float32
+backbone.model.layer.5.norm1.bias	(768,)	torch.float32
+backbone.model.layer.5.attention.k_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.5.attention.v_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.5.attention.v_proj.bias	(768,)	torch.float32
+backbone.model.layer.5.attention.q_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.5.attention.q_proj.bias	(768,)	torch.float32
+backbone.model.layer.5.attention.o_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.5.attention.o_proj.bias	(768,)	torch.float32
+backbone.model.layer.5.layer_scale1.lambda1	(768,)	torch.float32
+backbone.model.layer.5.norm2.weight	(768,)	torch.float32
+backbone.model.layer.5.norm2.bias	(768,)	torch.float32
+backbone.model.layer.5.mlp.up_proj.weight	(3072, 768)	torch.float32
+backbone.model.layer.5.mlp.up_proj.bias	(3072,)	torch.float32
+backbone.model.layer.5.mlp.down_proj.weight	(768, 3072)	torch.float32
+backbone.model.layer.5.mlp.down_proj.bias	(768,)	torch.float32
+backbone.model.layer.5.layer_scale2.lambda1	(768,)	torch.float32
+backbone.model.layer.6.norm1.weight	(768,)	torch.float32
+backbone.model.layer.6.norm1.bias	(768,)	torch.float32
+backbone.model.layer.6.attention.k_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.6.attention.v_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.6.attention.v_proj.bias	(768,)	torch.float32
+backbone.model.layer.6.attention.q_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.6.attention.q_proj.bias	(768,)	torch.float32
+backbone.model.layer.6.attention.o_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.6.attention.o_proj.bias	(768,)	torch.float32
+backbone.model.layer.6.layer_scale1.lambda1	(768,)	torch.float32
+backbone.model.layer.6.norm2.weight	(768,)	torch.float32
+backbone.model.layer.6.norm2.bias	(768,)	torch.float32
+backbone.model.layer.6.mlp.up_proj.weight	(3072, 768)	torch.float32
+backbone.model.layer.6.mlp.up_proj.bias	(3072,)	torch.float32
+backbone.model.layer.6.mlp.down_proj.weight	(768, 3072)	torch.float32
+backbone.model.layer.6.mlp.down_proj.bias	(768,)	torch.float32
+backbone.model.layer.6.layer_scale2.lambda1	(768,)	torch.float32
+backbone.model.layer.7.norm1.weight	(768,)	torch.float32
+backbone.model.layer.7.norm1.bias	(768,)	torch.float32
+backbone.model.layer.7.attention.k_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.7.attention.v_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.7.attention.v_proj.bias	(768,)	torch.float32
+backbone.model.layer.7.attention.q_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.7.attention.q_proj.bias	(768,)	torch.float32
+backbone.model.layer.7.attention.o_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.7.attention.o_proj.bias	(768,)	torch.float32
+backbone.model.layer.7.layer_scale1.lambda1	(768,)	torch.float32
+backbone.model.layer.7.norm2.weight	(768,)	torch.float32
+backbone.model.layer.7.norm2.bias	(768,)	torch.float32
+backbone.model.layer.7.mlp.up_proj.weight	(3072, 768)	torch.float32
+backbone.model.layer.7.mlp.up_proj.bias	(3072,)	torch.float32
+backbone.model.layer.7.mlp.down_proj.weight	(768, 3072)	torch.float32
+backbone.model.layer.7.mlp.down_proj.bias	(768,)	torch.float32
+backbone.model.layer.7.layer_scale2.lambda1	(768,)	torch.float32
+backbone.model.layer.8.norm1.weight	(768,)	torch.float32
+backbone.model.layer.8.norm1.bias	(768,)	torch.float32
+backbone.model.layer.8.attention.k_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.8.attention.v_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.8.attention.v_proj.bias	(768,)	torch.float32
+backbone.model.layer.8.attention.q_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.8.attention.q_proj.bias	(768,)	torch.float32
+backbone.model.layer.8.attention.o_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.8.attention.o_proj.bias	(768,)	torch.float32
+backbone.model.layer.8.layer_scale1.lambda1	(768,)	torch.float32
+backbone.model.layer.8.norm2.weight	(768,)	torch.float32
+backbone.model.layer.8.norm2.bias	(768,)	torch.float32
+backbone.model.layer.8.mlp.up_proj.weight	(3072, 768)	torch.float32
+backbone.model.layer.8.mlp.up_proj.bias	(3072,)	torch.float32
+backbone.model.layer.8.mlp.down_proj.weight	(768, 3072)	torch.float32
+backbone.model.layer.8.mlp.down_proj.bias	(768,)	torch.float32
+backbone.model.layer.8.layer_scale2.lambda1	(768,)	torch.float32
+backbone.model.layer.9.norm1.weight	(768,)	torch.float32
+backbone.model.layer.9.norm1.bias	(768,)	torch.float32
+backbone.model.layer.9.attention.k_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.9.attention.v_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.9.attention.v_proj.bias	(768,)	torch.float32
+backbone.model.layer.9.attention.q_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.9.attention.q_proj.bias	(768,)	torch.float32
+backbone.model.layer.9.attention.o_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.9.attention.o_proj.bias	(768,)	torch.float32
+backbone.model.layer.9.layer_scale1.lambda1	(768,)	torch.float32
+backbone.model.layer.9.norm2.weight	(768,)	torch.float32
+backbone.model.layer.9.norm2.bias	(768,)	torch.float32
+backbone.model.layer.9.mlp.up_proj.weight	(3072, 768)	torch.float32
+backbone.model.layer.9.mlp.up_proj.bias	(3072,)	torch.float32
+backbone.model.layer.9.mlp.down_proj.weight	(768, 3072)	torch.float32
+backbone.model.layer.9.mlp.down_proj.bias	(768,)	torch.float32
+backbone.model.layer.9.layer_scale2.lambda1	(768,)	torch.float32
+backbone.model.layer.10.norm1.weight	(768,)	torch.float32
+backbone.model.layer.10.norm1.bias	(768,)	torch.float32
+backbone.model.layer.10.attention.k_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.10.attention.v_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.10.attention.v_proj.bias	(768,)	torch.float32
+backbone.model.layer.10.attention.q_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.10.attention.q_proj.bias	(768,)	torch.float32
+backbone.model.layer.10.attention.o_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.10.attention.o_proj.bias	(768,)	torch.float32
+backbone.model.layer.10.layer_scale1.lambda1	(768,)	torch.float32
+backbone.model.layer.10.norm2.weight	(768,)	torch.float32
+backbone.model.layer.10.norm2.bias	(768,)	torch.float32
+backbone.model.layer.10.mlp.up_proj.weight	(3072, 768)	torch.float32
+backbone.model.layer.10.mlp.up_proj.bias	(3072,)	torch.float32
+backbone.model.layer.10.mlp.down_proj.weight	(768, 3072)	torch.float32
+backbone.model.layer.10.mlp.down_proj.bias	(768,)	torch.float32
+backbone.model.layer.10.layer_scale2.lambda1	(768,)	torch.float32
+backbone.model.layer.11.norm1.weight	(768,)	torch.float32
+backbone.model.layer.11.norm1.bias	(768,)	torch.float32
+backbone.model.layer.11.attention.k_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.11.attention.v_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.11.attention.v_proj.bias	(768,)	torch.float32
+backbone.model.layer.11.attention.q_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.11.attention.q_proj.bias	(768,)	torch.float32
+backbone.model.layer.11.attention.o_proj.weight	(768, 768)	torch.float32
+backbone.model.layer.11.attention.o_proj.bias	(768,)	torch.float32
+backbone.model.layer.11.layer_scale1.lambda1	(768,)	torch.float32
+backbone.model.layer.11.norm2.weight	(768,)	torch.float32
+backbone.model.layer.11.norm2.bias	(768,)	torch.float32
+backbone.model.layer.11.mlp.up_proj.weight	(3072, 768)	torch.float32
+backbone.model.layer.11.mlp.up_proj.bias	(3072,)	torch.float32
+backbone.model.layer.11.mlp.down_proj.weight	(768, 3072)	torch.float32
+backbone.model.layer.11.mlp.down_proj.bias	(768,)	torch.float32
+backbone.model.layer.11.layer_scale2.lambda1	(768,)	torch.float32
+backbone.norm.weight	(768,)	torch.float32
+backbone.norm.bias	(768,)	torch.float32
+pooling.p	(1,)	torch.float32
+bn.weight	(1536,)	torch.float32
+bn.bias	(1536,)	torch.float32
+bn.running_mean	(1536,)	torch.float32
+bn.running_var	(1536,)	torch.float32
+bn.num_batches_tracked	()	torch.int64
