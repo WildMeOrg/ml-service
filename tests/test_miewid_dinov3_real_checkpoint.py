@@ -1,6 +1,7 @@
-"""Load the real DEV DINOv3 checkpoint (and the shipped v5 EfficientNet when
-present) through the production config path. Skipped where the files are
-absent (CI). The DEV checkpoint must never ship or gate a release."""
+"""Load the real FINAL MiewID v5 DINOv3 checkpoint (and the shipped v5
+EfficientNet when present) through the production config path. Skipped where
+the files are absent (CI). Override the path and expected digest together with
+MIEWID_DINOV3_CKPT / MIEWID_DINOV3_SHA256."""
 import io
 import os
 
@@ -11,14 +12,16 @@ from PIL import Image
 from app.models.miewid import MiewidModel
 
 DEV = os.environ.get(
-    "MIEWID_DINOV3_DEV_CKPT",
-    "/mnt/c/claude-skills/models/reference/miewid-dinov3-dev/miew_id.msv5_dinov3.DEV-ep10.bin")
-DEV_SHA = "1c30dec4cf20e82da5cb9a9e2bf53efe4a7080c75ec3db3416952f592b356735"
+    "MIEWID_DINOV3_CKPT",
+    "/mnt/c/claude-skills/models/reference/miewid-dinov3-dev/miew_id.msv5_dinov3.FINAL.bin")
+DEV_SHA = os.environ.get(
+    "MIEWID_DINOV3_SHA256",
+    "05686c4b18a57d14073668e879ba915846263f990feb7c2ac45866845c7ec437")
 EFFNET = os.environ.get(
     "MIEWID_EFFNET_V5_CKPT",
     "/mnt/c/claude-skills/models/reference/miewIDv5/_model/miew_id.msv5_main.bin")
 
-pytestmark = pytest.mark.skipif(not os.path.exists(DEV), reason="DEV checkpoint not present")
+pytestmark = pytest.mark.skipif(not os.path.exists(DEV), reason="DINOv3 checkpoint not present")
 
 
 def _jpeg(seed):
