@@ -15,6 +15,10 @@ MODEL_REGISTRY = {
         'module': 'app.models.megadetector',
         'class': 'MegaDetectorModel',
     },
+    'rfdetr': {
+        'module': 'app.models.rfdetr_model',
+        'class': 'RFDETRModel',
+    },
     'miewid': {
         'module': 'app.models.miewid',
         'class': 'MiewidModel'

@@ -7,6 +7,7 @@ A flexible FastAPI service for serving computer vision models used by the [Wildb
 | Type | Architecture | Use Case |
 |------|-------------|----------|
 | `yolo-ultralytics` | YOLOv11 (Ultralytics) | Object detection |
+| `rfdetr` | RF-DETR (Roboflow `rfdetr`, DINOv2 backbone) | Object detection, e.g. the Community Fish Detector |
 | `megadetector` | MegaDetector (PytorchWildlife) | Animal/person/vehicle detection |
 | `lightnet` | PyDarknet YOLO v2/v3 | Species-specific detection (WBIA legacy models) |
 | `efficientnetv2` | EfficientNet-B4 (timm) | Species/viewpoint classification |
@@ -471,6 +472,15 @@ Models are configured in `app/model_config.json`:
             "conf": 0.5
         },
         {
+            "model_id": "cfd_rfdetr_m",
+            "model_type": "rfdetr",
+            "model_path": "/path/to/cfd-rf-detr-medium-1024.pth",
+            "variant": "medium",
+            "resolution": 1024,
+            "conf": 0.3,
+            "class_names": ["fish"]
+        },
+        {
             "model_id": "mdv6",
             "model_type": "megadetector",
             "model_path": "/path/to/mdv6-yolov10-e.pt",
@@ -541,6 +551,15 @@ Models are configured in `app/model_config.json`:
   with an `orientation_model_id`: orientation models read the detector's emitted box, and the swapped
   representation has not been validated as their input. Switching an existing model to `min_rotation`
   changes its chips, so its stored embeddings must be regenerated in the same deploy.
+
+**RF-DETR** (`rfdetr`):
+- `model_path`: Path or URL to the `.pth` checkpoint as saved by rfdetr training (the package loads it itself); `checkpoint_path` is accepted as an alias
+- `variant`: `nano`, `small`, `medium` (default), `base` or `large`; must match the checkpoint's architecture, a mismatch fails the load and therefore startup
+- `resolution`: Input resolution the checkpoint was trained at (optional; the package's per-variant default otherwise). Fixed at load, not per request
+- `conf`: Confidence threshold (default: 0.5); overridable per request via `model_params` / `predict_model_params`
+- `class_names`: Required. The checkpoint's class ids as a list (index = id) or a dict (`{"0": "fish"}`). Fine-tuned RF-DETR checkpoints carry no label names and the package falls back to the COCO list, which is wrong and does not contain id 0, the id a single-class fine-tune emits; a detection whose id is not in the map fails the request rather than being labelled "person"
+- Boxes are axis-aligned (theta 0), so an `orientation_model_id` chains after it as after `yolo-ultralytics`
+- Pinned at `rfdetr==1.5.2`: the newest release compatible with the service's transformers 4.x, torch 2.1.2 and Python 3.10 (1.6+ needs transformers >= 5.1 and torch >= 2.2). The Community Fish Detector checkpoint produces identical boxes under 1.5.2 and 1.12
 
 **MegaDetector** (`megadetector`):
 - `model_path`: Path or URL to `.pt` weights

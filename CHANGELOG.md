@@ -1,5 +1,20 @@
 ## [Unreleased]
 
+- New `rfdetr` model type (`app/models/rfdetr_model.py`): serves RF-DETR
+  checkpoints through the Roboflow `rfdetr` package as a `/predict/` and
+  `/pipeline/` detector, so the Community Fish Detector (RF-DETR-Medium 1024,
+  Apache-2.0) can replace or back up species-specific lightnet detectors.
+  Boxes are axis-aligned (theta 0) and chain with `orientation_model_id`
+  unchanged. Config: `model_path`, `variant`, `resolution`, `conf` and a
+  required `class_names` map; fine-tuned RF-DETR checkpoints carry no label
+  names and the package's COCO fallback does not even contain the id 0 a
+  single-class fine-tune emits, so an unmapped id fails the request instead of
+  fabricating a label. Pinned `rfdetr==1.5.2`, the newest release that fits
+  the service's transformers 4.x / torch 2.1.2 / Python 3.10 pins (1.6+ needs
+  transformers >= 5.1 and torch >= 2.2); verified box-identical to 1.12 on the
+  90-image GrouperSpotter eval set. Motivation: on 90 iNaturalist photos of
+  the nine new GrouperSpotter species the production `grouper_v1` lightnet
+  put a good box on 45, the Community Fish Detector on 75.
 - `yolo-ultralytics` models gain an opt-in `obb_theta: "min_rotation"` config
   key. The pinned ultralytics (8.3.139) runs `ops.regularize_rboxes` on every
   oriented box: theta is forced into [0, pi/2) and w/h are swapped when it
