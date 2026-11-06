@@ -4,8 +4,10 @@
   checkpoints through the Roboflow `rfdetr` package as a `/predict/` and
   `/pipeline/` detector, so the Community Fish Detector (RF-DETR-Medium 1024,
   Apache-2.0) can replace or back up species-specific lightnet detectors.
-  Boxes are axis-aligned (theta 0) and chain with `orientation_model_id`
-  unchanged. Config: `model_path`, `variant`, `resolution`, `conf` and a
+  Boxes are axis-aligned (theta 0), clipped to the image frame (rfdetr
+  1.5.x emits unclipped DETR boxes; a negative origin crashes the labeler
+  crop downstream, found on the rodan test instance on 10 of 206 boxes),
+  and chain with `orientation_model_id` unchanged. Config: `model_path`, `variant`, `resolution`, `conf` and a
   required `class_names` map; fine-tuned RF-DETR checkpoints carry no label
   names and the package's COCO fallback does not even contain the id 0 a
   single-class fine-tune emits, so an unmapped id fails the request instead of

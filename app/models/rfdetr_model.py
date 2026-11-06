@@ -4,7 +4,7 @@ Serves RF-DETR checkpoints -- the Community Fish Detector
 (https://github.com/WildHackers/community-fish-detector) is the motivating one --
 as a ``/predict/`` and ``/pipeline/`` detector. Boxes are axis-aligned and theta is
 always 0.0, so an ``orientation_model_id`` chains after it exactly as after
-``yolo-ultralytics``.
+``yolo-ultralytics``. Boxes are clipped to the image frame (see ``predict``).
 
 Config keys (``model_config.json``)::
 
@@ -151,8 +151,9 @@ class RFDETRModel(BaseModel):
 
         # Decode through decode_image_rgb so the EXIF Orientation tag is applied:
         # boxes must be in the upright (displayed) frame, as for every PIL-decoding model.
-        img = Image.fromarray(decode_image_rgb(image_bytes))
-        det = self.model.predict(img, threshold=conf)
+        arr = decode_image_rgb(image_bytes)
+        height, width = arr.shape[:2]
+        det = self.model.predict(Image.fromarray(arr), threshold=conf)
 
         xyxy = det.xyxy if det.xyxy is not None else []
         n = len(xyxy)
@@ -160,6 +161,7 @@ class RFDETRModel(BaseModel):
         class_id = det.class_id if det.class_id is not None else [None] * n
 
         bboxes, thetas, scores, class_ids, class_names = [], [], [], [], []
+        dropped = 0
         for (x1, y1, x2, y2), score, cid in zip(xyxy, confidence, class_id):
             if score is None or cid is None:
                 raise ValueError(
@@ -169,11 +171,23 @@ class RFDETRModel(BaseModel):
                 raise ValueError(
                     f"rfdetr '{self.model_id}': emitted class id {cid}, which class_names "
                     f"{self.model_info['class_names']} does not map; refusing to fabricate a label")
-            bboxes.append([float(x1), float(y1), float(x2 - x1), float(y2 - y1)])
+            # rfdetr 1.5.x does not clip to the frame: a DETR box can start a pixel or two
+            # outside the image (10 of 206 boxes on the GrouperSpotter eval set). Every
+            # downstream crop assumes in-frame boxes and the labeler's crop raises on a
+            # negative origin, which the pipeline then reports as classification null.
+            # Clip here; drop anything left without a full pixel of width and height.
+            cx1, cy1 = max(0.0, float(x1)), max(0.0, float(y1))
+            cx2, cy2 = min(float(width), float(x2)), min(float(height), float(y2))
+            if cx2 - cx1 < 1.0 or cy2 - cy1 < 1.0:
+                dropped += 1
+                continue
+            bboxes.append([cx1, cy1, cx2 - cx1, cy2 - cy1])
             thetas.append(0.0)  # axis-aligned detector
             scores.append(float(score))
             class_ids.append(cid)
             class_names.append(self.class_names[cid])
+        if dropped:
+            logger.info(f"rfdetr '{self.model_id}': dropped {dropped} box(es) with no in-frame extent")
 
         return {
             "bboxes": bboxes,

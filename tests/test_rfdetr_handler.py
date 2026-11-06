@@ -165,11 +165,11 @@ def test_constructor_failure_propagates_through_the_model_handler(rfdetr_model, 
 def test_predict_converts_corner_boxes_and_maps_class_names(rfdetr_model, tmp_path):
     RFDETRModel, captured = rfdetr_model
     model, _ = _loaded(RFDETRModel, tmp_path)
-    captured["detections"] = FakeDetections([[10, 20, 110, 220], [0, 0, 5, 5]], [0.9, 0.4], [0, 0])
+    captured["detections"] = FakeDetections([[10, 20, 110, 100], [0, 0, 5, 5]], [0.9, 0.4], [0, 0])
 
-    out = model.predict(_jpeg())
+    out = model.predict(_jpeg())   # 200x120 frame; both boxes inside it
 
-    assert out["bboxes"] == [[10.0, 20.0, 100.0, 200.0], [0.0, 0.0, 5.0, 5.0]]
+    assert out["bboxes"] == [[10.0, 20.0, 100.0, 80.0], [0.0, 0.0, 5.0, 5.0]]
     assert out["thetas"] == [0.0, 0.0]
     assert out["scores"] == pytest.approx([0.9, 0.4])
     assert out["class_ids"] == [0, 0]
@@ -216,6 +216,63 @@ def test_predict_conf_override_reaches_the_threshold_and_config_keys_are_tolerat
                   class_names=["fish"], model_id="cfd")
 
     assert captured["predict"]["threshold"] == 0.05
+
+
+def test_predict_clips_boxes_to_the_frame(rfdetr_model, tmp_path):
+    """rfdetr 1.5.x emits unclipped DETR boxes; a negative origin crashes the labeler crop
+    downstream (seen on the rodan test instance), so the handler clips to the 200x120 frame."""
+    RFDETRModel, captured = rfdetr_model
+    model, _ = _loaded(RFDETRModel, tmp_path)
+    captured["detections"] = FakeDetections(
+        [[-5, -3, 50, 40], [150, 100, 260, 200], [-2, 10, 30, 125]], [0.9, 0.8, 0.7], [0, 0, 0])
+
+    out = model.predict(_jpeg(width=200, height=120))
+
+    assert out["bboxes"] == [[0.0, 0.0, 50.0, 40.0], [150.0, 100.0, 50.0, 20.0], [0.0, 10.0, 30.0, 110.0]]
+    assert out["scores"] == pytest.approx([0.9, 0.8, 0.7])
+    assert len(out["thetas"]) == len(out["class_ids"]) == len(out["class_names"]) == 3
+
+
+def test_predict_drops_boxes_with_no_in_frame_extent_and_keeps_lists_aligned(rfdetr_model, tmp_path):
+    RFDETRModel, captured = rfdetr_model
+    model, _ = _loaded(RFDETRModel, tmp_path, class_names={"0": "fish", "3": "turtle"})
+    captured["detections"] = FakeDetections(
+        [[-30, -30, -1, -1], [10, 10, 60, 50], [250, 10, 300, 50], [20, 119.5, 60, 140]],
+        [0.9, 0.8, 0.7, 0.6], [0, 3, 0, 0])
+
+    out = model.predict(_jpeg(width=200, height=120))
+
+    assert out["bboxes"] == [[10.0, 10.0, 50.0, 40.0]]
+    assert out["scores"] == pytest.approx([0.8])
+    assert out["class_ids"] == [3] and out["class_names"] == ["turtle"] and out["thetas"] == [0.0]
+
+
+def test_predict_clipping_boundaries(rfdetr_model, tmp_path):
+    """Exact edges against a 200x120 frame: a box ending exactly at width/height is untouched,
+    fractional in-frame coordinates are kept as floats, exterior boxes that only touch an edge
+    drop (zero extent), and a sub-pixel width drops even when the height is fine."""
+    RFDETRModel, captured = rfdetr_model
+    model, _ = _loaded(RFDETRModel, tmp_path)
+    captured["detections"] = FakeDetections(
+        [[150, 100, 200, 120],      # ends exactly at the frame edge: unchanged
+         [10.25, 20.5, 60.75, 50.5],  # fractional, inside: unchanged floats
+         [-20, 10, 0, 50],          # touches the left edge from outside: zero extent, dropped
+         [10, 120, 50, 140],        # touches the bottom edge from outside: dropped
+         [10, 10, 10.5, 60]],       # half a pixel wide: dropped
+        [0.9, 0.8, 0.7, 0.6, 0.5], [0, 0, 0, 0, 0])
+
+    out = model.predict(_jpeg(width=200, height=120))
+
+    assert out["bboxes"] == [[150.0, 100.0, 50.0, 20.0], [10.25, 20.5, 50.5, 30.0]]
+    assert out["scores"] == pytest.approx([0.9, 0.8])
+
+
+def test_predict_validates_class_id_before_dropping_an_outside_box(rfdetr_model, tmp_path):
+    RFDETRModel, captured = rfdetr_model
+    model, _ = _loaded(RFDETRModel, tmp_path)
+    captured["detections"] = FakeDetections([[-30, -30, -1, -1]], [0.9], [7])
+    with pytest.raises(ValueError, match="class id 7"):
+        model.predict(_jpeg(width=200, height=120))
 
 
 def test_predict_refuses_an_unmapped_class_id(rfdetr_model, tmp_path):

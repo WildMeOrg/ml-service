@@ -558,7 +558,7 @@ Models are configured in `app/model_config.json`:
 - `resolution`: Input resolution the checkpoint was trained at (optional; the package's per-variant default otherwise). Fixed at load, not per request
 - `conf`: Confidence threshold (default: 0.5); overridable per request via `model_params` / `predict_model_params`
 - `class_names`: Required. The checkpoint's class ids as a list (index = id) or a dict (`{"0": "fish"}`). Fine-tuned RF-DETR checkpoints carry no label names and the package falls back to the COCO list, which is wrong and does not contain id 0, the id a single-class fine-tune emits; a detection whose id is not in the map fails the request rather than being labelled "person"
-- Boxes are axis-aligned (theta 0), so an `orientation_model_id` chains after it as after `yolo-ultralytics`
+- Boxes are axis-aligned (theta 0), so an `orientation_model_id` chains after it as after `yolo-ultralytics`. They are clipped to the image frame: rfdetr 1.5.x emits unclipped DETR boxes that can start a pixel or two outside the image, and the labeler's crop fails on a negative origin, which the pipeline then reports as `classification: null`
 - Pinned at `rfdetr==1.5.2`: the newest release compatible with the service's transformers 4.x, torch 2.1.2 and Python 3.10 (1.6+ needs transformers >= 5.1 and torch >= 2.2). The Community Fish Detector checkpoint produces identical boxes under 1.5.2 and 1.12
 
 **MegaDetector** (`megadetector`):
