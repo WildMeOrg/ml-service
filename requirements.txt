@@ -1,6 +1,7 @@
 fastapi==0.109.0
 uvicorn==0.27.0
 ultralytics==8.3.139
+rfdetr==1.5.2  # newest release that fits transformers 4.x, torch 2.1.2 and py3.10; 1.6+ needs transformers>=5.1 and torch>=2.2
 pydantic==2.5.3
 python-multipart==0.0.6
 httpx==0.26.0
