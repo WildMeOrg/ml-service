@@ -1,6 +1,5 @@
 import logging
 import math
-import numbers
 from fastapi import APIRouter, HTTPException, Request, status, Depends
 from typing import Dict, Any, List, Optional
 import asyncio
@@ -13,7 +12,8 @@ from app.models.timm_classifier import TimmClassifierModel
 from app.models.miewid import MiewidModel
 from app.models.densenet_orientation import DenseNetOrientationModel
 from app.models.wbia_orientation import (
-    WbiaOrientationModel, OrientationInferenceError, STATUS_OK, STATUS_REJECTED)
+    WbiaOrientationModel, OrientationInferenceError, STATUS_OK, STATUS_REJECTED,
+    is_finite_number)
 from app.models.yolo_ultralytics import resolve_obb_theta
 from app.utils.image_uri import fetch_image_for_request, admission_slot, sanitize_uri_for_response, sanitize_uri_for_logging
 from fastapi.concurrency import run_in_threadpool
@@ -38,14 +38,6 @@ class PipelineRequest(BaseModel):
         None,
         description="Optional parameters to override prediction model configuration"
     )
-
-def _is_finite_number(v: Any) -> bool:
-    """A real, finite number. bool is excluded: it is an int subclass, and an
-    angle or coordinate of True is a bug, not a 1. numbers.Real, so NumPy
-    scalars from detectors count."""
-    return (isinstance(v, numbers.Real) and not isinstance(v, bool)
-            and math.isfinite(float(v)))
-
 
 async def get_model_handler(request: Request) -> ModelHandler:
     """Dependency to get the model handler from the app state."""
@@ -348,7 +340,7 @@ async def run_pipeline(
                                            f"without reasons: {reasons!r}")
                             coords = ori.get('coords_normalized')
                             if (not isinstance(coords, list) or len(coords) != 5
-                                    or not all(_is_finite_number(c) for c in coords)):
+                                    or not all(is_finite_number(c) for c in coords)):
                                 raise HTTPException(
                                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                                     detail=f"Orientation result {idx} is rejected with "
@@ -357,7 +349,7 @@ async def run_pipeline(
                             # passes NaN/inf straight through, so check it here,
                             # before any consumer runs for any row.
                             det_theta = filtered_bboxes[idx].get('theta', 0.0)
-                            if not _is_finite_number(det_theta):
+                            if not is_finite_number(det_theta):
                                 raise HTTPException(
                                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                                     detail=f"Orientation result {idx} is rejected and "

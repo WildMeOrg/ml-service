@@ -433,11 +433,12 @@ def test_half_an_oriented_box_is_rejected():
 # would throw away every good detection in the image.
 
 SLIVER = [12.0, 18.0, 44.0, 0.4]   # also sub-pixel: must not 500 any more
-# Row 1's detector box hangs off the image; orientation clipped it. The
-# fallback must use the CLIPPED crop (what orientation looked at), while
-# detector_bbox keeps the raw one for audit.
-RAW_DETECTOR_BOX = [-5, 20, 60, 50]
-CLIPPED_EFF = [0, 20, 55, 50]
+# Row 1's detector box runs past the right edge of a 100 px wide image;
+# resolve_bbox truncates it the way NumPy slicing does. The fallback must use
+# the CLIPPED crop (what orientation looked at), while detector_bbox keeps the
+# raw one for audit.
+RAW_DETECTOR_BOX = [45, 20, 60, 50]
+CLIPPED_EFF = [45, 20, 55, 50]
 
 
 def _two_rows_second_rejected(detector_theta=0.0, coords=None):

@@ -73,6 +73,15 @@ _TRANSFORM = transforms.Compose([
 ])
 
 
+def is_finite_number(v: Any) -> bool:
+    """A real, finite number. numbers.Real, not (int, float): detectors hand
+    us np.float32/np.int64, which are Real but NOT instances of the builtins.
+    bool is excluded -- it is an int subclass, and a coordinate or angle of
+    True is a bug, not a 1."""
+    return (isinstance(v, numbers.Real) and not isinstance(v, bool)
+            and math.isfinite(float(v)))
+
+
 class OrientationInferenceError(RuntimeError):
     """Orientation could not produce a trustworthy theta.
 
@@ -134,11 +143,7 @@ def resolve_bbox(bbox: Sequence[float], width: int, height: int) -> List[int]:
             f"bbox must be [x, y, w, h]; got {len(bbox)} value(s)."
         )
     for v in bbox:
-        # numbers.Real, not (int, float): detectors hand us np.float32/np.int64,
-        # which are Real but NOT instances of the builtins. bool is excluded --
-        # it is an int subclass and a bbox coordinate of True is a bug, not a 1.
-        if isinstance(v, bool) or not isinstance(v, numbers.Real) \
-                or not math.isfinite(float(v)):
+        if not is_finite_number(v):
             raise OrientationInferenceError(
                 f"bbox contains a non-finite or non-numeric value: {bbox!r}"
             )
@@ -327,8 +332,7 @@ def validate_plausibility_limits(model_id: str,
     """Check the gate's model_config values at load, so a typo fails loudly
     instead of silently disabling (or tightening) the gate."""
     def _num(key, v):
-        if isinstance(v, bool) or not isinstance(v, numbers.Real) \
-                or not math.isfinite(float(v)):
+        if not is_finite_number(v):
             raise ValueError(f"wbia-orientation '{model_id}': {key} must be a "
                              f"finite number, got {v!r}.")
         return float(v)
