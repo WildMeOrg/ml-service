@@ -6,8 +6,9 @@ these tests pin the reference algorithm's arithmetic exactly, plus every failure
 mode surfaced in design review:
 
   - fail-closed (a 0.0 fallback IS the bug being repaired; 0.0 is also valid)
-  - NumPy's non-clamping slice (a wide negative bbox crops the FAR EDGE)
-  - integerization rule (int(-0.5)==0 vs floor(-0.5)==-1 -> far edge)
+  - boxes are clipped to the frame as WBIA's localizations step did; without it
+    NumPy's non-clamping slice crops the FAR EDGE for a negative origin
+  - integerization rule (int() truncation, then the clip)
   - no label/probability ever emitted (the #33 confusion)
   - predict_batch ordering (a misaligned result attaches theta to the wrong crop)
 
@@ -79,39 +80,67 @@ def test_the_plus_90_degrees_is_not_dropped():
 
 
 # ------------------------------------------------- bbox resolution (Critical)
+#
+# WBIA never let the orientation plugin see an overhanging box: Wildbook's
+# lightnet detections went through the `localizations` table, which clips every
+# box to the frame (wbia/core_images.py:1539-1557, boundary=True by default),
+# and the plugin then read those stored, clipped boxes. The plugin's raw
+# `image[y1:y1+h, x1:x1+w]` slice would resolve a negative origin from the FAR
+# edge, but in WBIA that was unreachable. Reproducing the slice WITHOUT the clip
+# turned a whale shark overhanging the top by 28 px into a crop of the bottom
+# 28 rows (Sharkbook, 2026-11-25), which became a persisted sliver.
+
+
+def _wbia_boundary(bbox, w, h):
+    """core_images.py:1539-1557, transcribed independently of resolve_bbox."""
+    xtl, ytl, bw, bh = bbox
+    xbr, ybr = xtl + bw, ytl + bh
+    xtl, xbr = min(max(0, xtl), w), min(max(0, xbr), w)
+    ytl, ybr = min(max(0, ytl), h), min(max(0, ybr), h)
+    return [xtl, ytl, xbr - xtl, ybr - ytl]
+
 
 @pytest.mark.parametrize("bbox,expected", [
     ([10, 10, 50, 50], [10, 10, 50, 50]),        # ordinary
-    ([-20, 10, 50, 50], [380, 10, 0, 50]),       # narrow negative -> empty
-    ([-20, 10, 500, 50], [380, 10, 20, 50]),     # WIDE negative -> FAR EDGE
+    ([-20, 10, 50, 50], [0, 10, 30, 50]),        # narrow negative -> clipped, not empty
+    ([-20, 10, 500, 50], [0, 10, 400, 50]),      # WIDE negative -> clipped, NOT the far edge
     ([380, 10, 50, 50], [380, 10, 20, 50]),      # overrun -> truncated
-    ([500, 400, 50, 50], [400, 300, 0, 0]),      # fully outside -> empty
+    ([500, 400, 50, 50], [400, 300, 0, 0]),      # fully outside -> empty (full-frame fallback)
+    ([-60, 10, 50, 50], [0, 10, 0, 50]),         # entirely left of frame -> empty
 ])
-def test_resolve_bbox_reproduces_numpy_slicing(bbox, expected):
-    """NumPy slicing does NOT clamp: a negative origin resolves from the far
-    edge. resolve_bbox must reproduce exactly what the reference's raw slice did,
-    or theta describes a region the detector never pointed at."""
+def test_resolve_bbox_clips_to_the_frame_like_wbia(bbox, expected):
     from app.models.wbia_orientation import resolve_bbox
     assert resolve_bbox(bbox, width=400, height=300) == expected
 
 
-def test_resolve_bbox_agrees_with_actual_numpy_slice():
-    """Ground the rule against NumPy itself rather than our belief about it."""
+def test_sharkbook_guam2_overhang_is_the_whole_shark_not_the_bottom_strip():
+    """whaleshark_v0 on a 2860x1464 image: [22, -28, 2839, 1492]. Unclipped, the
+    -28 resolved from the bottom edge -> [22, 1436, 2838, 28]."""
     from app.models.wbia_orientation import resolve_bbox
-    img = np.zeros((300, 400, 3))
-    for bbox in ([10, 10, 50, 50], [-20, 10, 500, 50], [380, 10, 50, 50],
-                 [500, 400, 50, 50], [-20, 10, 50, 50]):
-        x, y, w, h = bbox
-        actual = img[y:y + h, x:x + w]
-        eff = resolve_bbox(bbox, 400, 300)
-        assert (eff[2], eff[3]) == (actual.shape[1], actual.shape[0]), bbox
+    assert resolve_bbox([22, -28, 2839, 1492], 2860, 1464) == [22, 0, 2838, 1464]
 
 
-def test_wide_negative_bbox_really_does_hit_the_far_edge():
-    """Documents WHY resolve_bbox exists: the crop is real, and wrong."""
-    img = np.zeros((300, 400, 3))
-    img[:, 380:400] = 1.0                       # mark the far-right edge
-    assert img[0:300, -20:480].sum() > 0        # a "left" bbox crops the RIGHT edge
+@pytest.mark.parametrize("bbox", [
+    [10, 10, 50, 50], [-20, 10, 500, 50], [380, 10, 50, 50], [500, 400, 50, 50],
+    [-20, 10, 50, 50], [-5, -7, 420, 320], [100, -40, 30, 20],
+])
+def test_resolve_bbox_crops_what_wbia_cropped(bbox):
+    """Grounded against WBIA's clip followed by the plugin's NumPy slice: same
+    origin, same pixels."""
+    from app.models.wbia_orientation import resolve_bbox
+    img = np.arange(300 * 400).reshape(300, 400)
+    x, y, w, h = _wbia_boundary(bbox, 400, 300)
+    expected = img[y:y + h, x:x + w]
+    ex, ey, ew, eh = resolve_bbox(bbox, 400, 300)
+    got = img[ey:ey + eh, ex:ex + ew]
+    assert got.shape == expected.shape and np.array_equal(got, expected), bbox
+
+
+def test_fractional_overrun_keeps_its_last_pixel():
+    """Integerize FIRST, then clip: x=399.6, w=2 is int [399, 2] -> 1 px wide.
+    Clipping the floats first would give 0.4 -> int 0 -> a full-frame fallback."""
+    from app.models.wbia_orientation import resolve_bbox
+    assert resolve_bbox([399.6, 10, 2, 50], 400, 300) == [399, 10, 1, 50]
 
 
 @pytest.mark.parametrize("bad", [
@@ -131,17 +160,15 @@ def test_resolve_bbox_rejects_wrong_arity():
         resolve_bbox([1, 2, 3], 400, 300)
 
 
-@pytest.mark.parametrize("bbox,expected_x", [
-    ([-0.5, 10, 50, 50], 0),      # int(-0.5) == 0   (truncate toward zero)
-    ([10.9, 10, 50, 50], 10),     # int(10.9) == 10
-    ([-1.9, 10, 50, 50], -1),     # int(-1.9) == -1
+@pytest.mark.parametrize("bbox,expected", [
+    ([-0.5, 10, 50, 50], [0, 10, 50, 50]),     # int(-0.5) == 0   (truncate toward zero)
+    ([10.9, 10, 50, 50], [10, 10, 50, 50]),    # int(10.9) == 10
+    ([-1.9, 10, 50, 50], [0, 10, 49, 50]),     # int(-1.9) == -1, then clipped to 0
 ])
-def test_integerization_truncates_toward_zero(bbox, expected_x):
-    """int(), matching pipeline_router:218. floor(-0.5) would give -1, which then
-    resolves from the far edge — the rule choice is load-bearing."""
+def test_integerization_truncates_toward_zero_then_clips(bbox, expected):
+    """int(), matching pipeline_router's detector-box rule, THEN the WBIA clip."""
     from app.models.wbia_orientation import resolve_bbox
-    eff = resolve_bbox(bbox, 400, 300)
-    assert eff[0] == (expected_x if expected_x >= 0 else 400 + expected_x)
+    assert resolve_bbox(bbox, 400, 300) == expected
 
 
 # ------------------------------------------------------------ TTA arithmetic
@@ -471,3 +498,11 @@ def test_load_uses_strict_state_dict():
         with pytest.raises(RuntimeError, match="size mismatch"):
             WbiaOrientationModel().load(model_id="t", checkpoint_path="/x")
         assert backbone.load_state_dict.call_args.kwargs.get("strict") is True
+
+
+def test_predict_batch_crops_an_overhanging_box_inside_the_frame():
+    """The production regression at the model boundary: a detector box hanging
+    28 px over the top must not crop the bottom rows."""
+    m = _model()
+    r = m.predict_batch(RGB, [[22, -28, 350, 356]])[0]     # RGB is 400x300
+    assert r["effective_bbox"] == [22, 0, 350, 300]

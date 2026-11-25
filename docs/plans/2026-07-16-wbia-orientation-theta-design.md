@@ -127,6 +127,15 @@ Sources: `_plugin.py:189-296` (inference), `dataset/animal_wbia.py:17-37`
    at, while classify/extract — which clamp differently — crop somewhere else.
    `effective_bbox` alone does not fix this; the *resolution rule* must match.
 
+   > **Superseded 2026-11-25.** The far-edge crop was never reachable in WBIA:
+   > Wildbook's lightnet detections went through the `localizations` table,
+   > which clips every box to the frame (`wbia/core_images.py:1539-1557`,
+   > `boundary=True`), and the plugin read those stored boxes. Reproducing
+   > the slice without that clip made a whale shark box overhanging the top
+   > by 28 px crop the bottom 28 rows, which was then persisted as a sliver
+   > (Sharkbook). `resolve_bbox` now integerizes and then clips to the frame
+   > exactly as WBIA did; step 3 below should be read that way.
+
    **Bbox policy — resolve the ACTUAL reference slice, then reuse it everywhere:**
    1. Validate finite numeric values; **fail the whole request (500)** on
       malformed/non-finite/NaN, before any consumer runs.

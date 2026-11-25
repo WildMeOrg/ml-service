@@ -33,6 +33,19 @@ def sha256(path: str) -> str:
     return h.hexdigest()
 
 
+def wbia_localization_boundary(bbox, width, height):
+    """What WBIA stored for a Wildbook lightnet detection, and so what the
+    reference plugin later read via get_annot_bboxes: the `localizations` table
+    clips every box to the frame (wbia/core_images.py:1539-1557, boundary=True).
+    Transcribed independently of the port's resolve_bbox, so the gate compares
+    the port's whole path (clip + slice) against WBIA's whole path."""
+    xtl, ytl, w, h = (int(v) for v in bbox)
+    xbr, ybr = xtl + w, ytl + h
+    xtl, xbr = min(max(0, xtl), width), min(max(0, xbr), width)
+    ytl, ybr = min(max(0, ytl), height), min(max(0, ybr), height)
+    return [xtl, ytl, xbr - xtl, ybr - ytl]
+
+
 def resolve_reference_root(manifest, override=None):
     return override or manifest.get("reference_source", {}).get("path") or "/reference"
 
@@ -76,12 +89,18 @@ def main(argv=None) -> int:
             if fx.get("sha256") not in (None, "", "<fixture byte hash>") and got != fx["sha256"]:
                 failures.append(f"fixture {img} hash mismatch (manifest identity broken)")
                 continue
-            t_ref, c_ref = ref.theta(data, fx["bbox"])
+            # The port gets the raw detection; the reference gets what WBIA's
+            # localization step would have stored for it.
+            import imageio.v2 as imageio
+            img_h, img_w = imageio.imread(data).shape[:2]
+            ref_bbox = wbia_localization_boundary(fx["bbox"], img_w, img_h)
+            t_ref, c_ref = ref.theta(data, ref_bbox)
             r = port.predict_batch(data, [fx["bbox"]])[0]
             e_t = circular_error(t_ref, r["theta"])
             e_c = max(abs(a - b) for a, b in zip(c_ref, r["coords_normalized"]))
             rows.append({"checkpoint": ck["model_id"], "fixture": fx.get("file"),
                          "stratum": fx.get("stratum"), "bbox": fx["bbox"],
+                         "reference_bbox": ref_bbox,
                          "theta_ref": t_ref, "theta_port": r["theta"],
                          "theta_err": e_t, "coord_err": e_c,
                          "effective_bbox": r["effective_bbox"]})
