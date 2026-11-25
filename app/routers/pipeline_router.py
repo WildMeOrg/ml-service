@@ -11,7 +11,8 @@ from app.models.densenet_wilddog_cascade import DenseNetWildDogCascadeModel
 from app.models.timm_classifier import TimmClassifierModel
 from app.models.miewid import MiewidModel
 from app.models.densenet_orientation import DenseNetOrientationModel
-from app.models.wbia_orientation import WbiaOrientationModel, OrientationInferenceError
+from app.models.wbia_orientation import (
+    WbiaOrientationModel, OrientationInferenceError, STATUS_OK, STATUS_REJECTED)
 from app.models.yolo_ultralytics import resolve_obb_theta
 from app.utils.image_uri import fetch_image_for_request, admission_slot, sanitize_uri_for_response, sanitize_uri_for_logging
 from fastapi.concurrency import run_in_threadpool
@@ -283,7 +284,11 @@ async def run_pipeline(
                     # a malformed row N run classify/extract for rows 0..N-1 before the
                     # request failed -- request-level fail-closed must mean no consumer
                     # runs at all.
-                    oriented_bbox_ints = [None] * len(wbia_orientation_results)
+                    # One (bbox, theta, theta_source) per row, chosen HERE and
+                    # used for classify, extract AND the emitted result, so the
+                    # embedding and the persisted box always describe the same
+                    # region.
+                    oriented_selection = [None] * len(wbia_orientation_results)
                     for idx, ori in enumerate(wbia_orientation_results):
                         if not isinstance(ori, dict):
                             raise HTTPException(
@@ -310,6 +315,37 @@ async def run_pipeline(
                                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                                 detail=f"Orientation result {idx} has a non-positive "
                                        f"effective_bbox: {eb!r}")
+                        # Issue #59: the model flags an implausible oriented
+                        # box (a long thin sliver, mostly off the detection)
+                        # per detection instead of failing the request. Fall
+                        # back for THAT detection alone to the detector's own
+                        # box and theta -- what it would get with no orienter
+                        # configured -- labelled so it is never mistaken for a
+                        # predicted angle. A row with no known status has not
+                        # been through the gate: malformed, fail closed.
+                        ostatus = ori.get('orientation_status')
+                        if ostatus not in (STATUS_OK, STATUS_REJECTED):
+                            raise HTTPException(
+                                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                                detail=f"Orientation result {idx} has a missing or "
+                                       f"unknown orientation_status: {ostatus!r}")
+                        if ostatus == STATUS_REJECTED:
+                            reasons = ori.get('orientation_reject_reasons')
+                            if (not isinstance(reasons, list) or not reasons
+                                    or not all(isinstance(s, str) for s in reasons)):
+                                raise HTTPException(
+                                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                                    detail=f"Orientation result {idx} is rejected "
+                                           f"without reasons: {reasons!r}")
+                            # effective_bbox, not the raw detector box: it is
+                            # the crop orientation actually looked at (NumPy
+                            # slice semantics, empty-crop full-frame fallback),
+                            # already validated as positive ints above.
+                            oriented_selection[idx] = (
+                                list(eb),
+                                float(filtered_bboxes[idx].get('theta', 0.0)),
+                                'detector')
+                            continue
                         # The object-aligned box is what gets persisted AND
                         # cropped, so it is validated as strictly as theta --
                         # and integerized HERE, before any consumer runs. A
@@ -340,7 +376,7 @@ async def run_pipeline(
                                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                                 detail=f"Orientation result {idx} rounds to a "
                                        f"sub-pixel oriented_bbox: {ob!r} -> {rounded!r}")
-                        oriented_bbox_ints[idx] = rounded
+                        oriented_selection[idx] = (rounded, float(ot), 'orientation')
 
                 # Step 3: Run classification and extraction for each filtered bbox
                 pipeline_results = []
@@ -362,7 +398,6 @@ async def run_pipeline(
 
                     if wbia_orientation_results is not None:
                         ori = wbia_orientation_results[i]
-                        theta_source = 'orientation'
                         # The regressor's OBJECT-ALIGNED box and its long-axis
                         # angle. These two describe the SAME rectangle, which is
                         # the whole point: the reference `theta` rotates the
@@ -371,11 +406,12 @@ async def run_pipeline(
                         # it with effective_bbox (what this did before) persisted
                         # a rectangle a quarter turn off the animal AND handed
                         # get_chip_from_img a window that clipped the animal once
-                        # it was rotated. Validated and integerized above, before
-                        # any consumer ran, so there is nothing left to check or
-                        # fall back to here.
-                        bbox_list = list(oriented_bbox_ints[i])
-                        theta = float(ori['theta_oriented'])
+                        # it was rotated. Validated, integerized and selected
+                        # above (including the per-detection fallback for an
+                        # implausible box), before any consumer ran, so there
+                        # is nothing left to check or decide here.
+                        sel_bbox, theta, theta_source = oriented_selection[i]
+                        bbox_list = list(sel_bbox)
                         bbox_coords = bbox_list
                     elif bbox_list[2] <= 0 or bbox_list[3] <= 0:
                         # Guard AFTER integerization: a raw width of 0.5 passes
@@ -520,6 +556,14 @@ async def run_pipeline(
                     }
                     if top_orientation is not None:
                         bbox_result['orientation'] = top_orientation
+                    if wbia_orientation_results is not None:
+                        ori = wbia_orientation_results[i]
+                        bbox_result['orientation_status'] = ori['orientation_status']
+                        if ori['orientation_status'] == STATUS_REJECTED:
+                            bbox_result['orientation_reject_reasons'] = \
+                                ori['orientation_reject_reasons']
+                            bbox_result['orientation_coords_normalized'] = \
+                                ori.get('coords_normalized')
                     if top_species is not None:
                         bbox_result['iaClass'] = top_species
                     if top_viewpoint is not None:

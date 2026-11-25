@@ -201,6 +201,7 @@ def test_pipeline_without_classifier_still_uses_the_theta_regressor():
         "effective_bbox": [12, 22, 96, 116],
         # the object-aligned box is what gets persisted and cropped
         "theta_oriented": 1.25 - math.pi / 2, "oriented_bbox": [14.0, 26.0, 88.0, 30.0],
+        "orientation_status": "ok",
     }]
     em = _extractor()
     client = _make_client(_detector(), em, orientation_model=om)

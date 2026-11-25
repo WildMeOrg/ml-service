@@ -34,6 +34,8 @@ import imageio.v2 as imageio
 import numpy as np
 import timm
 import torch
+from shapely import affinity
+from shapely.geometry import Polygon, box as shapely_box
 from skimage.transform import resize as sk_resize
 from torchvision import transforms
 
@@ -48,6 +50,21 @@ DEFAULT_IMSIZE = (224, 224)
 
 # The head emits exactly [xc, yc, xt, yt, w].
 NUM_OUTPUTS = 5
+
+# Per-detection plausibility gate (issue #59). When the regressor is unsure it
+# predicts a near-zero half-width and/or pins the centre at the crop edge, and
+# oriented_box() faithfully turns that into a long thin sliver. Every sliver in
+# the GrouperSpotter sweep had long/short >= 13; the healthy population is
+# <= ~3. Overridable per model in model_config, since an eel legitimately
+# exceeds 6 (lower min_short_frac too in that case: a diagonal 15:1 animal's
+# short side is ~9% of its detector box).
+DEFAULT_MAX_ASPECT = 6.0          # long/short; None disables
+DEFAULT_MIN_SHORT_FRAC = 0.15     # short side vs min(detector box side); 0 disables
+DEFAULT_MIN_OVERLAP_FRAC = 0.3    # oriented area inside the detector box; 0 disables
+
+# Status values carried on every result row. The router requires one of these.
+STATUS_OK = "ok"
+STATUS_REJECTED = "rejected_implausible"
 
 # dataset/animal_wbia.py:35 -- ImageNet statistics.
 _TRANSFORM = transforms.Compose([
@@ -254,6 +271,84 @@ def oriented_box(coords: Sequence[float], effective_bbox: Sequence[int]):
     return [bx, by, bw_out, bh_out], theta
 
 
+def _object_polygon(oriented_bbox: Sequence[float], theta: float) -> Polygon:
+    """The object-aligned rectangle oriented_box() describes.
+
+    oriented_box() de-rotates the corners by -theta about the centre and keeps
+    the axis-aligned bound, so rotating that bound by +theta about its centre
+    gives the corners back (the WBIA annotation-polygon convention, same matrix
+    as assigner._bbox_to_polygon_verts)."""
+    x, y, w, h = (float(v) for v in oriented_bbox)
+    return affinity.rotate(shapely_box(x, y, x + w, y + h), theta,
+                           origin="center", use_radians=True)
+
+
+def plausibility_failures(oriented_bbox: Sequence[float], theta: float,
+                          effective_bbox: Sequence[int],
+                          max_aspect: Optional[float] = DEFAULT_MAX_ASPECT,
+                          min_short_frac: float = DEFAULT_MIN_SHORT_FRAC,
+                          min_overlap_frac: float = DEFAULT_MIN_OVERLAP_FRAC) -> List[str]:
+    """Why this oriented box should not be trusted; [] when it is plausible.
+
+    Compares the box with the detector crop it came from. Every failing check
+    is reported, so the log says everything that went wrong:
+
+      sub_pixel   a side rounds to < 1 px. Unconditional: the router would
+                  otherwise fail the WHOLE request on it.
+      aspect      long/short > max_aspect.
+      short_side  short side < min_short_frac * the detector box's short side.
+      low_overlap less than min_overlap_frac of the oriented box's area lies
+                  inside the detector box. (Its centre is always inside: the
+                  sigmoid keeps every coordinate in [0, 1].)
+    """
+    w, h = float(oriented_bbox[2]), float(oriented_bbox[3])
+    short, long_ = min(w, h), max(w, h)
+    reasons: List[str] = []
+    if int(round(w)) < 1 or int(round(h)) < 1:
+        reasons.append("sub_pixel")
+    if max_aspect is not None and long_ > max_aspect * short:
+        reasons.append("aspect")
+    if short < min_short_frac * min(effective_bbox[2], effective_bbox[3]):
+        reasons.append("short_side")
+    if min_overlap_frac > 0:
+        poly = _object_polygon(oriented_bbox, theta)
+        ex, ey, ew, eh = effective_bbox
+        inside = poly.intersection(shapely_box(ex, ey, ex + ew, ey + eh)).area
+        if inside < min_overlap_frac * poly.area:
+            reasons.append("low_overlap")
+    return reasons
+
+
+def validate_plausibility_limits(model_id: str,
+                                 max_aspect: Any = DEFAULT_MAX_ASPECT,
+                                 min_short_frac: Any = DEFAULT_MIN_SHORT_FRAC,
+                                 min_overlap_frac: Any = DEFAULT_MIN_OVERLAP_FRAC
+                                 ) -> Dict[str, Optional[float]]:
+    """Check the gate's model_config values at load, so a typo fails loudly
+    instead of silently disabling (or tightening) the gate."""
+    def _num(key, v):
+        if isinstance(v, bool) or not isinstance(v, numbers.Real) \
+                or not math.isfinite(float(v)):
+            raise ValueError(f"wbia-orientation '{model_id}': {key} must be a "
+                             f"finite number, got {v!r}.")
+        return float(v)
+
+    if max_aspect is not None:
+        max_aspect = _num("max_aspect", max_aspect)
+        if max_aspect < 1.0:
+            raise ValueError(f"wbia-orientation '{model_id}': max_aspect must be "
+                             f">= 1 (or null to disable), got {max_aspect!r}.")
+    fracs = {}
+    for key, v in (("min_short_frac", min_short_frac),
+                   ("min_overlap_frac", min_overlap_frac)):
+        f = _num(key, v)
+        if not 0.0 <= f <= 1.0:
+            raise ValueError(f"wbia-orientation '{model_id}': {key} must be in "
+                             f"[0, 1] (0 disables), got {v!r}.")
+        fracs[key] = f
+    return {"max_aspect": max_aspect, **fracs}
+
+
 class WbiaOrientationModel(BaseModel):
     """HRNet-W32 oriented-bbox regressor returning theta."""
 
@@ -265,17 +360,26 @@ class WbiaOrientationModel(BaseModel):
         self.imsize = DEFAULT_IMSIZE
         self.hflip: bool = True
         self.vflip: bool = True
+        self.limits: Dict[str, Optional[float]] = validate_plausibility_limits("")
 
     def load(self, model_path: str = "", device: str = "cpu", model_id: str = "",
              checkpoint_path: Optional[str] = None,
              imsize: Optional[Sequence[int]] = None,
              hflip: bool = True, vflip: bool = True,
+             max_aspect: Any = DEFAULT_MAX_ASPECT,
+             min_short_frac: Any = DEFAULT_MIN_SHORT_FRAC,
+             min_overlap_frac: Any = DEFAULT_MIN_OVERLAP_FRAC,
              **kwargs) -> None:
         if kwargs:
             raise ValueError(
                 f"wbia-orientation '{model_id}': unknown config key(s) "
-                f"{sorted(kwargs)}. Expected: checkpoint_path, imsize, hflip, vflip."
+                f"{sorted(kwargs)}. Expected: checkpoint_path, imsize, hflip, vflip, "
+                f"max_aspect, min_short_frac, min_overlap_frac."
             )
+        # Before the checkpoint: a bad limit is a config error, fail fast.
+        self.limits = validate_plausibility_limits(
+            model_id, max_aspect=max_aspect, min_short_frac=min_short_frac,
+            min_overlap_frac=min_overlap_frac)
         if not checkpoint_path:
             raise ValueError(
                 f"wbia-orientation '{model_id}': checkpoint_path is required."
@@ -450,14 +554,28 @@ class WbiaOrientationModel(BaseModel):
                     f"wbia-orientation '{self.model_id}': coords describe no "
                     f"object axis (coords={coords}, bbox={eff})"
                 )
-            results.append({
+            row = {
                 "model_id": self.model_id,
                 "theta": float(th),
                 "oriented_bbox": oa_bbox,
                 "theta_oriented": oa_theta,
                 "coords_normalized": [float(c) for c in coords],
                 "effective_bbox": eff,
-            })
+                "orientation_status": STATUS_OK,
+            }
+            # Per detection, never per request (issue #59): an implausible
+            # box is flagged, not raised, so one bad crop cannot fail the good
+            # detections in the same image. The router decides the fallback.
+            reasons = plausibility_failures(oa_bbox, oa_theta, eff, **self.limits)
+            if reasons:
+                row["orientation_status"] = STATUS_REJECTED
+                row["orientation_reject_reasons"] = reasons
+                logger.warning(
+                    f"wbia-orientation '{self.model_id}': rejected implausible "
+                    f"oriented box {reasons}: effective_bbox={eff}, "
+                    f"coords={row['coords_normalized']}, oriented_bbox={oa_bbox}, "
+                    f"theta_oriented={oa_theta}")
+            results.append(row)
         if len(results) != len(bboxes):   # defensive: the contract is ordered 1:1
             raise OrientationInferenceError(
                 f"wbia-orientation '{self.model_id}': produced {len(results)} "
@@ -474,4 +592,5 @@ class WbiaOrientationModel(BaseModel):
             "hflip": self.hflip,
             "vflip": self.vflip,
             "outputs": "theta (radians) + normalized [xc, yc, xt, yt, w]",
+            "plausibility": dict(self.limits),
         }

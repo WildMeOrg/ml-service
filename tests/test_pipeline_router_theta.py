@@ -65,14 +65,16 @@ def _models(n_bboxes=1):
     return pm, cm, em
 
 
-def _orientation(thetas, effective_bboxes=None, oriented_bboxes=None):
+def _orientation(thetas, effective_bboxes=None, oriented_bboxes=None, rejected=None):
     """`thetas` are LONG-AXIS angles -- what the pipeline now emits.
 
     The real model returns both halves: `theta` stays reference-faithful (the
     upright-rotation angle, long axis + 90deg) and `theta_oriented`/
     `oriented_bbox` carry the object-aligned box. Pass `oriented_bboxes=[None,
     ...]` to simulate a degenerate prediction with no object axis.
+    `rejected={index: [reasons]}` marks rows the plausibility gate flagged.
     """
+    rejected = rejected or {}
     from app.models.wbia_orientation import WbiaOrientationModel
     om = MagicMock(spec=WbiaOrientationModel)
     effs = effective_bboxes or [[10, 10, 50, 50]] * len(thetas)
@@ -84,8 +86,10 @@ def _orientation(thetas, effective_bboxes=None, oriented_bboxes=None):
          "theta_oriented": None if ob is None else t,
          "oriented_bbox": ob,
          "coords_normalized": [0.5] * 5,
-         "effective_bbox": e}
-        for t, e, ob in zip(thetas, effs, obs)
+         "effective_bbox": e,
+         "orientation_status": "rejected_implausible" if k in rejected else "ok",
+         **({"orientation_reject_reasons": rejected[k]} if k in rejected else {})}
+        for k, (t, e, ob) in enumerate(zip(thetas, effs, obs))
     ]
     return om
 
@@ -136,7 +140,8 @@ def test_orientation_runs_before_classify_and_extract():
         [{"model_id": "o", "theta": 0.5, "coords_normalized": [0.5] * 5,
           "effective_bbox": [10, 10, 50, 50],
           "theta_oriented": 0.5 - math.pi / 2,
-          "oriented_bbox": [12.0, 14.0, 40.0, 20.0]}])[1]
+          "oriented_bbox": [12.0, 14.0, 40.0, 20.0],
+          "orientation_status": "ok"}])[1]
     cm.predict.side_effect = lambda **kw: (order.append("classify"), {"predictions": []})[1]
     em.extract_embeddings.side_effect = lambda **kw: (
         order.append("extract"), np.zeros((1, 2152)))[1]
@@ -421,3 +426,94 @@ def test_half_an_oriented_box_is_rejected():
 
     assert r.status_code == 500
     assert "malformed oriented_bbox" in r.json()["detail"].lower()
+
+
+# ------------------------------------- implausible oriented box (issue #59)
+#
+# The model flags an implausible box per detection instead of raising. The
+# router then falls back for THAT detection alone -- the detector's box and
+# theta, exactly as if no orienter were configured -- and labels it, so a
+# fallback can never be mistaken for a predicted angle. Failing the request
+# would throw away every good detection in the image.
+
+SLIVER = [12.0, 18.0, 44.0, 0.4]   # also sub-pixel: must not 500 any more
+
+
+def _two_rows_second_rejected(detector_theta=0.0):
+    pm, cm, em = _models(n_bboxes=2)
+    pm.predict.return_value["predictions"][1]["theta"] = detector_theta
+    om = _orientation([0.2, 0.3],
+                      effective_bboxes=[[10, 10, 50, 50], [20, 20, 50, 50]],
+                      oriented_bboxes=[[12.0, 18.0, 44.0, 20.0], SLIVER],
+                      rejected={1: ["sub_pixel", "aspect"]})
+    r = _client(pm, cm, em, om).post("/pipeline/", json=_payload(orientation_model_id="o"))
+    return r, cm, em
+
+
+def test_implausible_row_falls_back_for_that_detection_only():
+    r, cm, em = _two_rows_second_rejected()
+
+    assert r.status_code == 200, r.text
+    good, bad = r.json()["results"]
+    assert good["bbox"] == [12, 18, 44, 20]
+    assert good["theta"] == pytest.approx(0.2)
+    assert good["theta_source"] == "orientation"
+    assert good["orientation_status"] == "ok"
+    assert "orientation_reject_reasons" not in good
+
+    assert bad["bbox"] == [20, 20, 50, 50]          # the detector crop, not the sliver
+    assert bad["theta"] == 0.0
+    assert bad["theta_source"] == "detector"
+    assert bad["orientation_status"] == "rejected_implausible"
+    assert bad["orientation_reject_reasons"] == ["sub_pixel", "aspect"]
+    assert bad["orientation_coords_normalized"] == [0.5] * 5
+
+
+def test_consumers_get_the_same_fallback_box_that_is_emitted():
+    """The embedding and the persisted box must describe the same region."""
+    r, cm, em = _two_rows_second_rejected()
+    emitted = r.json()["results"][1]["bbox"]
+
+    assert cm.predict.call_args_list[1].kwargs["bbox"] == emitted
+    assert cm.predict.call_args_list[1].kwargs["theta"] == 0.0
+    assert list(em.extract_embeddings.call_args_list[1].kwargs["bbox"]) == emitted
+    assert em.extract_embeddings.call_args_list[1].kwargs["theta"] == 0.0
+
+
+def test_fallback_keeps_the_detectors_own_theta():
+    """As if no orienter were configured. lightnet's is always 0.0."""
+    r, cm, em = _two_rows_second_rejected(detector_theta=0.35)
+    bad = r.json()["results"][1]
+    assert bad["theta"] == pytest.approx(0.35)
+    assert em.extract_embeddings.call_args_list[1].kwargs["theta"] == pytest.approx(0.35)
+
+
+@pytest.mark.parametrize("status", [None, "", "OK", "rejected", 1])
+def test_missing_or_unknown_status_fails_before_any_consumer(status):
+    """Producer and consumer run in-process; a row without a known status has
+    not been through the gate, so it is a malformed contract, not an 'ok'."""
+    pm, cm, em = _models()
+    om = _orientation([0.2407])
+    if status is None:
+        del om.predict_batch.return_value[0]["orientation_status"]
+    else:
+        om.predict_batch.return_value[0]["orientation_status"] = status
+    r = _client(pm, cm, em, om).post("/pipeline/", json=_payload(orientation_model_id="o"))
+
+    assert r.status_code == 500
+    assert "orientation_status" in r.json()["detail"]
+    cm.predict.assert_not_called()
+    em.extract_embeddings.assert_not_called()
+
+
+@pytest.mark.parametrize("reasons", [None, [], "aspect", [1]])
+def test_rejected_row_without_reasons_fails_the_request(reasons):
+    pm, cm, em = _models()
+    om = _orientation([0.2407], rejected={0: reasons})
+    if reasons is None:
+        del om.predict_batch.return_value[0]["orientation_reject_reasons"]
+    r = _client(pm, cm, em, om).post("/pipeline/", json=_payload(orientation_model_id="o"))
+
+    assert r.status_code == 500
+    cm.predict.assert_not_called()
+    em.extract_embeddings.assert_not_called()
