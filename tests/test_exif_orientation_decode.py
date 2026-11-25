@@ -225,3 +225,33 @@ def test_megadetector_bytes_to_numpy_is_upright_bgr_uint8(megadetector_model):
     assert got.dtype == np.uint8
     assert got.shape == (200, 120, 3)
     np.testing.assert_array_equal(got, expected_bgr)
+
+
+def test_megadetector_input_reaches_network_as_rgb(megadetector_model):
+    """The test above pins that _bytes_to_numpy returns BGR. This one pins
+    *why* BGR is correct: PytorchWildlife hands the array to Ultralytics,
+    whose preprocess treats numpy input as BGR and flips it to RGB, the
+    order MegaDetector was trained on. PytorchWildlife's docstrings say
+    numpy input should be RGB; "fixing" the conversion to match them feeds
+    the network BGR, which costs recall without crashing.
+
+    Runs Ultralytics' real preprocess (the step stream_inference reaches)
+    on a pure-red image and checks red arrives in tensor channel 0."""
+    from ultralytics.models.yolo.detect import DetectionPredictor
+
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 64), (255, 0, 0)).save(buf, format="PNG")
+    arr = megadetector_model()._bytes_to_numpy(buf.getvalue())
+
+    predictor = DetectionPredictor()
+    predictor.args.rect = False  # keeps pre_transform off model-format attrs
+    predictor.imgsz = (64, 64)   # stride multiple: no letterbox padding
+    predictor.device = torch.device("cpu")
+    predictor.model = types.SimpleNamespace(fp16=False, stride=32)
+    tensor = predictor.preprocess([arr])
+
+    means = tensor[0].mean(dim=(1, 2)).tolist()
+    assert means == pytest.approx([1.0, 0.0, 0.0], abs=1e-6), (
+        f"network sees per-channel means {means}; red should be in channel 0. "
+        "Red in channel 2 means MegaDetector is being fed BGR."
+    )
