@@ -108,6 +108,14 @@ def main(argv=None) -> int:
                 failures.append(f"{ck['model_id']}/{fx.get('file')}: theta err {e_t:.3e}")
             if e_c > thr["coords_elementwise_max"]:
                 failures.append(f"{ck['model_id']}/{fx.get('file')}: coord err {e_c:.3e}")
+            # Same crop, not just similar outputs: the port's effective_bbox must
+            # be the box WBIA would have cropped (full frame when that is empty,
+            # animal_wbia.py:25-28).
+            expected_eff = (ref_bbox if ref_bbox[2] > 0 and ref_bbox[3] > 0
+                            else [0, 0, img_w, img_h])
+            if r["effective_bbox"] != expected_eff:
+                failures.append(f"{ck['model_id']}/{fx.get('file')}: effective_bbox "
+                                f"{r['effective_bbox']} != WBIA crop {expected_eff}")
 
     # Enforce per-stratum minimums: a gate that silently ran 3 samples is not a gate.
     for name, spec in manifest.get("strata", {}).items():

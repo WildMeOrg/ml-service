@@ -91,13 +91,9 @@ def test_the_plus_90_degrees_is_not_dropped():
 # 28 rows (Sharkbook, 2026-11-25), which became a persisted sliver.
 
 
-def _wbia_boundary(bbox, w, h):
-    """core_images.py:1539-1557, transcribed independently of resolve_bbox."""
-    xtl, ytl, bw, bh = bbox
-    xbr, ybr = xtl + bw, ytl + bh
-    xtl, xbr = min(max(0, xtl), w), min(max(0, xbr), w)
-    ytl, ybr = min(max(0, ytl), h), min(max(0, ybr), h)
-    return [xtl, ytl, xbr - xtl, ybr - ytl]
+# The preflight gate's independent transcription of core_images.py:1539-1557,
+# reused here rather than written a third time.
+from scripts.preflight.run_gate import wbia_localization_boundary as _wbia_boundary
 
 
 @pytest.mark.parametrize("bbox,expected", [
@@ -502,7 +498,21 @@ def test_load_uses_strict_state_dict():
 
 def test_predict_batch_crops_an_overhanging_box_inside_the_frame():
     """The production regression at the model boundary: a detector box hanging
-    28 px over the top must not crop the bottom rows."""
+    28 px over the top must not crop the bottom rows. Checked on the PIXELS
+    reaching the backbone, not just on the reported box."""
     m = _model()
+    seen = []
+    fixed = m.model.side_effect
+    m.model.side_effect = lambda x, *a, **k: (seen.append(x.clone()), fixed(x))[1]
+
     r = m.predict_batch(RGB, [[22, -28, 350, 356]])[0]     # RGB is 400x300
     assert r["effective_bbox"] == [22, 0, 350, 300]
+    overhang_input = seen[0]
+
+    seen.clear()
+    m.predict_batch(RGB, [[22, 0, 350, 300]])               # the clipped box itself
+    assert torch.equal(overhang_input, seen[0])
+
+    seen.clear()
+    m.predict_batch(RGB, [[22, 272, 350, 28]])              # the old far-edge strip
+    assert not torch.equal(overhang_input, seen[0])
