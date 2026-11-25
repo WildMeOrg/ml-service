@@ -111,7 +111,7 @@ def _wbia_orienter():
     om.predict_batch.return_value = [{
         "model_id": "o", "theta": 1.6, "theta_oriented": 0.03,
         "oriented_bbox": [1.0, 3.5, 182.0, 213.0], "coords_normalized": [0.5] * 5,
-        "effective_bbox": [1, 3, 182, 213]}]
+        "effective_bbox": [1, 3, 182, 213], "orientation_status": "ok"}]
     return om
 
 

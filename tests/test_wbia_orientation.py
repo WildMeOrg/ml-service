@@ -201,7 +201,7 @@ def test_predict_returns_theta_and_never_a_label():
     m = _model()
     r = m.predict_batch(RGB, [[10, 10, 100, 100]])[0]
     assert set(r) == {"model_id", "theta", "theta_oriented", "oriented_bbox",
-                      "coords_normalized", "effective_bbox"}
+                      "coords_normalized", "effective_bbox", "orientation_status"}
     for forbidden in ("label", "probability", "class_id", "class", "predictions"):
         assert forbidden not in r
     assert math.isfinite(r["theta"])
