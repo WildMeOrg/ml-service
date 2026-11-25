@@ -276,15 +276,11 @@ def test_malformed_second_result_stops_consumers_for_the_first_bbox_too():
     let bbox 0 run classify/extract before bbox 1's bad row failed the request.
     Request-level fail-closed must mean NO consumer runs."""
     pm, cm, em = _models(n_bboxes=2)
-    om = _orientation([0.1, 0.2])
-    om.predict_batch.return_value = [
-        {"model_id": "o", "theta": 0.1, "coords_normalized": [0.5] * 5,
-         "effective_bbox": [10, 10, 50, 50]},
-        {"model_id": "o", "theta": float("nan"), "coords_normalized": [0.5] * 5,
-         "effective_bbox": [20, 20, 50, 50]},        # malformed row 2
-    ]
+    om = _orientation([0.1, 0.2])                       # two fully valid rows...
+    om.predict_batch.return_value[1]["theta"] = float("nan")   # ...then break row 1 only
     r = _client(pm, cm, em, om).post("/pipeline/", json=_payload(orientation_model_id="o"))
     assert r.status_code == 500
+    assert "result 1" in r.json()["detail"]             # failed on row 1, not row 0
     cm.predict.assert_not_called()
     em.extract_embeddings.assert_not_called()
 
@@ -437,15 +433,25 @@ def test_half_an_oriented_box_is_rejected():
 # would throw away every good detection in the image.
 
 SLIVER = [12.0, 18.0, 44.0, 0.4]   # also sub-pixel: must not 500 any more
+# Row 1's detector box hangs off the image; orientation clipped it. The
+# fallback must use the CLIPPED crop (what orientation looked at), while
+# detector_bbox keeps the raw one for audit.
+RAW_DETECTOR_BOX = [-5, 20, 60, 50]
+CLIPPED_EFF = [0, 20, 55, 50]
 
 
-def _two_rows_second_rejected(detector_theta=0.0):
+def _two_rows_second_rejected(detector_theta=0.0, coords=None):
     pm, cm, em = _models(n_bboxes=2)
+    pm.predict.return_value["predictions"][1]["bbox"] = RAW_DETECTOR_BOX
     pm.predict.return_value["predictions"][1]["theta"] = detector_theta
     om = _orientation([0.2, 0.3],
-                      effective_bboxes=[[10, 10, 50, 50], [20, 20, 50, 50]],
+                      effective_bboxes=[[10, 10, 50, 50], CLIPPED_EFF],
                       oriented_bboxes=[[12.0, 18.0, 44.0, 20.0], SLIVER],
                       rejected={1: ["sub_pixel", "aspect"]})
+    if coords == "MISSING":
+        del om.predict_batch.return_value[1]["coords_normalized"]
+    elif coords is not None:
+        om.predict_batch.return_value[1]["coords_normalized"] = coords
     r = _client(pm, cm, em, om).post("/pipeline/", json=_payload(orientation_model_id="o"))
     return r, cm, em
 
@@ -461,7 +467,8 @@ def test_implausible_row_falls_back_for_that_detection_only():
     assert good["orientation_status"] == "ok"
     assert "orientation_reject_reasons" not in good
 
-    assert bad["bbox"] == [20, 20, 50, 50]          # the detector crop, not the sliver
+    assert bad["bbox"] == CLIPPED_EFF                 # the detector crop, not the sliver
+    assert bad["detector_bbox"] == RAW_DETECTOR_BOX   # raw box kept for audit
     assert bad["theta"] == 0.0
     assert bad["theta_source"] == "detector"
     assert bad["orientation_status"] == "rejected_implausible"
@@ -469,23 +476,39 @@ def test_implausible_row_falls_back_for_that_detection_only():
     assert bad["orientation_coords_normalized"] == [0.5] * 5
 
 
-def test_consumers_get_the_same_fallback_box_that_is_emitted():
-    """The embedding and the persisted box must describe the same region."""
-    r, cm, em = _two_rows_second_rejected()
-    emitted = r.json()["results"][1]["bbox"]
-
-    assert cm.predict.call_args_list[1].kwargs["bbox"] == emitted
-    assert cm.predict.call_args_list[1].kwargs["theta"] == 0.0
-    assert list(em.extract_embeddings.call_args_list[1].kwargs["bbox"]) == emitted
-    assert em.extract_embeddings.call_args_list[1].kwargs["theta"] == 0.0
-
-
-def test_fallback_keeps_the_detectors_own_theta():
-    """As if no orienter were configured. lightnet's is always 0.0."""
-    r, cm, em = _two_rows_second_rejected(detector_theta=0.35)
+@pytest.mark.parametrize("detector_theta", [0.0, 0.35])
+def test_consumers_get_the_same_fallback_box_and_theta_that_are_emitted(detector_theta):
+    """The embedding and the persisted box must describe the same region, at
+    the detector's own theta -- as if no orienter were configured (lightnet's
+    is always 0.0)."""
+    r, cm, em = _two_rows_second_rejected(detector_theta=detector_theta)
     bad = r.json()["results"][1]
-    assert bad["theta"] == pytest.approx(0.35)
-    assert em.extract_embeddings.call_args_list[1].kwargs["theta"] == pytest.approx(0.35)
+
+    assert bad["bbox"] == CLIPPED_EFF
+    assert bad["theta"] == pytest.approx(detector_theta)
+    for call in (cm.predict.call_args_list[1], em.extract_embeddings.call_args_list[1]):
+        assert list(call.kwargs["bbox"]) == CLIPPED_EFF
+        assert call.kwargs["theta"] == pytest.approx(detector_theta)
+
+
+@pytest.mark.parametrize("detector_theta", [float("nan"), float("inf"), "x", True])
+def test_bad_detector_theta_on_a_rejected_row_fails_before_any_consumer(detector_theta):
+    """The fallback angle comes from the detector; YOLO OBB passes NaN/inf
+    straight through. Checked up front, or row 0 would already be embedded."""
+    r, cm, em = _two_rows_second_rejected(detector_theta=detector_theta)
+
+    assert r.status_code == 500
+    assert "result 1" in r.json()["detail"]
+    cm.predict.assert_not_called()
+    em.extract_embeddings.assert_not_called()
+
+
+@pytest.mark.parametrize("coords", [None, [0.5] * 4, [0.5] * 4 + [float("nan")], ["a"] * 5])
+def test_rejected_row_with_bad_audit_coords_fails_before_any_consumer(coords):
+    r, cm, em = _two_rows_second_rejected(coords=coords if coords is not None else "MISSING")
+    assert r.status_code == 500
+    cm.predict.assert_not_called()
+    em.extract_embeddings.assert_not_called()
 
 
 @pytest.mark.parametrize("status", [None, "", "OK", "rejected", 1])

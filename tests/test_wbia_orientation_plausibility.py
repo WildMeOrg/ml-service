@@ -16,6 +16,7 @@ import math
 import pytest
 from shapely.geometry import Polygon
 
+from app.models.assigner import _bbox_to_polygon_verts
 from app.models.wbia_orientation import (
     DEFAULT_MAX_ASPECT,
     DEFAULT_MIN_OVERLAP_FRAC,
@@ -24,6 +25,7 @@ from app.models.wbia_orientation import (
     plausibility_failures,
     validate_plausibility_limits,
 )
+from tests.test_wbia_orientation_oriented_box import to_image_space
 
 
 def _gate(coords, eff, **limits):
@@ -59,14 +61,7 @@ def test_overlap_uses_the_object_polygon_not_its_axis_aligned_bound(axis_deg, ef
     coords = _coords(axis_deg, 0.3, 0.08)
     box, theta = oriented_box(coords, eff)
 
-    xc, yc, xt, yt, w = coords
-    x1, y1, bw, bh = eff
-    n = math.hypot(xt - xc, yt - yc)
-    ux, uy = (xt - xc) / n, (yt - yc) / n
-    cx, cy = xc * bw + x1, yc * bh + y1
-    tx, ty = xt * bw + x1, yt * bh + y1
-    wx, wy = (xt - w * uy) * bw + x1, (yt + w * ux) * bh + y1
-    half_w = math.hypot(wx - tx, wy - ty)
+    cx, cy, tx, ty, half_w = to_image_space(coords, eff)
     ax, ay = (tx - cx), (ty - cy)
     la = math.hypot(ax, ay)
     px, py = -ay / la * half_w, ax / la * half_w
@@ -75,19 +70,33 @@ def test_overlap_uses_the_object_polygon_not_its_axis_aligned_bound(axis_deg, ef
 
     got = _object_polygon(box, theta)
     assert got.symmetric_difference(expected).area == pytest.approx(0.0, abs=1e-6)
+    # ...and agrees with the repo's existing float vertex helper.
+    oracle = Polygon(_bbox_to_polygon_verts(box, theta))
+    assert got.symmetric_difference(oracle).area == pytest.approx(0.0, abs=1e-6)
+
+
+def test_the_gate_actually_rotates_the_box():
+    """A 60x20 box centred on the crop's corner. Rotated +45deg its long axis
+    points INTO the crop (~42% inside); -45deg points along the edge (~8%).
+    Ignoring theta would give 25% for both -- this pins that it is used."""
+    box, eff = [-30.0, -10.0, 60.0, 20.0], [0, 0, 100, 100]
+    assert plausibility_failures(box, math.pi / 4, eff) == []
+    assert plausibility_failures(box, -math.pi / 4, eff) == ["low_overlap"]
 
 
 # ------------------------------------------------- the issue's failure shapes
 
 def test_worked_example_e6903062_is_rejected():
     """Goliath grouper, 1206x898 image: centre 4 px from the right edge,
-    half_w ~4 px, half_l ~433 px, long axis at 204.4 - 90 = 114.4 deg."""
+    half_w ~4 px, half_l ~433 px, long axis at 204.4 - 90 = 114.4 deg. The
+    reconstruction reproduces the persisted box and theta from the issue."""
     eff = [0, 0, 1206, 898]
     cx, cy, half_l, axis = 1202.0, 457.0, 433.0, math.radians(114.4)
     tx, ty = cx + half_l * math.cos(axis), cy + half_l * math.sin(axis)
-    coords = [cx / 1206, cy / 898, tx / 1206, ty / 898, 4.0 / 1000]
-    box, _ = oriented_box(coords, eff)
-    assert max(box[2], box[3]) / min(box[2], box[3]) > 50   # it really is a sliver
+    coords = [cx / 1206, cy / 898, tx / 1206, ty / 898, 0.0033951]
+    box, theta = oriented_box(coords, eff)
+    assert box == pytest.approx([1198, 24, 8, 866], abs=0.5)   # issue: [1198, 24, 8, 866]
+    assert theta == pytest.approx(3.568, abs=1e-3)              # issue: 3.568 rad
 
     reasons = _gate(coords, eff)
     assert "aspect" in reasons
@@ -142,6 +151,16 @@ def test_small_healthy_box_passes():
     assert plausibility_failures([2.0, 2.0, 12.0, 24.0], 0.0, [0, 0, 16, 28]) == []
 
 
+def test_small_animal_in_a_loose_detector_box_is_a_known_false_positive():
+    """The tradeoff of min_short_frac: a well-placed 12x24 box in a loose
+    100x100 detection is flagged (12 < 0.15 * 100). The cost is the detector's
+    box at theta 0 for that one detection, not a lost detection. Lower
+    min_short_frac for models whose detector boxes are loose."""
+    assert plausibility_failures([44.0, 38.0, 12.0, 24.0], 0.0, [0, 0, 100, 100]) == ["short_side"]
+    assert plausibility_failures([44.0, 38.0, 12.0, 24.0], 0.0, [0, 0, 100, 100],
+                                 min_short_frac=0.1) == []
+
+
 def test_healthy_box_overhanging_the_frame_passes():
     """Rotated boxes legitimately overhang the detection a little."""
     assert plausibility_failures([-10.0, 20.0, 300.0, 150.0], 0.6, [0, 0, 300, 250]) == []
@@ -156,6 +175,15 @@ def test_sub_pixel_is_rejected_even_with_every_limit_disabled():
                                     max_aspect=None, min_short_frac=0.0,
                                     min_overlap_frac=0.0)
     assert reasons == ["sub_pixel"]
+
+
+@pytest.mark.parametrize("side,sub_pixel", [(0.5, True), (0.5000001, False), (1.0, False)])
+def test_sub_pixel_uses_the_routers_rounding_rule(side, sub_pixel):
+    """Must match the router's int(round(v)) exactly: Python rounds 0.5 to 0."""
+    reasons = plausibility_failures([10.0, 10.0, side, side], 0.0, [0, 0, 100, 100],
+                                    max_aspect=None, min_short_frac=0.0,
+                                    min_overlap_frac=0.0)
+    assert (reasons == ["sub_pixel"]) is sub_pixel
 
 
 # --------------------------------------------------- disabling each check
