@@ -508,3 +508,60 @@ def test_predict_batch_crops_an_overhanging_box_inside_the_frame():
     batch = m.model.call_args_list[0].args[0]           # base (non-TTA) forward
     assert torch.equal(batch[0], batch[1])
     assert not torch.equal(batch[0], batch[2])
+
+
+# ------------------------------------------------- EXIF orientation (frame)
+#
+# The detector (lightnet: cv2.imdecode) and MiewID (decode_image_rgb) work in
+# the UPRIGHT frame, EXIF Orientation applied; so are the boxes the orienter is
+# handed. imageio.imread without rotate=True returns the stored SENSOR frame,
+# so for a portrait phone photo the orienter cropped the box out of a sideways
+# image. WBIA rewrote EXIF-rotated images upright on import
+# (wbia/algo/preproc/preproc_image.py:193-201), so the plugin it ran read
+# upright pixels.
+
+from tests.test_exif_orientation_decode import (  # noqa: E402
+    ORACLE, _jpeg_with_orientation, _sensor_pixels)
+
+
+@pytest.mark.parametrize("orientation", [3, 6, 8])
+def test_orienter_crops_from_the_upright_frame(orientation):
+    """The tensor reaching the backbone for a tagged JPEG equals the one for the
+    same decoded pixels stored upright, untagged (lossless PNG)."""
+    sensor = _sensor_pixels()                                    # 120 x 200
+    tagged = _jpeg_with_orientation(sensor, orientation)
+    decoded = np.array(Image.open(io.BytesIO(tagged)).convert("RGB"))
+    upright = _png(np.ascontiguousarray(ORACLE[orientation](decoded)))
+    h, w = ORACLE[orientation](decoded).shape[:2]
+    bbox = [w // 4, h // 2, w // 2, h // 3]                      # valid in the upright frame
+
+    m = _model()
+    m.predict_batch(tagged, [bbox])
+    m.predict_batch(upright, [bbox])
+    a, b = (c.args[0] for c in m.model.call_args_list[:2])
+    assert torch.equal(a, b)
+
+
+def test_a_box_valid_only_upright_is_not_clipped_to_the_sensor_frame():
+    """Portrait (EXIF 6): upright frame is 120 wide x 200 tall. A box at y=150
+    exists only upright; in the sensor frame (200 x 120) it would be clipped
+    away and fall back to the full frame."""
+    tagged = _jpeg_with_orientation(_sensor_pixels(), 6)
+    r = _model().predict_batch(tagged, [[10, 150, 80, 40]])[0]
+    assert r["effective_bbox"] == [10, 150, 80, 40]
+
+
+def test_sixteen_bit_png_is_not_flattened_to_eight_bits():
+    """rotate=True must not change untagged decoding: an I;16 gradient keeps
+    its tonal range rather than clipping at 255."""
+    from app.models.wbia_orientation import _canonicalize_rgb
+    import imageio.v2 as imageio
+    g = (np.arange(60 * 80).reshape(60, 80) * 13).astype(np.uint16)
+    buf = io.BytesIO()
+    Image.fromarray(g).save(buf, format="PNG")
+    m = _model()
+    m.predict_batch(buf.getvalue(), [[0, 0, 80, 60]])
+    seen = m.model.call_args_list[0].args[0]
+    raw = _canonicalize_rgb(np.asarray(imageio.imread(io.BytesIO(buf.getvalue()))))
+    assert raw.dtype == np.uint16 and raw.max() > 255
+    assert torch.equal(seen, m._preprocess(raw, [0, 0, 80, 60]))

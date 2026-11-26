@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 
 from scripts.preflight import reference_runner as runner
-from scripts.preflight.run_gate import resolve_reference_root, wbia_localization_boundary
+from scripts.preflight.run_gate import (
+    reference_image, resolve_reference_root, wbia_localization_boundary)
 
 
 MODULES = ('config/default.py', 'models/cls_hrnet.py', 'utils/utils.py', 'core/evaluate.py')
@@ -72,3 +73,34 @@ def test_reference_gets_the_wbia_clipped_box(bbox, expected):
     """The reference plugin only ever saw boxes WBIA's localizations step had
     clipped, so the gate hands it the same, not the raw detection."""
     assert wbia_localization_boundary(bbox, 2860, 1464) == expected
+
+
+
+def test_reference_gets_the_upright_image_wbia_stored_for_a_tagged_fixture():
+    """WBIA rewrote EXIF-rotated images upright on import, so the reference
+    plugin read upright pixels. The gate hands it the same (lossless PNG of an
+    independent cv2 decode) and reports the UPRIGHT size for clipping."""
+    import io
+    import cv2
+    import imageio.v2 as imageio
+    import numpy as np
+    from tests.test_exif_orientation_decode import (
+        _jpeg_with_orientation, _sensor_pixels)
+
+    tagged = _jpeg_with_orientation(_sensor_pixels(), 6)          # sensor 120x200
+    data, w, h = reference_image(tagged)
+    assert (w, h) == (120, 200)                                     # portrait, upright
+    got = np.asarray(imageio.imread(io.BytesIO(data)))
+    expected = cv2.cvtColor(cv2.imdecode(np.frombuffer(tagged, np.uint8),
+                                         cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
+    assert np.array_equal(got, expected)
+
+
+def test_untagged_fixture_reaches_the_reference_byte_for_byte():
+    from tests.test_exif_orientation_decode import _sensor_pixels
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.fromarray(_sensor_pixels()).save(buf, format="JPEG")
+    data, w, h = reference_image(buf.getvalue())
+    assert data == buf.getvalue() and (w, h) == (200, 120)

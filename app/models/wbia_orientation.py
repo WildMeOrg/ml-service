@@ -505,7 +505,14 @@ class WbiaOrientationModel(BaseModel):
                 f"wbia-orientation '{self.model_id}': model is not loaded."
             )
         try:
-            decoded = imageio.imread(io.BytesIO(image_bytes))
+            # rotate=True applies the EXIF Orientation tag, so pixels are in the
+            # UPRIGHT frame the detector's boxes are in (lightnet decodes with
+            # cv2.imdecode, MiewID with decode_image_rgb; both apply it). Without
+            # it a portrait phone photo was cropped from the sideways sensor
+            # frame. WBIA got the same result by rewriting EXIF-rotated images
+            # upright on import (preproc_image.py:193-201) before the plugin
+            # read them. Untagged images decode exactly as before (16-bit kept).
+            decoded = imageio.imread(io.BytesIO(image_bytes), rotate=True)
         except Exception as e:
             raise OrientationInferenceError(f"could not decode image: {e}") from e
         image = _canonicalize_rgb(np.asarray(decoded))
