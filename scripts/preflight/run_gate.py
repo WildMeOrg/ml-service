@@ -47,34 +47,37 @@ def wbia_localization_boundary(bbox, width, height):
 
 
 def reference_image(data: bytes):
-    """The image bytes WBIA would have handed the reference plugin, and their
-    upright (width, height).
+    """The image bytes WBIA would have handed the reference plugin, their
+    upright (width, height), and the fixture's EXIF Orientation tag.
 
     WBIA rewrote EXIF-rotated images upright on import
     (wbia/algo/preproc/preproc_image.py:193-201: cv2.imread applies the tag,
     cv2.imwrite saves without it), so the plugin read upright pixels. For a
-    tagged fixture, decode it the same way (cv2, independent of the port's
-    imageio rotate=True) and pass it on as a lossless PNG -- a frame-parity
-    oracle; WBIA's own rewrite was a lossy JPEG. Untagged fixtures are passed
-    through byte for byte, as before.
+    tagged fixture, decode it the same way (cv2, independent of the port) and
+    pass it on as a lossless PNG -- a frame-parity oracle; WBIA's own rewrite
+    was a lossy JPEG. Only JPEG is supported for tagged fixtures: OpenCV 4.8
+    ignores WebP EXIF, and IMREAD_COLOR would drop 16-bit depth. Untagged
+    fixtures pass through byte for byte, as before.
     """
     import io
     import cv2
-    import imageio.v2 as imageio
     import numpy as np
     from PIL import Image
 
     with Image.open(io.BytesIO(data)) as im:
-        orientation = im.getexif().get(0x0112, 1)
+        fmt, (w, h) = im.format, im.size
+        orientation = im.getexif().get(0x0112)
     if orientation in (None, 0, 1):
-        h, w = imageio.imread(data).shape[:2]
-        return data, w, h
+        return data, w, h, orientation
+    if fmt != "JPEG":
+        raise ValueError(f"EXIF-tagged {fmt} fixture (Orientation={orientation}): the "
+                         f"gate's EXIF parity oracle is only defined for JPEG")
     upright = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
     ok, png = cv2.imencode(".png", upright)
     if not ok:
         raise RuntimeError("could not re-encode the upright fixture")
     h, w = upright.shape[:2]
-    return png.tobytes(), w, h
+    return png.tobytes(), w, h, orientation
 
 
 def resolve_reference_root(manifest, override=None):
@@ -123,7 +126,14 @@ def main(argv=None) -> int:
             # The port gets the raw bytes and raw detection; the reference gets
             # what WBIA would have stored: the upright image and the box its
             # localization step clipped to that frame.
-            ref_data, img_w, img_h = reference_image(data)
+            try:
+                ref_data, img_w, img_h, tag = reference_image(data)
+            except Exception as e:      # record it against the fixture, keep going
+                failures.append(f"fixture {img}: {e}")
+                continue
+            if fx.get("stratum") == "exif_rotated" and tag in (None, 0, 1):
+                failures.append(f"fixture {img}: in exif_rotated but has no EXIF rotation tag")
+                continue
             ref_bbox = wbia_localization_boundary(fx["bbox"], img_w, img_h)
             t_ref, c_ref = ref.theta(ref_data, ref_bbox)
             r = port.predict_batch(data, [fx["bbox"]])[0]

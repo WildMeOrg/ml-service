@@ -76,31 +76,49 @@ def test_reference_gets_the_wbia_clipped_box(bbox, expected):
 
 
 
-def test_reference_gets_the_upright_image_wbia_stored_for_a_tagged_fixture():
+@pytest.mark.parametrize("orientation", [2, 3, 4, 5, 6, 7, 8])
+def test_reference_gets_the_upright_image_wbia_stored_for_a_tagged_jpeg(orientation):
     """WBIA rewrote EXIF-rotated images upright on import, so the reference
-    plugin read upright pixels. The gate hands it the same (lossless PNG of an
-    independent cv2 decode) and reports the UPRIGHT size for clipping."""
+    plugin read upright pixels. The gate hands it the same (lossless PNG of a
+    cv2 decode, as WBIA did) and reports the UPRIGHT size for clipping.
+    Checked against the independent NumPy oracle, block-averaged because cv2
+    and Pillow may round JPEG pixels differently."""
     import io
-    import cv2
     import imageio.v2 as imageio
     import numpy as np
+    from PIL import Image
     from tests.test_exif_orientation_decode import (
-        _jpeg_with_orientation, _sensor_pixels)
+        ORACLE, _block_means, _jpeg_with_orientation, _sensor_pixels)
 
-    tagged = _jpeg_with_orientation(_sensor_pixels(), 6)          # sensor 120x200
-    data, w, h = reference_image(tagged)
-    assert (w, h) == (120, 200)                                     # portrait, upright
+    tagged = _jpeg_with_orientation(_sensor_pixels(), orientation)       # sensor 120x200
+    data, w, h, tag = reference_image(tagged)
+    expected = ORACLE[orientation](np.array(Image.open(io.BytesIO(tagged)).convert("RGB")))
     got = np.asarray(imageio.imread(io.BytesIO(data)))
-    expected = cv2.cvtColor(cv2.imdecode(np.frombuffer(tagged, np.uint8),
-                                         cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
-    assert np.array_equal(got, expected)
+    assert tag == orientation
+    assert (h, w) == expected.shape[:2]
+    assert np.abs(_block_means(got) - _block_means(expected)).max() < 3
 
 
 def test_untagged_fixture_reaches_the_reference_byte_for_byte():
-    from tests.test_exif_orientation_decode import _sensor_pixels
     import io
     from PIL import Image
+    from tests.test_exif_orientation_decode import _sensor_pixels
     buf = io.BytesIO()
     Image.fromarray(_sensor_pixels()).save(buf, format="JPEG")
-    data, w, h = reference_image(buf.getvalue())
-    assert data == buf.getvalue() and (w, h) == (200, 120)
+    data, w, h, tag = reference_image(buf.getvalue())
+    assert data == buf.getvalue() and (w, h) == (200, 120) and tag in (None, 1)
+
+
+def test_tagged_non_jpeg_fixture_is_refused():
+    """cv2 4.8 ignores WebP EXIF and 16-bit PNGs would lose depth: the EXIF
+    parity oracle is only defined for JPEG."""
+    import io
+    import numpy as np
+    from PIL import Image
+    im = Image.fromarray(np.zeros((20, 30, 3), np.uint8))
+    exif = im.getexif()
+    exif[0x0112] = 6
+    buf = io.BytesIO()
+    im.save(buf, format="PNG", exif=exif.tobytes())
+    with pytest.raises(ValueError, match="JPEG"):
+        reference_image(buf.getvalue())

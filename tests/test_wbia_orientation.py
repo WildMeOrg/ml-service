@@ -565,3 +565,28 @@ def test_sixteen_bit_png_is_not_flattened_to_eight_bits():
     raw = _canonicalize_rgb(np.asarray(imageio.imread(io.BytesIO(buf.getvalue()))))
     assert raw.dtype == np.uint16 and raw.max() > 255
     assert torch.equal(seen, m._preprocess(raw, [0, 0, 80, 60]))
+
+
+def _tagged(arr, orientation, fmt, mode=None):
+    im = Image.fromarray(arr)
+    if mode:
+        im = im.convert(mode)
+    exif = im.getexif()
+    exif[0x0112] = orientation
+    buf = io.BytesIO()
+    im.save(buf, format=fmt, exif=exif.tobytes())
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("orientation", sorted(ORACLE))
+@pytest.mark.parametrize("fmt,mode", [("JPEG", None), ("PNG", None), ("PNG", "P"), ("PNG", "L")])
+def test_decode_upright_matches_the_exif_oracle_for_every_tag_and_mode(orientation, fmt, mode):
+    """Every orientation, including the mirrors (2/4/5/7), and palette PNGs:
+    pinned imageio's own rotate=True picks the flip axis from the ORIGINAL mode,
+    so a palette image (one band, expanded to RGB) flips the colour channels
+    for tag 2 and the wrong axis for 4/5/7."""
+    import imageio.v2 as imageio
+    from app.models.wbia_orientation import _decode_upright
+    data = _tagged(_sensor_pixels(), orientation, fmt, mode)
+    sensor = np.asarray(imageio.imread(io.BytesIO(data)))        # stored frame, same decoder
+    np.testing.assert_array_equal(_decode_upright(data), ORACLE[orientation](sensor))

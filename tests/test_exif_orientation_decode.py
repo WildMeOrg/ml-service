@@ -45,9 +45,9 @@ ORACLE = {
     2: lambda a: a[:, ::-1],                 # mirror horizontal
     3: lambda a: a[::-1, ::-1],              # rotate 180
     4: lambda a: a[::-1, :],                 # mirror vertical
-    5: lambda a: np.transpose(a, (1, 0, 2)),                 # transpose
+    5: lambda a: np.swapaxes(a, 0, 1),                       # transpose
     6: lambda a: np.rot90(a, k=-1),          # rotate 90 clockwise
-    7: lambda a: np.rot90(np.transpose(a, (1, 0, 2)), k=2),  # transverse
+    7: lambda a: np.rot90(np.swapaxes(a, 0, 1), k=2),        # transverse
     8: lambda a: np.rot90(a, k=1),           # rotate 90 counter-clockwise
 }
 
