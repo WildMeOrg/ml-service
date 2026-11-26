@@ -441,12 +441,13 @@ RAW_DETECTOR_BOX = [45, 20, 60, 50]
 CLIPPED_EFF = [45, 20, 55, 50]
 
 
-def _two_rows_second_rejected(detector_theta=0.0, coords=None, raw_bbox=RAW_DETECTOR_BOX):
+def _two_rows_second_rejected(detector_theta=0.0, coords=None, raw_bbox=RAW_DETECTOR_BOX,
+                              eff=CLIPPED_EFF):
     pm, cm, em = _models(n_bboxes=2)
     pm.predict.return_value["predictions"][1]["bbox"] = raw_bbox
     pm.predict.return_value["predictions"][1]["theta"] = detector_theta
     om = _orientation([0.2, 0.3],
-                      effective_bboxes=[[10, 10, 50, 50], CLIPPED_EFF],
+                      effective_bboxes=[[10, 10, 50, 50], eff],
                       oriented_bboxes=[[12.0, 18.0, 44.0, 20.0], SLIVER],
                       rejected={1: ["sub_pixel", "aspect"]})
     if coords == "MISSING":
@@ -500,10 +501,17 @@ def test_consumers_get_the_same_fallback_box_and_theta_that_are_emitted(
 
 def test_rotated_fallback_with_a_sub_pixel_detector_box_uses_the_clipped_crop():
     """A rotated detector box that integerizes to < 1 px is not a box; fall back
-    to the crop orientation actually looked at instead."""
-    r, cm, em = _two_rows_second_rejected(detector_theta=0.35, raw_bbox=[45, 20, 0.6, 50])
+    to the crop orientation actually looked at -- for a zero-width box, the
+    orienter's full-frame fallback."""
+    full = [0, 0, 100, 80]
+    r, cm, em = _two_rows_second_rejected(detector_theta=0.35, raw_bbox=[45, 20, 0.6, 50],
+                                          eff=full)
     assert r.status_code == 200, r.text
-    assert r.json()["results"][1]["bbox"] == CLIPPED_EFF
+    bad = r.json()["results"][1]
+    assert bad["bbox"] == full and bad["theta"] == pytest.approx(0.35)
+    for call in (cm.predict.call_args_list[1], em.extract_embeddings.call_args_list[1]):
+        assert list(call.kwargs["bbox"]) == full
+        assert call.kwargs["theta"] == pytest.approx(0.35)
 
 
 @pytest.mark.parametrize("detector_theta", [float("nan"), float("inf"), "x", True])

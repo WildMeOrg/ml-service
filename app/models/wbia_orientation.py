@@ -141,8 +141,9 @@ def resolve_bbox(bbox: Sequence[float], width: int, height: int) -> List[int]:
     each axis. Clipping the floats first could turn a 1 px crop into 0 px and
     trigger the full-frame fallback.
 
-    The result becomes `effective_bbox`, which classify, extract and the
-    persisted result share. Returns [x, y, w, h] inside the frame; w/h may be 0
+    The result becomes `effective_bbox`: the orienter's input crop, and the
+    router's fallback box for a rejected axis-aligned detection. Returns
+    [x, y, w, h] inside the frame; w/h may be 0
     (box entirely outside), which the caller treats as the reference's
     empty-crop full-frame fallback.
     """

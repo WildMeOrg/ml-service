@@ -501,18 +501,10 @@ def test_predict_batch_crops_an_overhanging_box_inside_the_frame():
     28 px over the top must not crop the bottom rows. Checked on the PIXELS
     reaching the backbone, not just on the reported box."""
     m = _model()
-    seen = []
-    fixed = m.model.side_effect
-    m.model.side_effect = lambda x, *a, **k: (seen.append(x.clone()), fixed(x))[1]
-
-    r = m.predict_batch(RGB, [[22, -28, 350, 356]])[0]     # RGB is 400x300
-    assert r["effective_bbox"] == [22, 0, 350, 300]
-    overhang_input = seen[0]
-
-    seen.clear()
-    m.predict_batch(RGB, [[22, 0, 350, 300]])               # the clipped box itself
-    assert torch.equal(overhang_input, seen[0])
-
-    seen.clear()
-    m.predict_batch(RGB, [[22, 272, 350, 28]])              # the old far-edge strip
-    assert not torch.equal(overhang_input, seen[0])
+    rows = m.predict_batch(RGB, [[22, -28, 350, 356],   # overhangs the top (RGB is 400x300)
+                                 [22, 0, 350, 300],     # the clipped box itself
+                                 [22, 272, 350, 28]])   # the old far-edge strip
+    assert rows[0]["effective_bbox"] == [22, 0, 350, 300]
+    batch = m.model.call_args_list[0].args[0]           # base (non-TTA) forward
+    assert torch.equal(batch[0], batch[1])
+    assert not torch.equal(batch[0], batch[2])
