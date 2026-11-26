@@ -31,6 +31,7 @@
     "extreme_aspect": {"min_samples": 10, "_why": "resize distortion feeds theta"},
     "bbox_edge_degenerate": {"min_samples": 10, "_why": "exercises the reload-full-image fallback and WBIA's localization clip (boxes overhanging the frame; the reference is given the WBIA-clipped box)"},
     "multi_detection": {"min_samples": 10, "_why": "exercises orientation batching and row/bbox alignment"},
+    "exif_rotated": {"min_samples": 5, "_why": "EXIF Orientation 3/6/8 phone photos with boxes in the UPRIGHT frame (some valid only upright); the reference is given the upright image WBIA stored"},
     "canonicalization_wrapper": {"min_samples": 10, "_why": "grayscale/RGBA: port on the original vs reference on an externally RGB-converted copy"}
   },
   "fixtures": [
