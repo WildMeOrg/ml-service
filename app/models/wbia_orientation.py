@@ -31,6 +31,7 @@ from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Sequence
 
 import imageio.v2 as imageio
+import imageio.v3 as iio3
 import numpy as np
 import timm
 import torch
@@ -116,6 +117,48 @@ def _canonicalize_rgb(image: np.ndarray) -> np.ndarray:
         f"Unsupported image shape {image.shape}; expected 2-D grayscale or "
         f"(H, W, {{1,3,4}})."
     )
+
+
+# EXIF Orientation -> the transform that makes the STORED pixels upright,
+# applied to the (height, width) axes so it is correct for every mode.
+_EXIF_UPRIGHT = {
+    2: lambda a: a[:, ::-1],                         # mirror horizontal
+    3: lambda a: a[::-1, ::-1],                      # rotate 180
+    4: lambda a: a[::-1, :],                         # mirror vertical
+    5: lambda a: np.swapaxes(a, 0, 1),               # transpose
+    6: lambda a: np.rot90(a, k=-1),                  # rotate 90 clockwise
+    7: lambda a: np.rot90(np.swapaxes(a, 0, 1), k=2),  # transverse
+    8: lambda a: np.rot90(a, k=1),                   # rotate 90 counter-clockwise
+}
+
+
+def _decode_upright(image_bytes: bytes) -> np.ndarray:
+    """Decode exactly as before (imageio: same pixels, 16-bit PNGs kept), then
+    apply the EXIF Orientation tag so the pixels are in the UPRIGHT frame the
+    detector's boxes are in (lightnet decodes with cv2.imdecode, MiewID with
+    decode_image_rgb; both apply it). Without this a portrait phone photo was
+    cropped from the sideways sensor frame. WBIA's normal import rewrote
+    EXIF-rotated images upright (preproc_image.py:193-201) before the plugin
+    read them.
+
+    Not imageio's own rotate=True: pinned imageio 2.37 picks the flip axis from
+    the ORIGINAL mode, so a palette PNG (one band, expanded to RGB) gets its
+    colour channels flipped for tag 2 and the wrong axis for 4/5/7. The tag is
+    read from the same metadata imageio's rotate=True uses.
+
+    Known limit: OpenCV ignores WebP EXIF, so for a tagged WebP the lightnet
+    detector's boxes are in the stored frame. MiewID (decode_image_rgb) is
+    upright either way, so this decode matches the crop that gets embedded;
+    making lightnet upright for WebP is a separate fix.
+    """
+    # One handle for pixels AND metadata, so both describe the same frame:
+    # Pillow applies a TIFF's orientation while loading it and clears the tag,
+    # and re-reading the tag from the original bytes would rotate it twice.
+    # "ri" + legacy_mode is exactly how imageio.v2.imread opens a single image.
+    with iio3.imopen(io.BytesIO(image_bytes), "ri", legacy_mode=True) as f:
+        image = np.asarray(f.read(index=0))
+        orientation = f.metadata(index=0, exclude_applied=False).get("Orientation")
+    return np.ascontiguousarray(_EXIF_UPRIGHT.get(orientation, lambda a: a)(image))
 
 
 def resolve_bbox(bbox: Sequence[float], width: int, height: int) -> List[int]:
@@ -505,10 +548,10 @@ class WbiaOrientationModel(BaseModel):
                 f"wbia-orientation '{self.model_id}': model is not loaded."
             )
         try:
-            decoded = imageio.imread(io.BytesIO(image_bytes))
+            decoded = _decode_upright(image_bytes)
         except Exception as e:
             raise OrientationInferenceError(f"could not decode image: {e}") from e
-        image = _canonicalize_rgb(np.asarray(decoded))
+        image = _canonicalize_rgb(decoded)
         height, width = image.shape[:2]
 
         if not bboxes:

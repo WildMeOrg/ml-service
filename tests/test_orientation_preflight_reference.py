@@ -5,7 +5,9 @@ from pathlib import Path
 import pytest
 
 from scripts.preflight import reference_runner as runner
-from scripts.preflight.run_gate import resolve_reference_root, wbia_localization_boundary
+from scripts.preflight.run_gate import (
+    reference_image, resolve_reference_root, stratum_shortfalls,
+    wbia_localization_boundary)
 
 
 MODULES = ('config/default.py', 'models/cls_hrnet.py', 'utils/utils.py', 'core/evaluate.py')
@@ -72,3 +74,78 @@ def test_reference_gets_the_wbia_clipped_box(bbox, expected):
     """The reference plugin only ever saw boxes WBIA's localizations step had
     clipped, so the gate hands it the same, not the raw detection."""
     assert wbia_localization_boundary(bbox, 2860, 1464) == expected
+
+
+
+@pytest.mark.parametrize("orientation", [2, 3, 4, 5, 6, 7, 8])
+def test_reference_gets_the_upright_image_wbia_stored_for_a_tagged_jpeg(orientation):
+    """WBIA rewrote EXIF-rotated images upright on import, so the reference
+    plugin read upright pixels. The gate hands it the same (lossless PNG of a
+    cv2 decode, as WBIA did) and reports the UPRIGHT size for clipping.
+    Checked against the independent NumPy oracle, block-averaged because cv2
+    and Pillow may round JPEG pixels differently."""
+    import io
+    import imageio.v2 as imageio
+    import numpy as np
+    from PIL import Image
+    from tests.test_exif_orientation_decode import (
+        ORACLE, _block_means, _jpeg_with_orientation, _sensor_pixels)
+
+    tagged = _jpeg_with_orientation(_sensor_pixels(), orientation)       # sensor 120x200
+    data, w, h, tag = reference_image(tagged)
+    expected = ORACLE[orientation](np.array(Image.open(io.BytesIO(tagged)).convert("RGB")))
+    got = np.asarray(imageio.imread(io.BytesIO(data)))
+    assert tag == orientation
+    assert (h, w) == expected.shape[:2]
+    assert np.abs(_block_means(got) - _block_means(expected)).max() < 3
+
+
+def test_untagged_fixture_reaches_the_reference_byte_for_byte():
+    import io
+    from PIL import Image
+    from tests.test_exif_orientation_decode import _sensor_pixels
+    buf = io.BytesIO()
+    Image.fromarray(_sensor_pixels()).save(buf, format="JPEG")
+    data, w, h, tag = reference_image(buf.getvalue())
+    assert data == buf.getvalue() and (w, h) == (200, 120) and tag in (None, 1)
+
+
+def test_tagged_non_jpeg_fixture_is_refused():
+    """cv2 4.8 ignores WebP EXIF and 16-bit PNGs would lose depth: the EXIF
+    parity oracle is only defined for JPEG."""
+    import io
+    import numpy as np
+    from PIL import Image
+    im = Image.fromarray(np.zeros((20, 30, 3), np.uint8))
+    exif = im.getexif()
+    exif[0x0112] = 6
+    buf = io.BytesIO()
+    im.save(buf, format="PNG", exif=exif.tobytes())
+    with pytest.raises(ValueError, match="JPEG"):
+        reference_image(buf.getvalue())
+
+
+
+def test_stratum_minimum_counts_distinct_fixtures_per_checkpoint():
+    rows = [{"stratum": "exif_rotated", "checkpoint": c, "fixture": f}
+            for c in ("a", "b", "c") for f in ("x.jpg", "y.jpg")]
+    rows += [{"stratum": "exif_rotated", "checkpoint": "a", "fixture": "x.jpg"}]  # repeat
+    out = stratum_shortfalls(rows, {"exif_rotated": {"min_samples": 3}}, ["a", "b", "c"])
+    assert len(out) == 3 and all("2 fixtures < required 3" in m for m in out)
+    assert stratum_shortfalls(rows, {"exif_rotated": {"min_samples": 2}}, ["a", "b", "c"]) == []
+
+
+def test_compare_fixture_refuses_an_invalid_exif_tag_in_the_exif_stratum():
+    import io
+    import numpy as np
+    from PIL import Image
+    from scripts.preflight.run_gate import compare_fixture
+    im = Image.fromarray(np.zeros((20, 30, 3), np.uint8))
+    exif = im.getexif()
+    exif[0x0112] = 9                       # not a valid orientation
+    buf = io.BytesIO()
+    im.save(buf, format="JPEG", exif=exif.tobytes())
+    rows, failures = [], []
+    compare_fixture("m", {"file": "f.jpg", "stratum": "exif_rotated", "bbox": [0, 0, 5, 5]},
+                    buf.getvalue(), ref=None, port=None, thr={}, rows=rows, failures=failures)
+    assert rows == [] and "EXIF Orientation is 9" in failures[0]
