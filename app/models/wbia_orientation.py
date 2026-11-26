@@ -145,10 +145,18 @@ def _decode_upright(image_bytes: bytes) -> np.ndarray:
     the ORIGINAL mode, so a palette PNG (one band, expanded to RGB) gets its
     colour channels flipped for tag 2 and the wrong axis for 4/5/7. The tag is
     read from the same metadata imageio's rotate=True uses.
+
+    Known limit: OpenCV ignores WebP EXIF, so for a tagged WebP the lightnet
+    detector's boxes are in the stored frame. MiewID (decode_image_rgb) is
+    upright either way, so this decode matches the crop that gets embedded;
+    making lightnet upright for WebP is a separate fix.
     """
-    image = np.asarray(imageio.imread(io.BytesIO(image_bytes)))
-    orientation = iio3.immeta(io.BytesIO(image_bytes),
-                              exclude_applied=False).get("Orientation")
+    # One handle for pixels AND metadata, so both describe the same frame:
+    # Pillow applies a TIFF's orientation while loading it and clears the tag,
+    # and re-reading the tag from the original bytes would rotate it twice.
+    with iio3.imopen(io.BytesIO(image_bytes), "r") as f:
+        image = np.asarray(f.read(index=0))
+        orientation = f.metadata(index=0, exclude_applied=False).get("Orientation")
     return np.ascontiguousarray(_EXIF_UPRIGHT.get(orientation, lambda a: a)(image))
 
 

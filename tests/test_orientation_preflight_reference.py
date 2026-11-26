@@ -6,7 +6,8 @@ import pytest
 
 from scripts.preflight import reference_runner as runner
 from scripts.preflight.run_gate import (
-    reference_image, resolve_reference_root, wbia_localization_boundary)
+    reference_image, resolve_reference_root, stratum_shortfalls,
+    wbia_localization_boundary)
 
 
 MODULES = ('config/default.py', 'models/cls_hrnet.py', 'utils/utils.py', 'core/evaluate.py')
@@ -122,3 +123,29 @@ def test_tagged_non_jpeg_fixture_is_refused():
     im.save(buf, format="PNG", exif=exif.tobytes())
     with pytest.raises(ValueError, match="JPEG"):
         reference_image(buf.getvalue())
+
+
+
+def test_stratum_minimum_counts_distinct_fixtures_per_checkpoint():
+    rows = [{"stratum": "exif_rotated", "checkpoint": c, "fixture": f}
+            for c in ("a", "b", "c") for f in ("x.jpg", "y.jpg")]
+    rows += [{"stratum": "exif_rotated", "checkpoint": "a", "fixture": "x.jpg"}]  # repeat
+    out = stratum_shortfalls(rows, {"exif_rotated": {"min_samples": 3}}, ["a", "b", "c"])
+    assert len(out) == 3 and all("2 fixtures < required 3" in m for m in out)
+    assert stratum_shortfalls(rows, {"exif_rotated": {"min_samples": 2}}, ["a", "b", "c"]) == []
+
+
+def test_compare_fixture_refuses_an_invalid_exif_tag_in_the_exif_stratum():
+    import io
+    import numpy as np
+    from PIL import Image
+    from scripts.preflight.run_gate import compare_fixture
+    im = Image.fromarray(np.zeros((20, 30, 3), np.uint8))
+    exif = im.getexif()
+    exif[0x0112] = 9                       # not a valid orientation
+    buf = io.BytesIO()
+    im.save(buf, format="JPEG", exif=exif.tobytes())
+    rows, failures = [], []
+    compare_fixture("m", {"file": "f.jpg", "stratum": "exif_rotated", "bbox": [0, 0, 5, 5]},
+                    buf.getvalue(), ref=None, port=None, thr={}, rows=rows, failures=failures)
+    assert rows == [] and "EXIF Orientation is 9" in failures[0]

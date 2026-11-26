@@ -590,3 +590,19 @@ def test_decode_upright_matches_the_exif_oracle_for_every_tag_and_mode(orientati
     data = _tagged(_sensor_pixels(), orientation, fmt, mode)
     sensor = np.asarray(imageio.imread(io.BytesIO(data)))        # stored frame, same decoder
     np.testing.assert_array_equal(_decode_upright(data), ORACLE[orientation](sensor))
+
+
+@pytest.mark.parametrize("pages", [1, 2])
+def test_tagged_tiff_is_rotated_exactly_once(pages):
+    """Pillow applies a TIFF's orientation while loading it and clears the tag;
+    reading the tag again from the original bytes would rotate it twice."""
+    from app.models.wbia_orientation import _decode_upright
+    sensor = _sensor_pixels()                                   # 120 x 200, asymmetric
+    im = Image.fromarray(sensor)
+    exif = im.getexif()
+    exif[0x0112] = 6
+    buf = io.BytesIO()
+    extra = [Image.fromarray(np.zeros_like(sensor))] * (pages - 1)
+    im.save(buf, format="TIFF", exif=exif.tobytes(), save_all=pages > 1, append_images=extra)
+    got = _decode_upright(buf.getvalue())
+    np.testing.assert_array_equal(got, ORACLE[6](sensor))         # page 0, upright, once

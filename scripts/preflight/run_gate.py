@@ -80,6 +80,56 @@ def reference_image(data: bytes):
     return png.tobytes(), w, h, orientation
 
 
+def compare_fixture(model_id, fx, data, ref, port, thr, rows, failures):
+    """Run one fixture through the reference and the port and record the result.
+    The port gets the raw bytes and raw detection; the reference gets what WBIA
+    would have stored: the upright image and the box its localization step
+    clipped to that frame."""
+    name = fx.get("file")
+    ref_data, img_w, img_h, tag = reference_image(data)
+    if fx.get("stratum") == "exif_rotated" and tag not in range(2, 9):
+        failures.append(f"{model_id}/{name}: in exif_rotated but EXIF Orientation is {tag!r}")
+        return
+    ref_bbox = wbia_localization_boundary(fx["bbox"], img_w, img_h)
+    t_ref, c_ref = ref.theta(ref_data, ref_bbox)
+    r = port.predict_batch(data, [fx["bbox"]])[0]
+    e_t = circular_error(t_ref, r["theta"])
+    e_c = max(abs(a - b) for a, b in zip(c_ref, r["coords_normalized"]))
+    rows.append({"checkpoint": model_id, "fixture": name,
+                 "stratum": fx.get("stratum"), "bbox": fx["bbox"],
+                 "reference_bbox": ref_bbox,
+                 "theta_ref": t_ref, "theta_port": r["theta"],
+                 "theta_err": e_t, "coord_err": e_c,
+                 "effective_bbox": r["effective_bbox"]})
+    if e_t > thr["theta_circular_max_rad"]:
+        failures.append(f"{model_id}/{name}: theta err {e_t:.3e}")
+    if e_c > thr["coords_elementwise_max"]:
+        failures.append(f"{model_id}/{name}: coord err {e_c:.3e}")
+    # Same crop, not just similar outputs: the port's effective_bbox must be the
+    # box WBIA would have cropped (full frame when that is empty, animal_wbia.py:25-28).
+    expected_eff = (ref_bbox if ref_bbox[2] > 0 and ref_bbox[3] > 0
+                    else [0, 0, img_w, img_h])
+    if r["effective_bbox"] != expected_eff:
+        failures.append(f"{model_id}/{name}: effective_bbox "
+                        f"{r['effective_bbox']} != WBIA crop {expected_eff}")
+
+
+def stratum_shortfalls(rows, strata, checkpoints):
+    """Per-stratum minimums, counted as DISTINCT fixtures per checkpoint: a gate
+    that silently ran 3 samples (or one fixture three times) is not a gate."""
+    out = []
+    for name, spec in strata.items():
+        if name.startswith("_"):
+            continue
+        need = spec.get("min_samples", 0)
+        for ck in checkpoints or [None]:
+            n = len({r["fixture"] for r in rows
+                     if r["stratum"] == name and r["checkpoint"] == ck})
+            if n < need:
+                out.append(f"stratum '{name}' on {ck}: {n} fixtures < required {need}")
+    return out
+
+
 def resolve_reference_root(manifest, override=None):
     return override or manifest.get("reference_source", {}).get("path") or "/reference"
 
@@ -123,48 +173,16 @@ def main(argv=None) -> int:
             if fx.get("sha256") not in (None, "", "<fixture byte hash>") and got != fx["sha256"]:
                 failures.append(f"fixture {img} hash mismatch (manifest identity broken)")
                 continue
-            # The port gets the raw bytes and raw detection; the reference gets
-            # what WBIA would have stored: the upright image and the box its
-            # localization step clipped to that frame.
+            # Everything per fixture is recorded against it and the run goes on,
+            # so one bad fixture cannot abort the gate before the artifact.
             try:
-                ref_data, img_w, img_h, tag = reference_image(data)
-            except Exception as e:      # record it against the fixture, keep going
-                failures.append(f"fixture {img}: {e}")
-                continue
-            if fx.get("stratum") == "exif_rotated" and tag in (None, 0, 1):
-                failures.append(f"fixture {img}: in exif_rotated but has no EXIF rotation tag")
-                continue
-            ref_bbox = wbia_localization_boundary(fx["bbox"], img_w, img_h)
-            t_ref, c_ref = ref.theta(ref_data, ref_bbox)
-            r = port.predict_batch(data, [fx["bbox"]])[0]
-            e_t = circular_error(t_ref, r["theta"])
-            e_c = max(abs(a - b) for a, b in zip(c_ref, r["coords_normalized"]))
-            rows.append({"checkpoint": ck["model_id"], "fixture": fx.get("file"),
-                         "stratum": fx.get("stratum"), "bbox": fx["bbox"],
-                         "reference_bbox": ref_bbox,
-                         "theta_ref": t_ref, "theta_port": r["theta"],
-                         "theta_err": e_t, "coord_err": e_c,
-                         "effective_bbox": r["effective_bbox"]})
-            if e_t > thr["theta_circular_max_rad"]:
-                failures.append(f"{ck['model_id']}/{fx.get('file')}: theta err {e_t:.3e}")
-            if e_c > thr["coords_elementwise_max"]:
-                failures.append(f"{ck['model_id']}/{fx.get('file')}: coord err {e_c:.3e}")
-            # Same crop, not just similar outputs: the port's effective_bbox must
-            # be the box WBIA would have cropped (full frame when that is empty,
-            # animal_wbia.py:25-28).
-            expected_eff = (ref_bbox if ref_bbox[2] > 0 and ref_bbox[3] > 0
-                            else [0, 0, img_w, img_h])
-            if r["effective_bbox"] != expected_eff:
-                failures.append(f"{ck['model_id']}/{fx.get('file')}: effective_bbox "
-                                f"{r['effective_bbox']} != WBIA crop {expected_eff}")
+                compare_fixture(ck["model_id"], fx, data, ref, port, thr, rows, failures)
+            except Exception as e:
+                failures.append(f"{ck['model_id']}/{fx.get('file')}: {type(e).__name__}: {e}")
 
     # Enforce per-stratum minimums: a gate that silently ran 3 samples is not a gate.
-    for name, spec in manifest.get("strata", {}).items():
-        if name.startswith("_"):
-            continue
-        n = sum(1 for r in rows if r["stratum"] == name)
-        if n < spec.get("min_samples", 0):
-            failures.append(f"stratum '{name}': {n} samples < required {spec['min_samples']}")
+    failures.extend(stratum_shortfalls(rows, manifest.get("strata", {}),
+                                       [ck["model_id"] for ck in manifest["checkpoints"]]))
 
     if rows:
         print(f"\nworst theta err: {max(r['theta_err'] for r in rows):.3e} "
