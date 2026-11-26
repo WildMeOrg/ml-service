@@ -154,7 +154,8 @@ def _decode_upright(image_bytes: bytes) -> np.ndarray:
     # One handle for pixels AND metadata, so both describe the same frame:
     # Pillow applies a TIFF's orientation while loading it and clears the tag,
     # and re-reading the tag from the original bytes would rotate it twice.
-    with iio3.imopen(io.BytesIO(image_bytes), "r") as f:
+    # "ri" + legacy_mode is exactly how imageio.v2.imread opens a single image.
+    with iio3.imopen(io.BytesIO(image_bytes), "ri", legacy_mode=True) as f:
         image = np.asarray(f.read(index=0))
         orientation = f.metadata(index=0, exclude_applied=False).get("Orientation")
     return np.ascontiguousarray(_EXIF_UPRIGHT.get(orientation, lambda a: a)(image))

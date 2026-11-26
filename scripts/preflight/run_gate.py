@@ -168,7 +168,12 @@ def main(argv=None) -> int:
             if not os.path.isfile(img):
                 failures.append(f"fixture missing: {img}")
                 continue
-            data = open(img, "rb").read()
+            try:
+                with open(img, "rb") as fh:
+                    data = fh.read()
+            except OSError as e:
+                failures.append(f"fixture {img}: {e}")
+                continue
             got = hashlib.sha256(data).hexdigest()
             if fx.get("sha256") not in (None, "", "<fixture byte hash>") and got != fx["sha256"]:
                 failures.append(f"fixture {img} hash mismatch (manifest identity broken)")
