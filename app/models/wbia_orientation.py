@@ -119,24 +119,33 @@ def _canonicalize_rgb(image: np.ndarray) -> np.ndarray:
 
 
 def resolve_bbox(bbox: Sequence[float], width: int, height: int) -> List[int]:
-    """Resolve a detector bbox to the slice the reference would ACTUALLY take.
+    """Resolve a detector bbox to the crop WBIA's orientation plugin ACTUALLY took.
 
-    The reference crops with raw NumPy slicing (`image[y1:y1+h, x1:x1+w]`), which
-    does NOT clamp: a negative origin resolves from the FAR EDGE. Measured on a
-    400px-wide image:
+    Two WBIA stages, in order:
 
-        x1=-20, w=50   -> width 0   (empty)
-        x1=-20, w=500  -> width 20  taken from the image's RIGHT edge
-        x1=380, w=50   -> width 20  (silently truncated)
+      1. Wildbook's lightnet detections went through the `localizations` table,
+         which clips every box to the frame (wbia/core_images.py:1539-1557,
+         `boundary=True` by default; detect_cnn_lightnet cannot override it).
+         The plugin then read those stored, clipped boxes (_plugin.py:309).
+      2. The plugin crops with raw NumPy slicing (`image[y1:y1+h, x1:x1+w]`,
+         animal_wbia.py:21-23).
 
-    So an out-of-image bbox does not fail; it silently describes a region the
-    detector never pointed at. `slice(start, stop).indices(dim)` reproduces
-    exactly what NumPy did, and the resolved slice becomes `effective_bbox` --
-    which classify, extract, and the persisted result must all share, or theta
-    ends up describing a different region than the crop it rotates.
+    Porting (2) without (1) is wrong in a way that never fails: NumPy resolves
+    a negative origin from the FAR EDGE, so a whale shark box hanging 28 px over
+    the top of a 2860x1464 photo ([22, -28, 2839, 1492]) cropped the BOTTOM 28
+    rows, the regressor described that strip, and the persisted box was a sliver
+    (Sharkbook, 2026-11-25). With the clip it is [22, 0, 2838, 1464].
 
-    Returns [x, y, w, h] of the real in-bounds slice; w/h may be 0, which the
-    caller treats as the reference's empty-crop fallback.
+    Integerize first (truncate toward zero, matching the router's detector-box
+    rule; lightnet already emits integer corners), then clip both endpoints of
+    each axis. Clipping the floats first could turn a 1 px crop into 0 px and
+    trigger the full-frame fallback.
+
+    The result becomes `effective_bbox`: the orienter's input crop, and the
+    router's fallback box for a rejected axis-aligned detection. Returns
+    [x, y, w, h] inside the frame; w/h may be 0
+    (box entirely outside), which the caller treats as the reference's
+    empty-crop full-frame fallback.
     """
     if len(bbox) != 4:
         raise OrientationInferenceError(
@@ -148,14 +157,14 @@ def resolve_bbox(bbox: Sequence[float], width: int, height: int) -> List[int]:
                 f"bbox contains a non-finite or non-numeric value: {bbox!r}"
             )
 
-    # Integerize ONCE, truncate-toward-zero, matching pipeline_router.py:218
-    # (`[int(x), int(y), int(width), int(height)]`). The rule matters: int(-0.5)
-    # is 0 but floor(-0.5) is -1, and -1 resolves from the far edge.
+    # Integerize ONCE, truncate-toward-zero, matching the router's
+    # `[int(x), int(y), int(width), int(height)]`.
     x, y, w, h = (int(v) for v in bbox)
 
-    x_start, x_stop, _ = slice(x, x + w).indices(width)
-    y_start, y_stop, _ = slice(y, y + h).indices(height)
-    return [x_start, y_start, max(0, x_stop - x_start), max(0, y_stop - y_start)]
+    # core_images.py:1549-1552: clamp both endpoints of each axis to the frame.
+    x1, x2 = min(max(0, x), width), min(max(0, x + w), width)
+    y1, y2 = min(max(0, y), height), min(max(0, y + h), height)
+    return [x1, y1, max(0, x2 - x1), max(0, y2 - y1)]
 
 
 def _validate_coords(coords: Sequence[float], model_id: str) -> None:

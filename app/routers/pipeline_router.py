@@ -355,11 +355,21 @@ async def run_pipeline(
                                     detail=f"Orientation result {idx} is rejected and "
                                            f"the detector's fallback theta is not a "
                                            f"finite number: {det_theta!r}")
-                            # effective_bbox, not the raw detector box: it is
-                            # the crop orientation actually looked at (NumPy
-                            # slice semantics, empty-crop full-frame fallback),
-                            # already validated as positive ints above.
-                            oriented_selection[idx] = (list(eb), float(det_theta), 'detector')
+                            # Axis-aligned detection (lightnet: always 0.0):
+                            # effective_bbox, the detector box clipped to the
+                            # frame exactly as WBIA's localizations step stored
+                            # it, already validated as positive ints above. The
+                            # raw box can overhang the frame.
+                            # Rotated detection: clipping one side would move the
+                            # rotation centre, so keep the detector's own
+                            # rectangle with its angle, integerized as the
+                            # no-orienter path does.
+                            fb_bbox = list(eb)
+                            if float(det_theta) != 0.0:
+                                raw = [int(v) for v in filtered_bboxes[idx]['bbox']]
+                                if raw[2] >= 1 and raw[3] >= 1:
+                                    fb_bbox = raw
+                            oriented_selection[idx] = (fb_bbox, float(det_theta), 'detector')
                             continue
                         # The object-aligned box is what gets persisted AND
                         # cropped, so it is validated as strictly as theta --

@@ -29,7 +29,7 @@
     "rgb_jpeg_downscale": {"min_samples": 20, "_why": "crop >> 224; skimage's anti-alias prefilter only engages downscaling"},
     "rgb_jpeg_upscale": {"min_samples": 10, "_why": "crop << 224; different interpolation regime"},
     "extreme_aspect": {"min_samples": 10, "_why": "resize distortion feeds theta"},
-    "bbox_edge_degenerate": {"min_samples": 10, "_why": "exercises the reload-full-image fallback and NumPy's non-clamping slice"},
+    "bbox_edge_degenerate": {"min_samples": 10, "_why": "exercises the reload-full-image fallback and WBIA's localization clip (boxes overhanging the frame; the reference is given the WBIA-clipped box)"},
     "multi_detection": {"min_samples": 10, "_why": "exercises orientation batching and row/bbox alignment"},
     "canonicalization_wrapper": {"min_samples": 10, "_why": "grayscale/RGBA: port on the original vs reference on an externally RGB-converted copy"}
   },

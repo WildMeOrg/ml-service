@@ -33,6 +33,19 @@ def sha256(path: str) -> str:
     return h.hexdigest()
 
 
+def wbia_localization_boundary(bbox, width, height):
+    """What WBIA stored for a Wildbook lightnet detection, and so what the
+    reference plugin later read via get_annot_bboxes: the `localizations` table
+    clips every box to the frame (wbia/core_images.py:1539-1557, boundary=True).
+    Transcribed independently of the port's resolve_bbox, so the gate compares
+    the port's whole path (clip + slice) against WBIA's whole path."""
+    xtl, ytl, w, h = (int(v) for v in bbox)
+    xbr, ybr = xtl + w, ytl + h
+    xtl, xbr = min(max(0, xtl), width), min(max(0, xbr), width)
+    ytl, ybr = min(max(0, ytl), height), min(max(0, ybr), height)
+    return [xtl, ytl, xbr - xtl, ybr - ytl]
+
+
 def resolve_reference_root(manifest, override=None):
     return override or manifest.get("reference_source", {}).get("path") or "/reference"
 
@@ -76,12 +89,18 @@ def main(argv=None) -> int:
             if fx.get("sha256") not in (None, "", "<fixture byte hash>") and got != fx["sha256"]:
                 failures.append(f"fixture {img} hash mismatch (manifest identity broken)")
                 continue
-            t_ref, c_ref = ref.theta(data, fx["bbox"])
+            # The port gets the raw detection; the reference gets what WBIA's
+            # localization step would have stored for it.
+            import imageio.v2 as imageio
+            img_h, img_w = imageio.imread(data).shape[:2]
+            ref_bbox = wbia_localization_boundary(fx["bbox"], img_w, img_h)
+            t_ref, c_ref = ref.theta(data, ref_bbox)
             r = port.predict_batch(data, [fx["bbox"]])[0]
             e_t = circular_error(t_ref, r["theta"])
             e_c = max(abs(a - b) for a, b in zip(c_ref, r["coords_normalized"]))
             rows.append({"checkpoint": ck["model_id"], "fixture": fx.get("file"),
                          "stratum": fx.get("stratum"), "bbox": fx["bbox"],
+                         "reference_bbox": ref_bbox,
                          "theta_ref": t_ref, "theta_port": r["theta"],
                          "theta_err": e_t, "coord_err": e_c,
                          "effective_bbox": r["effective_bbox"]})
@@ -89,6 +108,14 @@ def main(argv=None) -> int:
                 failures.append(f"{ck['model_id']}/{fx.get('file')}: theta err {e_t:.3e}")
             if e_c > thr["coords_elementwise_max"]:
                 failures.append(f"{ck['model_id']}/{fx.get('file')}: coord err {e_c:.3e}")
+            # Same crop, not just similar outputs: the port's effective_bbox must
+            # be the box WBIA would have cropped (full frame when that is empty,
+            # animal_wbia.py:25-28).
+            expected_eff = (ref_bbox if ref_bbox[2] > 0 and ref_bbox[3] > 0
+                            else [0, 0, img_w, img_h])
+            if r["effective_bbox"] != expected_eff:
+                failures.append(f"{ck['model_id']}/{fx.get('file')}: effective_bbox "
+                                f"{r['effective_bbox']} != WBIA crop {expected_eff}")
 
     # Enforce per-stratum minimums: a gate that silently ran 3 samples is not a gate.
     for name, spec in manifest.get("strata", {}).items():

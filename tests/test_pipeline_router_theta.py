@@ -441,12 +441,13 @@ RAW_DETECTOR_BOX = [45, 20, 60, 50]
 CLIPPED_EFF = [45, 20, 55, 50]
 
 
-def _two_rows_second_rejected(detector_theta=0.0, coords=None):
+def _two_rows_second_rejected(detector_theta=0.0, coords=None, raw_bbox=RAW_DETECTOR_BOX,
+                              eff=CLIPPED_EFF):
     pm, cm, em = _models(n_bboxes=2)
-    pm.predict.return_value["predictions"][1]["bbox"] = RAW_DETECTOR_BOX
+    pm.predict.return_value["predictions"][1]["bbox"] = raw_bbox
     pm.predict.return_value["predictions"][1]["theta"] = detector_theta
     om = _orientation([0.2, 0.3],
-                      effective_bboxes=[[10, 10, 50, 50], CLIPPED_EFF],
+                      effective_bboxes=[[10, 10, 50, 50], eff],
                       oriented_bboxes=[[12.0, 18.0, 44.0, 20.0], SLIVER],
                       rejected={1: ["sub_pixel", "aspect"]})
     if coords == "MISSING":
@@ -477,19 +478,40 @@ def test_implausible_row_falls_back_for_that_detection_only():
     assert bad["orientation_coords_normalized"] == [0.5] * 5
 
 
-@pytest.mark.parametrize("detector_theta", [0.0, 0.35])
-def test_consumers_get_the_same_fallback_box_and_theta_that_are_emitted(detector_theta):
+@pytest.mark.parametrize("detector_theta,expected_bbox", [
+    # Axis-aligned (lightnet, always 0.0): the frame-clipped crop, as WBIA stored it.
+    (0.0, CLIPPED_EFF),
+    # Rotated detector box: clipping one side would move its rotation centre,
+    # so the detector's own rectangle and angle are kept together, integerized.
+    (0.35, [45, 20, 60, 50]),
+])
+def test_consumers_get_the_same_fallback_box_and_theta_that_are_emitted(
+        detector_theta, expected_bbox):
     """The embedding and the persisted box must describe the same region, at
-    the detector's own theta -- as if no orienter were configured (lightnet's
-    is always 0.0)."""
+    the detector's own theta -- as if no orienter were configured."""
     r, cm, em = _two_rows_second_rejected(detector_theta=detector_theta)
     bad = r.json()["results"][1]
 
-    assert bad["bbox"] == CLIPPED_EFF
+    assert bad["bbox"] == expected_bbox
     assert bad["theta"] == pytest.approx(detector_theta)
     for call in (cm.predict.call_args_list[1], em.extract_embeddings.call_args_list[1]):
-        assert list(call.kwargs["bbox"]) == CLIPPED_EFF
+        assert list(call.kwargs["bbox"]) == expected_bbox
         assert call.kwargs["theta"] == pytest.approx(detector_theta)
+
+
+def test_rotated_fallback_with_a_sub_pixel_detector_box_uses_the_clipped_crop():
+    """A rotated detector box that integerizes to < 1 px is not a box; fall back
+    to the crop orientation actually looked at -- for a zero-width box, the
+    orienter's full-frame fallback."""
+    full = [0, 0, 100, 80]
+    r, cm, em = _two_rows_second_rejected(detector_theta=0.35, raw_bbox=[45, 20, 0.6, 50],
+                                          eff=full)
+    assert r.status_code == 200, r.text
+    bad = r.json()["results"][1]
+    assert bad["bbox"] == full and bad["theta"] == pytest.approx(0.35)
+    for call in (cm.predict.call_args_list[1], em.extract_embeddings.call_args_list[1]):
+        assert list(call.kwargs["bbox"]) == full
+        assert call.kwargs["theta"] == pytest.approx(0.35)
 
 
 @pytest.mark.parametrize("detector_theta", [float("nan"), float("inf"), "x", True])

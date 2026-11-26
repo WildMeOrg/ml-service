@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from scripts.preflight import reference_runner as runner
-from scripts.preflight.run_gate import resolve_reference_root
+from scripts.preflight.run_gate import resolve_reference_root, wbia_localization_boundary
 
 
 MODULES = ('config/default.py', 'models/cls_hrnet.py', 'utils/utils.py', 'core/evaluate.py')
@@ -59,3 +59,16 @@ def test_failed_import_cleans_up_module_namespace(tmp_path):
     with pytest.raises(RuntimeError, match='broken'):
         runner.load_reference(tmp_path)
     assert {name for name in sys.modules if name.startswith('wd_')} == before
+
+
+
+@pytest.mark.parametrize("bbox,expected", [
+    ([22, -28, 2839, 1492], [22, 0, 2838, 1464]),   # Sharkbook guam2 overhang
+    ([10, 10, 50, 50], [10, 10, 50, 50]),
+    ([-20, 10, 500, 50], [0, 10, 480, 50]),
+    ([3000, 10, 50, 50], [2860, 10, 0, 50]),          # fully outside -> empty
+])
+def test_reference_gets_the_wbia_clipped_box(bbox, expected):
+    """The reference plugin only ever saw boxes WBIA's localizations step had
+    clipped, so the gate hands it the same, not the raw detection."""
+    assert wbia_localization_boundary(bbox, 2860, 1464) == expected
